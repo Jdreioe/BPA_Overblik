@@ -261,6 +261,26 @@ class PlannerTests(unittest.TestCase):
 
         self.assertEqual(Outcome.ALREADY_MATCHED, adopted)
 
+    def test_overlap_conflict_names_the_colliding_shift(self) -> None:
+        shift = source_shift(comment=None)
+        collision = MitHfShift(
+            "441306",
+            moment("2026-09-14T07:00:00+02:00"),
+            moment("2026-09-14T14:00:00+02:00"),
+            1,
+            "Mit Helper",
+        )
+        plan = self.plan(shift, DestinationSnapshot(mithf_shifts=(collision,)))
+        create = next(
+            item for item in plan.items if item.step_key == "mithf.create_shift"
+        )
+
+        self.assertEqual(Outcome.CONFLICTED, create.outcome)
+        self.assertIn("441306", create.summary)
+        self.assertIn("2026-09-14T07:00:00+02:00", create.summary)
+        self.assertIn("Mit Helper", create.summary)
+        self.assertIn(shift.starts_at.isoformat(), create.summary)
+
     def record_created_shift(self, state, shift, destination_id: str) -> None:
         state.record_step(
             source_key=shift.key,

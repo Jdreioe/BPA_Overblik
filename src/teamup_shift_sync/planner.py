@@ -397,7 +397,8 @@ def _reconcile_mithf_shift(
         return (
             None,
             Outcome.CONFLICTED,
-            "Multiple MitHF shifts match; destination identity is not unique",
+            "Multiple MitHF shifts match; destination identity is not unique: "
+            + _describe_shifts(exact),
         )
     if record and record.status == "uncertain":
         return (
@@ -405,17 +406,34 @@ def _reconcile_mithf_shift(
             Outcome.CONFLICTED,
             "Previous MitHF request has an uncertain outcome; manual reconciliation required",
         )
-    if any(
-        item.starts_at < datetime.fromisoformat(expected["ends_at"])
-        and item.ends_at > datetime.fromisoformat(expected["starts_at"])
+    overlapping = [
+        item
         for item in candidates
-    ):
+        if item.starts_at < datetime.fromisoformat(expected["ends_at"])
+        and item.ends_at > datetime.fromisoformat(expected["starts_at"])
+    ]
+    if overlapping:
         return (
             None,
             Outcome.CONFLICTED,
-            "Existing MitHF shifts overlap the source interval; review split or changed shifts before creating another",
+            "Existing MitHF shifts overlap the source interval "
+            f"{expected['starts_at']} to {expected['ends_at']}; review split or "
+            "changed shifts before creating another: " + _describe_shifts(overlapping),
         )
     return None, Outcome.WOULD_CREATE, "Would create the MitHF shift"
+
+
+def _describe_shifts(shifts: Iterable[MitHfShift]) -> str:
+    """Name the destination shifts behind a conflict that has no single match.
+
+    These conflicts report no destination_id, so without the candidates there is
+    nothing in the report to look up in MitHF.
+    """
+    return "; ".join(
+        f"{shift.id} {shift.starts_at.isoformat()} to {shift.ends_at.isoformat()}"
+        + (f" ({shift.helper_name})" if shift.helper_name else "")
+        for shift in sorted(shifts, key=lambda shift: shift.starts_at)
+    )
 
 
 def _reconcile_duos(
