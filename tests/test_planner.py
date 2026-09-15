@@ -233,6 +233,63 @@ class PlannerTests(unittest.TestCase):
         duos = next(item for item in plan.items if item.system == "duos")
         self.assertEqual(Outcome.REVIEW, duos.outcome)
 
+    def test_forgetting_a_deleted_shift_lets_teamup_recreate_it(self) -> None:
+        shift = source_shift(comment=None)
+        with SyncState(":memory:") as state:
+            self.record_created_shift(state, shift, "deleted-by-hand")
+            before = self.create_outcome(state, shift, DestinationSnapshot())
+            forgotten = state.forget_steps(shift.key)
+            after = self.create_outcome(state, shift, DestinationSnapshot())
+
+        self.assertEqual(Outcome.CONFLICTED, before)
+        self.assertEqual(("mithf.create_shift",), forgotten)
+        self.assertEqual(Outcome.WOULD_CREATE, after)
+
+    def test_forgetting_adopts_a_surviving_shift_without_duplicating(self) -> None:
+        shift = source_shift(comment=None)
+        survivor = DestinationSnapshot(
+            mithf_shifts=(
+                MitHfShift(
+                    "still-there", shift.starts_at, shift.ends_at, 1, "Mit Helper"
+                ),
+            )
+        )
+        with SyncState(":memory:") as state:
+            self.record_created_shift(state, shift, "renamed-by-mithf")
+            state.forget_steps(shift.key)
+            adopted = self.create_outcome(state, shift, survivor)
+
+        self.assertEqual(Outcome.ALREADY_MATCHED, adopted)
+
+    def record_created_shift(self, state, shift, destination_id: str) -> None:
+        state.record_step(
+            source_key=shift.key,
+            step_key="mithf.create_shift",
+            status="verified",
+            destination_id=destination_id,
+            source_hash="source",
+            synced_payload={
+                "starts_at": shift.starts_at.isoformat(),
+                "ends_at": shift.ends_at.isoformat(),
+                "helper_count": 1,
+            },
+            updated_at=self.now,
+        )
+
+    def create_outcome(self, state, shift, destination) -> Outcome:
+        plan = build_plan(
+            config=config(),
+            shifts=(shift,),
+            destination=destination,
+            range_start=self.range_start,
+            range_end=self.range_end,
+            now=self.now,
+            state=state,
+        )
+        return next(
+            item.outcome for item in plan.items if item.step_key == "mithf.create_shift"
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

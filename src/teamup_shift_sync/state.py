@@ -141,6 +141,25 @@ class SyncState:
             for row in rows
         )
 
+    def forget_steps(self, source_key: str) -> tuple[str, ...]:
+        """Drop every stored step for one source shift and report what was removed.
+
+        Used when a destination record was deleted by hand and should be
+        rebuilt from TeamUp. Forgetting is not the same as forcing a write: with
+        no stored step the planner falls back to matching by value, so a
+        destination record that still exists is adopted instead of duplicated,
+        and an overlapping or ambiguous one still conflicts.
+        """
+        rows = self.connection.execute(
+            "SELECT step_key FROM sync_steps WHERE source_key = ? ORDER BY step_key",
+            (source_key,),
+        ).fetchall()
+        self.connection.execute(
+            "DELETE FROM sync_steps WHERE source_key = ?", (source_key,)
+        )
+        self.connection.commit()
+        return tuple(row["step_key"] for row in rows)
+
     def record_step(
         self,
         *,

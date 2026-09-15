@@ -32,6 +32,8 @@ def main(argv: list[str] | None = None) -> int:
             return _init(args)
         if args.command in {"dry-run", "apply"}:
             return _dry_run(args)
+        if args.command == "forget":
+            return _forget(args)
         if args.command == "teamup-probe":
             return _teamup_probe(args)
         if args.command == "check-config":
@@ -104,6 +106,19 @@ def _parser() -> argparse.ArgumentParser:
         "--approve",
         required=True,
         help="Exact plan digest from the reviewed live dry-run",
+    )
+
+    forget = commands.add_parser(
+        "forget",
+        help="Drop stored sync records for a shift so TeamUp is synchronized again",
+    )
+    forget.add_argument("--state", type=Path, default=Path(".local/sync.sqlite3"))
+    forget.add_argument(
+        "--shift",
+        nargs="+",
+        required=True,
+        metavar="SOURCE_KEY",
+        help="Source keys as printed in the plan report (calendar:event:occurrence)",
     )
 
     probe = commands.add_parser(
@@ -319,6 +334,27 @@ def _live_source_plan(
                 )
             )
     return SyncPlan(range_start, range_end, now, tuple(items))
+
+
+def _forget(args: argparse.Namespace) -> int:
+    """Forget stored steps so the next plan rebuilds them from TeamUp.
+
+    This only clears local memory of what was synchronized. It never writes to
+    MitHF or DUOS, and the next dry-run still has to be reviewed and approved.
+    """
+    with SyncState(args.state) as state, state.exclusive_apply():
+        forgotten = {key: state.forget_steps(key) for key in args.shift}
+    for key, steps in forgotten.items():
+        print(f"{key}: {', '.join(steps) if steps else 'no stored records'}")
+    if not any(forgotten.values()):
+        sys.stdout.flush()
+        print("No stored records matched; nothing was forgotten.", file=sys.stderr)
+        return 1
+    print(
+        "Run dry-run again to review the rebuilt plan. Destination records that "
+        "still exist are matched by value, not created a second time."
+    )
+    return 0
 
 
 def _teamup_probe(args: argparse.Namespace) -> int:

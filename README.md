@@ -52,6 +52,31 @@ A dry-run reads the destination snapshot in its fixture and existing SQLite
 sync records. It only creates the SQLite schema if needed; it never records a
 successful step and never writes to external services.
 
+## Re-synchronize a shift deleted by hand
+
+If a MitHF shift or DUOS registration that was previously synchronized is
+deleted directly in the destination, the plan reports it as `conflicted` and
+will not recreate it. That guard is deliberate: a deletion is usually a decision
+someone made on purpose, and the tool never silently undoes it.
+
+When the deletion was a mistake and TeamUp should win, forget the stored records
+for those shifts. Use the source keys printed in the report:
+
+```bash
+.venv/bin/teamup-shift-sync forget \
+  --state .local/sync.sqlite3 \
+  --shift 7e254c8bb3604748507391f8:2145427873:2145427873 \
+           7e254c8bb3604748507391f8:2145427874:2145427874
+```
+
+`forget` only clears local memory of what was synchronized. It never contacts
+MitHF or DUOS, and the next dry-run still has to be reviewed and approved before
+anything is written.
+
+Forgetting is not a force flag. With no stored step the planner falls back to
+matching by value, so a destination record that still exists is adopted rather
+than created twice, and an overlapping or ambiguous one still conflicts.
+
 ## Probe real TeamUp access (read-only)
 
 For a real source preview, run `teamup-shift-sync dry-run --live --from
