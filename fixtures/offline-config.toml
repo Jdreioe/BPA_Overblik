@@ -1,0 +1,26 @@
+timezone = "Europe/Copenhagen"
+default_helper_count = 1
+
+[teamup]
+calendar_key = "fixture-calendar"
+api_key = "fixture-only"
+bearer_token = ""
+helper_field = "who"
+
+[duos]
+arrangement_id = "fixture-arrangement"
+registration_type = "Almindelig"
+
+[[helpers]]
+teamup_key = "fixture-zain"
+teamup_display_name = "Zain Fixture"
+mithf_name = "Zain Alnemr"
+duos_name = "Zain Alnemr"
+duos_employee_number = "281550"
+
+[[helpers]]
+teamup_key = "fixture-anton"
+teamup_display_name = "Anton Fixture"
+mithf_name = "Anton Skadhede"
+duos_name = "Anton Skadhede"
+duos_employee_number = "281549"

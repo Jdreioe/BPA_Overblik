@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "teamup-shift-sync"
+version = "0.1.0"
+description = "A manually triggered TeamUp to MitHF and DUOS shift importer"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["ruff>=0.13,<1"]
+browser = ["playwright>=1.55,<2"]
+
+[project.scripts]
+teamup-shift-sync = "teamup_shift_sync.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+teamup_shift_sync = ["*.js"]

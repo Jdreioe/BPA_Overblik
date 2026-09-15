@@ -1,0 +1,148 @@
+# TeamUp shift sync
+
+A local, manually triggered weekly importer for planning TeamUp helper shifts in
+MitHF and registering completed SPS intervals in DUOS.
+
+The first runnable milestone is deliberately offline. It implements
+configuration, typed source/destination models, deterministic `uni` parsing,
+reconciliation, resumable SQLite state, and a dry-run report. It cannot make
+live MitHF or DUOS changes yet.
+
+A read-only TeamUp API client and access probe are included. Event, description,
+and comment access were verified against the configured calendar on 2026-09-15.
+A real `uni` instruction in an event description was parsed end to end on that
+date, including its Danish weekday suffix.
+
+## Set up
+
+Python 3.12 or newer is required.
+
+```bash
+cd /home/jdreioe/Projects/Vagtplanlaegning/teamup-shift-sync
+python3 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -e '.[dev]'
+.venv/bin/teamup-shift-sync init
+```
+
+`init` refuses to overwrite `config.toml`. Both that file and `.local/` are
+ignored by Git. Do not commit API keys or browser session data.
+
+## Run the representative dry-run
+
+This fixture demonstrates an existing MitHF shift, one existing DUOS interval,
+one new DUOS interval, an overnight shift, and an ambiguous undated SPS comment
+on a multi-day shift.
+
+```bash
+.venv/bin/teamup-shift-sync dry-run \
+  --config fixtures/offline-config.toml \
+  --fixture fixtures/representative-week.json \
+  --state .local/offline.sqlite3 \
+  --from 2026-09-14 \
+  --to 2026-09-20 \
+  --now 2026-09-20T20:00:00+02:00
+```
+
+Without `--from` and `--to`, the preview proposes the current local
+Monday-through-Sunday week. The end of the displayed range is exclusive
+internally, which lets shifts spanning midnight be selected correctly.
+
+A dry-run reads the destination snapshot in its fixture and existing SQLite
+sync records. It only creates the SQLite schema if needed; it never records a
+successful step and never writes to external services.
+
+## Probe real TeamUp access (read-only)
+
+For a real source preview, run `teamup-shift-sync dry-run --live --from
+2026-09-14 --to 2026-09-20`. This reads events, descriptions, and comments
+without creating
+SQLite progress records. It shows resolved helper shifts and separate SPS
+intervals. Destination reconciliation is explicitly **pending**, not assumed
+empty: this preview cannot yet tell you which live records need creating.
+Calendar capability keys are hashed before being used as report identities.
+
+The CLI automatically reads supported TeamUp variables from `.env` beside the
+config file or in its parent folder. The current `TEAMUP_API` variable supplies
+the developer API key; `teamup.calendar_key` in ignored `config.toml` or a
+`TEAMUP_CALENDAR_KEY` variable supplies the calendar reference.
+
+```bash
+.venv/bin/teamup-shift-sync teamup-probe \
+  --from 2026-09-14 \
+  --to 2026-09-20
+```
+
+The probe makes GET requests only. It reads the weekly event list, then the
+official single-event endpoint for each occurrence so comment access is checked
+explicitly. It prints counts only—never event titles, helper names, or comment
+text. `TEAMUP_BEARER_TOKEN` is supported if the calendar key alone lacks read
+permission.
+
+## Supported SPS instruction grammar
+
+Helper identity is resolved from the event's TeamUp subcalendar ID using
+`teamup.helper_subcalendars` in local configuration. The seven helper mappings
+provided by Jonas are configured locally. An event must match exactly one
+helper subcalendar; zero or multiple matches require review. Destination
+identities remain separate `helpers` entries keyed by the same subcalendar ID.
+Source mappings alone do not establish MitHF names or DUOS employee numbers.
+
+Titles starting with `Husk at checke …` are shared reminders, not shifts.
+They are reported as excluded before helper matching or SPS parsing, in both
+live and fixture previews. Matching ignores surrounding whitespace and case.
+
+An exact `P-MØDE` title (ignoring case and surrounding whitespace) maps to
+MitHF `Vagtmøde` for the event's interval. It does not imply SPS or DUOS hours.
+Category application/read-back is pending; multi-helper events still require
+assignment review.
+
+SPS instructions are read from the event description, which is where the
+calendar actually carries them, and from event comments. Both sources are
+parsed; intervals from either are kept, and an interval written in both places
+is planned once. One instruction per line:
+
+```text
+uni 8-10 & 13-14
+uni 12-14 fredag
+uni 2026-09-15 08:00-10:00 & 13:00-14:00
+```
+
+`&` preserves separate intervals. A day may be named with an ISO date or a
+Danish weekday — full name or abbreviation, case-insensitive, with or without
+`ø` and a trailing period (`fredag`, `fre`, `Fre.`, `lør`, `lor`). A named
+weekday must resolve to exactly one local date inside the shift; a shift long
+enough to contain that weekday twice requires an ISO date.
+
+An undated instruction is accepted only when the source shift belongs to one
+local date. For a shift spanning multiple local dates, name a day or the item
+is flagged for review. Unsupported syntax, overlaps, times outside the source
+shift, and ambiguous/nonexistent DST clock times are never guessed.
+
+DUOS entries are planned only after their interval has ended. Multiple SPS
+intervals remain independent DUOS steps. They are preserved for MitHF but
+reported as `pending_mithf_bug`; they are never merged into one interval.
+
+## Tests
+
+The offline suite uses Python's standard library, so it has no package download
+prerequisite:
+
+```bash
+.venv/bin/python -m unittest discover -s tests -v
+```
+
+## Live integration gates
+
+Before apply mode can be enabled, the following must be completed:
+
+1. Verify remaining TeamUp edge cases with real examples: a moved recurrence
+   exception, and a shift overlapping the first boundary of the requested week.
+   A real `uni` instruction in an event description is now covered.
+2. Validate TeamUp helper identities against the configured MitHF and DUOS
+   identities. Screenshot candidates are not treated as confirmed mappings.
+3. Inspect authenticated MitHF and DUOS forms to obtain stable selectors and
+   read-back behavior. In particular, MitHF SPS editing and DUOS save versus
+   approval are still unknown.
+4. Get authorization for the concrete live batch. Merely running a dry-run is
+   never authorization to submit it.
