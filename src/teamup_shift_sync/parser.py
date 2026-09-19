@@ -96,12 +96,22 @@ def parse_sps_instructions(shift: SourceShift, timezone: ZoneInfo) -> SpsParseRe
                 offset = (_WEEKDAYS[weekday.casefold()] - local_start.weekday()) % 7
                 interval_day = local_start.date() + timedelta(days=offset)
                 if interval_day > local_end_inclusive.date():
-                    issues.append(ParseIssue("uni_weekday_outside_shift",
-                        "The named weekday is outside the source shift", source_id))
+                    issues.append(
+                        ParseIssue(
+                            "uni_weekday_outside_shift",
+                            "The named weekday is outside the source shift",
+                            source_id,
+                        )
+                    )
                     continue
                 if interval_day + timedelta(days=7) <= local_end_inclusive.date():
-                    issues.append(ParseIssue("ambiguous_uni_weekday",
-                        "The shift contains this weekday more than once; use an ISO date", source_id))
+                    issues.append(
+                        ParseIssue(
+                            "ambiguous_uni_weekday",
+                            "The shift contains this weekday more than once; use an ISO date",
+                            source_id,
+                        )
+                    )
                     continue
             elif implicit_day is not None:
                 interval_day = implicit_day
@@ -116,8 +126,13 @@ def parse_sps_instructions(shift: SourceShift, timezone: ZoneInfo) -> SpsParseRe
                 continue
 
             if weekday and interval_day.weekday() != _WEEKDAYS[weekday.casefold()]:
-                issues.append(ParseIssue("conflicting_uni_date",
-                    "The explicit date and weekday disagree", source_id))
+                issues.append(
+                    ParseIssue(
+                        "conflicting_uni_date",
+                        "The explicit date and weekday disagree",
+                        source_id,
+                    )
+                )
                 continue
 
             tokens = re.split(r"\s*&\s*", match.group("body"))

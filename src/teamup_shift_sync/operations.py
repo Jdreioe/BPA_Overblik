@@ -10,17 +10,23 @@ worker in ``worker.py`` exposes them to the Rust shell.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from .browser import BrowserTransport
 from .config import AppConfig, ConfigError, configuration_issues, load_config
+from .destinations import Destinations
 from .fixtures import load_fixture
-from .models import Outcome, SyncPlan
+from .models import Outcome, PlanItem, SyncPlan
+from .parser import parse_sps_instructions
 from .planner import build_plan
+from .source_rules import is_reminder, meeting_item
 from .state import SyncState
-from .sync import BLOCKERS, plan_digest
+from .sync import BLOCKERS, apply_plan, plan_digest, reconciliation_range
+from .teamup import TeamUpClient, TeamUpError
 
 #: Protocol version spoken by the JSON worker. Bump on breaking changes.
 WORKER_PROTOCOL_VERSION = 1
@@ -39,6 +45,13 @@ class FixturePreview:
     plan: SyncPlan
     digest: str
     has_conflicts: bool
+
+
+@dataclass(frozen=True)
+class LivePreview:
+    plan: SyncPlan
+    digest: str
+    has_blockers: bool
 
 
 @dataclass(frozen=True)
@@ -147,6 +160,248 @@ def fixture_preview_from_paths(
         to_date=to_date,
         now=now,
     )
+
+
+def preview_live(
+    *,
+    config: AppConfig,
+    state_path: Path,
+    from_date: date,
+    to_date: date,
+    now: datetime,
+    cdp_url: str | None = None,
+) -> LivePreview:
+    """Build a live source preview, with destination reconciliation when connected."""
+    week = resolve_week(
+        timezone_name=config.timezone,
+        now=now,
+        from_date=from_date,
+        to_date=to_date,
+    )
+    client = TeamUpClient(config)
+    occurrences = tuple(client.fetch_occurrences(from_date, to_date))
+    if not cdp_url:
+        plan = _source_only_plan(config, client, occurrences, week, now)
+        return LivePreview(
+            plan=plan,
+            digest=plan_digest(plan),
+            has_blockers=any(item.outcome == Outcome.REVIEW for item in plan.items),
+        )
+
+    issues = configuration_issues(config)
+    if issues:
+        raise ConfigError("; ".join(issues))
+    shifts = tuple(
+        client.to_source_shift(occurrence, config.teamup_helper_field)
+        for occurrence in occurrences
+        if not is_reminder(occurrence.title)
+    )
+    with BrowserTransport(cdp_url) as transport, SyncState(state_path) as state:
+        destinations = Destinations(transport, config)
+        destinations.validate(week.range_start)
+        destination = destinations.read(
+            *reconciliation_range(shifts, week.range_start, week.range_end)
+        )
+        plan = build_plan(
+            config=config,
+            shifts=shifts,
+            destination=destination,
+            range_start=week.range_start,
+            range_end=week.range_end,
+            now=now,
+            state=state,
+            live=True,
+        )
+    return LivePreview(
+        plan=plan,
+        digest=plan_digest(plan),
+        has_blockers=any(item.outcome in BLOCKERS for item in plan.items),
+    )
+
+
+def preview_live_from_paths(
+    *,
+    config_path: Path,
+    state_path: Path,
+    from_date: date,
+    to_date: date,
+    now: datetime,
+    cdp_url: str | None = None,
+) -> LivePreview:
+    return preview_live(
+        config=load_config(config_path),
+        state_path=state_path,
+        from_date=from_date,
+        to_date=to_date,
+        now=now,
+        cdp_url=cdp_url,
+    )
+
+
+def apply_live(
+    *,
+    config: AppConfig,
+    state_path: Path,
+    from_date: date,
+    to_date: date,
+    expected_digest: str,
+    cdp_url: str,
+    now: datetime,
+    progress: Callable[[str], None] = print,
+) -> None:
+    """Rebuild, apply, and verify one approved live plan."""
+    issues = configuration_issues(config)
+    if issues:
+        raise ConfigError("; ".join(issues))
+    week = resolve_week(
+        timezone_name=config.timezone,
+        now=now,
+        from_date=from_date,
+        to_date=to_date,
+    )
+    client = TeamUpClient(config)
+    shifts = tuple(
+        client.to_source_shift(occurrence, config.teamup_helper_field)
+        for occurrence in client.fetch_occurrences(from_date, to_date)
+        if not is_reminder(occurrence.title)
+    )
+    with BrowserTransport(cdp_url) as transport, SyncState(state_path) as state:
+        destinations = Destinations(transport, config)
+        destinations.validate(week.range_start)
+        apply_plan(
+            config=config,
+            shifts=shifts,
+            destinations=destinations,
+            state=state,
+            start=week.range_start,
+            end=week.range_end,
+            expected_digest=expected_digest,
+            now=now,
+            progress=progress,
+        )
+
+
+def apply_live_from_paths(
+    *,
+    config_path: Path,
+    state_path: Path,
+    from_date: date,
+    to_date: date,
+    expected_digest: str,
+    cdp_url: str,
+    now: datetime,
+    progress: Callable[[str], None] = print,
+) -> None:
+    apply_live(
+        config=load_config(config_path),
+        state_path=state_path,
+        from_date=from_date,
+        to_date=to_date,
+        expected_digest=expected_digest,
+        cdp_url=cdp_url,
+        now=now,
+        progress=progress,
+    )
+
+
+def _source_only_plan(
+    config: AppConfig,
+    client: TeamUpClient,
+    occurrences: tuple,
+    week: WeekRange,
+    now: datetime,
+) -> SyncPlan:
+    items: list[PlanItem] = []
+    for occurrence in occurrences:
+        if (
+            occurrence.ends_at <= week.range_start
+            or occurrence.starts_at >= week.range_end
+        ):
+            continue
+        key = f"{client.calendar_id}:{occurrence.series_id}:{occurrence.id}"
+        if is_reminder(occurrence.title):
+            items.append(
+                PlanItem(
+                    key,
+                    "source",
+                    "source.reminder",
+                    Outcome.EXCLUDED,
+                    "Shared 'Husk at checke' reminder, not a shift",
+                )
+            )
+            continue
+        meeting = meeting_item(
+            occurrence.title, key, occurrence.starts_at, occurrence.ends_at
+        )
+        if meeting:
+            items.append(meeting)
+        try:
+            shift = client.to_source_shift(occurrence, config.teamup_helper_field)
+        except TeamUpError as error:
+            items.append(
+                PlanItem(key, "source", "source.helper", Outcome.REVIEW, str(error))
+            )
+            continue
+        parsed = parse_sps_instructions(shift, ZoneInfo(config.timezone))
+        helper = config.teamup_subcalendar_helpers.get(
+            shift.helper_key, shift.helper_key
+        )
+        items.append(
+            PlanItem(
+                key,
+                "mithf",
+                "mithf.readback",
+                Outcome.PENDING_INTEGRATION,
+                f"{helper}: {shift.starts_at.isoformat()} to {shift.ends_at.isoformat()}; destination not reconciled",
+            )
+        )
+        for issue in parsed.issues:
+            items.append(
+                PlanItem(
+                    key,
+                    "source",
+                    f"sps:{issue.source_id}:{issue.code}",
+                    Outcome.REVIEW,
+                    issue.message,
+                )
+            )
+        for interval in parsed.intervals:
+            future = interval.interval.ends_at > now
+            outcome = (
+                Outcome.EXCLUDED
+                if future
+                else (Outcome.REVIEW if parsed.issues else Outcome.PENDING_INTEGRATION)
+            )
+            items.append(
+                PlanItem(
+                    key,
+                    "duos",
+                    interval.key,
+                    outcome,
+                    f"{interval.interval.starts_at.isoformat()} to {interval.interval.ends_at.isoformat()} ({interval.interval.hours:g} hours): "
+                    + (
+                        "future or ongoing"
+                        if future
+                        else "destination reconciliation required"
+                    ),
+                    {
+                        "starts_at": interval.interval.starts_at.isoformat(),
+                        "ends_at": interval.interval.ends_at.isoformat(),
+                        "hours": interval.interval.hours,
+                    },
+                )
+            )
+        if len(parsed.intervals) > 1:
+            items.append(
+                PlanItem(
+                    key,
+                    "mithf",
+                    "mithf.sps",
+                    Outcome.PENDING_MITHF_BUG,
+                    "Separate SPS intervals preserved; no merging or workaround",
+                )
+            )
+    return SyncPlan(week.range_start, week.range_end, now, tuple(items))
 
 
 def describe_blockers(plan: SyncPlan) -> tuple[str, ...]:

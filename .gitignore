@@ -10,3 +10,6 @@ config.toml
 playwright/.auth/
 target/
 desktop/target/
+build/
+dist/
+*.spec

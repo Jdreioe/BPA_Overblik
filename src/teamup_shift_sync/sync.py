@@ -33,8 +33,10 @@ def reconciliation_range(
 ) -> tuple[datetime, datetime]:
     """Read full selected shifts, including hours outside the selected week."""
     selected = [s for s in shifts if s.ends_at > start and s.starts_at < end]
-    return (min([start, *(s.starts_at for s in selected)]),
-            max([end, *(s.ends_at for s in selected)]))
+    return (
+        min([start, *(s.starts_at for s in selected)]),
+        max([end, *(s.ends_at for s in selected)]),
+    )
 
 
 def plan_digest(plan: SyncPlan) -> str:

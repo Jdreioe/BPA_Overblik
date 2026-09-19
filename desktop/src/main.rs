@@ -27,6 +27,23 @@ const DANISH_MONTHS: [&str; 12] = [
 ];
 
 fn main() -> iced::Result {
+    if std::env::args().any(|argument| argument == "--self-check") {
+        let files = AppFiles::resolve();
+        match WorkerHandle::spawn(&files).and_then(|worker| {
+            worker.home_status(Some("2026-09-19T12:00:00+02:00"))?;
+            worker.preview_fixture("2026-09-14", "2026-09-20")?;
+            Ok(())
+        }) {
+            Ok(()) => {
+                println!("Desktop bundle self-check passed.");
+                return Ok(());
+            }
+            Err(error) => {
+                eprintln!("{}\n{}", error.message, error.detail);
+                std::process::exit(1);
+            }
+        }
+    }
     iced::application(App::new, App::update, App::view)
         .title("Vagtplanlægning")
         .run()
@@ -101,6 +118,7 @@ impl App {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::WorkerSpawned(Err(error)) => {
+                self.worker = None;
                 self.startup_error = Some(error);
                 self.home = HomeState::Failed(WorkerError::exited(
                     "Status kunne ikke hentes, fordi baggrundsarbejderen ikke kører.",
@@ -117,6 +135,12 @@ impl App {
                 Task::none()
             }
             Message::HomeLoaded(result) => {
+                if let Err(error) = &result {
+                    if error.code == "worker_exit" {
+                        self.worker = None;
+                        self.startup_error = Some(error.clone());
+                    }
+                }
                 self.home = match result {
                     Ok(status) => HomeState::Ready(status),
                     Err(error) => HomeState::Failed(error),
@@ -167,6 +191,12 @@ impl App {
                     if *from == self.week_start.format("%Y-%m-%d").to_string()
                         && *to == self.week_end().format("%Y-%m-%d").to_string());
                 if current {
+                    if let Err(error) = &result {
+                        if error.code == "worker_exit" {
+                            self.worker = None;
+                            self.startup_error = Some(error.clone());
+                        }
+                    }
                     self.preview = match result {
                         Ok(preview) => PreviewState::Ready(preview),
                         Err(error) => PreviewState::Failed(error),
@@ -264,22 +294,32 @@ impl App {
         }
         match &self.home {
             HomeState::Loading => text("Henter status …").into(),
-            HomeState::Failed(error) => failure_block("Status kunne ikke hentes.", error, false),
+            HomeState::Failed(error) => {
+                failure_block("Status kunne ikke hentes.", error, self.worker.is_none())
+            }
             HomeState::Ready(status) => {
                 let mut items: Vec<Element<'_, Message>> = Vec::new();
                 items.push(text("Tjenester").size(18).into());
                 if status.config_issues.is_empty() {
                     items.push(
-                        status_line("Konfiguration: klar", "Konfigurationen er komplet.").into(),
+                        status_line("TeamUp: klar til kontrol", "Konfigurationen er komplet.")
+                            .into(),
                     );
                 } else {
                     for issue in &status.config_issues {
-                        items.push(status_line("Konfiguration: mangler", issue).into());
+                        items.push(status_line("TeamUp: opsætning mangler", issue).into());
                     }
                 }
                 items.push(
                     status_line(
-                        "Login: afventer",
+                        "MitHF: login afventer",
+                        "Login via app-browser følger i næste trin.",
+                    )
+                    .into(),
+                );
+                items.push(
+                    status_line(
+                        "DUOS: login afventer",
                         "Login via app-browser følger i næste trin.",
                     )
                     .into(),
@@ -312,14 +352,20 @@ impl App {
                 .on_press(Message::PreviewRequested)
                 .into(),
             PreviewState::Loading { .. } => text("Henter eksempel …").into(),
-            PreviewState::Failed(error) => column![
-                failure_block("Eksemplet kunne ikke hentes.", error, false),
-                button("Prøv igen")
-                    .padding(12)
-                    .on_press(Message::PreviewRequested),
-            ]
-            .spacing(8)
-            .into(),
+            PreviewState::Failed(error) => {
+                if self.worker.is_none() {
+                    failure_block("Eksemplet kunne ikke hentes.", error, true)
+                } else {
+                    column![
+                        failure_block("Eksemplet kunne ikke hentes.", error, false),
+                        button("Prøv igen")
+                            .padding(12)
+                            .on_press(Message::PreviewRequested),
+                    ]
+                    .spacing(8)
+                    .into()
+                }
+            }
             PreviewState::Ready(preview) => {
                 let mut view = column![text(counts_line_da(&preview.counts)).size(16)].spacing(8);
                 if preview.items.is_empty() {
@@ -439,7 +485,7 @@ fn counts_line_da(counts: &std::collections::BTreeMap<String, u64>) -> String {
     let mut parts = Vec::new();
     for key in ORDER {
         if let Some(n) = counts.get(key) {
-            parts.push(format!("{n} {}", outcome_da_plural(key, *n)));
+            parts.push(format!("{n} {}", outcome_da(key)));
         }
     }
     for (key, n) in counts {
@@ -451,15 +497,6 @@ fn counts_line_da(counts: &std::collections::BTreeMap<String, u64>) -> String {
         return "Ingen punkter.".to_string();
     }
     parts.join(" · ")
-}
-
-fn outcome_da_plural(outcome: &str, n: u64) -> String {
-    let singular = outcome_da(outcome);
-    if n == 1 {
-        singular.to_string()
-    } else {
-        format!("{singular}")
-    }
 }
 
 #[cfg(test)]
@@ -606,6 +643,19 @@ mod tests {
         let mut app = test_app();
         let _ = app.update(Message::PreviewRequested);
         assert!(matches!(app.preview, PreviewState::Failed(_)));
+    }
+
+    #[test]
+    fn unexpected_worker_exit_offers_a_fresh_spawn() {
+        let mut app = test_app();
+        app.preview = PreviewState::Loading {
+            from: "2026-09-14".to_string(),
+            to: "2026-09-20".to_string(),
+        };
+        let _ = app.update(Message::PreviewLoaded(Err(WorkerError::exited("stopped"))));
+        assert!(app.worker.is_none());
+        assert!(app.startup_error.is_some());
+        let _ = app.view();
     }
 
     #[test]

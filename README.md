@@ -157,6 +157,22 @@ prerequisite:
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
+## Desktop shell
+
+The Iced shell lives in `desktop/`. For development it starts the worker with
+the repository virtual environment through `TEAMUP_WORKER_CMD`. Release bundles
+place a standalone worker beside the GUI, so users do not need Python.
+
+Build and verify the portable bundle for the current operating system with:
+
+```bash
+.venv/bin/python -m pip install -e '.[package]'
+.venv/bin/python scripts/package_desktop.py
+```
+
+The same worker handshake and fixture preview run in CI on Windows, macOS and
+Linux. See `docs/desktop-validation.md` for the package and accessibility checks.
+
 ## Live integration gates
 
 Before apply mode can be enabled, the following must be completed:

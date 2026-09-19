@@ -11,8 +11,12 @@
 //! - unexpected exit / unreadable line → `WorkerError::exited`, including the
 //!   captured stderr tail as technical detail for the Help view.
 
-use crate::protocol::{AppPaths, HomeStatus, PlanPreview, Request, Response, WorkerError};
-use serde_json::{json, Value};
+use crate::protocol::{
+    AppPaths, EmptyParams, FixturePreviewParams, HomeStatus, HomeStatusParams, PlanPreview,
+    Request, Response, WorkerError,
+};
+use serde::Serialize;
+use serde_json::Value;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -24,8 +28,7 @@ pub const WORKER_MODULE: &str = "teamup_shift_sync.worker";
 ///
 /// 1. `TEAMUP_WORKER_CMD`: explicit override for development, e.g.
 ///    `.venv/bin/python -m teamup_shift_sync.worker` (split on whitespace).
-/// 2. A `teamup-shift-sync-worker` executable next to the GUI binary
-///    (the future bundled entry point; see packaging notes in #2).
+/// 2. A bundled `teamup-shift-sync-worker` executable next to the GUI binary.
 /// 3. Dev fallback: `python3 -m teamup_shift_sync.worker` on `PATH`.
 #[derive(Debug, Clone)]
 pub struct WorkerCommand {
@@ -46,12 +49,14 @@ impl WorkerCommand {
         }
         if let Ok(exe) = std::env::current_exe() {
             if let Some(dir) = exe.parent() {
-                let bundled: PathBuf = dir.join("teamup-shift-sync-worker");
-                if bundled.is_file() {
-                    return Self {
-                        program: bundled.to_string_lossy().into_owned(),
-                        args: Vec::new(),
-                    };
+                for name in ["teamup-shift-sync-worker", "teamup-shift-sync-worker.exe"] {
+                    let bundled: PathBuf = dir.join(name);
+                    if bundled.is_file() {
+                        return Self {
+                            program: bundled.to_string_lossy().into_owned(),
+                            args: Vec::new(),
+                        };
+                    }
                 }
             }
         }
@@ -166,7 +171,7 @@ impl WorkerHandle {
             .spawn()
             .map_err(|e| {
                 WorkerError::startup(format!(
-                    "Kunne ikke starte '{}': {e}. Tjek at Python og teamup-shift-sync er installeret.",
+                    "Kunne ikke starte '{}': {e}. Geninstallér appen, hvis den medfølgende arbejder mangler.",
                     command.display()
                 ))
             })?;
@@ -192,11 +197,11 @@ impl WorkerHandle {
         };
         // The ping doubles as a protocol-version handshake: a worker that
         // answers with another version fails here, not mid-preview.
-        handle.request("ping", json!({}))?;
+        handle.request("ping", EmptyParams {})?;
         Ok(handle)
     }
 
-    fn request(&self, method: &str, params: Value) -> Result<Value, WorkerError> {
+    fn request<P: Serialize>(&self, method: &str, params: P) -> Result<Value, WorkerError> {
         let mut inner = self
             .inner
             .lock()
@@ -261,11 +266,8 @@ impl WorkerHandle {
                 detail.push_str(trimmed.trim());
             }
         }
-        match inner.child.try_wait() {
-            Ok(Some(status)) => {
-                detail.push_str(&format!("\nAfslutningskode: {status}"));
-            }
-            _ => {}
+        if let Ok(Some(status)) = inner.child.try_wait() {
+            detail.push_str(&format!("\nAfslutningskode: {status}"));
         }
         WorkerError::exited(detail)
     }
@@ -274,7 +276,7 @@ impl WorkerHandle {
     /// Help/diagnostics view (#7); kept here so both sides stay in sync.
     #[allow(dead_code)]
     pub fn app_paths(&self) -> Result<AppPaths, WorkerError> {
-        let payload = self.request("app_paths", json!({}))?;
+        let payload = self.request("app_paths", EmptyParams {})?;
         serde_json::from_value(payload)
             .map_err(|e| WorkerError::exited(format!("Ugyldigt app_paths-svar: {e}")))
     }
@@ -282,11 +284,11 @@ impl WorkerHandle {
     pub fn home_status(&self, now_iso: Option<&str>) -> Result<HomeStatus, WorkerError> {
         let payload = self.request(
             "home_status",
-            json!({
-                "config_path": self.files.config_path.to_string_lossy(),
-                "state_path": self.files.state_path.to_string_lossy(),
-                "now": now_iso,
-            }),
+            HomeStatusParams {
+                config_path: &self.files.config_path,
+                state_path: &self.files.state_path,
+                now: now_iso,
+            },
         )?;
         serde_json::from_value(payload)
             .map_err(|e| WorkerError::exited(format!("Ugyldigt home_status-svar: {e}")))
@@ -295,13 +297,13 @@ impl WorkerHandle {
     pub fn preview_fixture(&self, from: &str, to: &str) -> Result<PlanPreview, WorkerError> {
         let payload = self.request(
             "preview_fixture",
-            json!({
-                "config_path": self.files.config_path.to_string_lossy(),
-                "fixture_path": self.files.fixture_path.to_string_lossy(),
-                "state_path": self.files.state_path.to_string_lossy(),
-                "from": from,
-                "to": to,
-            }),
+            FixturePreviewParams {
+                config_path: &self.files.config_path,
+                fixture_path: &self.files.fixture_path,
+                state_path: &self.files.state_path,
+                from,
+                to,
+            },
         )?;
         serde_json::from_value(payload)
             .map_err(|e| WorkerError::exited(format!("Ugyldigt preview-svar: {e}")))
