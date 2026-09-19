@@ -40,8 +40,16 @@ class Destinations:
     def call(self, system: str, action: str, **payload: Any) -> Any:
         return self.transport.request(system, action, payload)
 
-    def validate(self, start: datetime) -> None:
-        """Resolve configured identities against both services, without guessing."""
+    def validate(self, now: datetime) -> None:
+        """Resolve configured identities against both services, without guessing.
+
+        Identity is a property of today, not of the week being viewed: the
+        selected week only scopes which destination records are read, never
+        whether a helper, arrangement or employment is valid. Setup confirms
+        the same values against today, so previewing a past week must not
+        invalidate a confirmation that still holds.
+        """
+        today = now.date()
         response = self.call("mithf", "hjaelperliste")
         helpers: dict[str, list[str]] = {}
         for group in response["grupper"]:
@@ -69,7 +77,7 @@ class Destinations:
         ):
             raise DestinationError("MitHF account changed; confirm setup again")
         portfolios = self.call(
-            "duos", "portfolios", dateOfActivePortfolio=start.date().isoformat()
+            "duos", "portfolios", dateOfActivePortfolio=today.isoformat()
         )
         portfolio = [
             p for p in portfolios if str(p["id"]) == self.config.duos_arrangement_id
@@ -85,7 +93,7 @@ class Destinations:
             "duos",
             "employments",
             portfolioId=self.config.duos_arrangement_id,
-            dateOfActiveEmployment=start.date().isoformat(),
+            dateOfActiveEmployment=today.isoformat(),
         )
         for mapping in self.config.helpers.values():
             if (
@@ -97,7 +105,7 @@ class Destinations:
                     "A configured helper does not uniquely match MitHF"
                 )
             if not any(
-                employment_available(e, start.date())
+                employment_available(e, today)
                 and str(e["helperId"]) == mapping.duos_employee_number
                 and " ".join(e["helperName"].split())
                 == " ".join(mapping.duos_name.split())
