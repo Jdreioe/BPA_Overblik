@@ -239,3 +239,32 @@ mod tests {
         assert_eq!(progress.current, Some(2));
     }
 }
+
+/// Account data stays inside the service browser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Service {
+    Mithf,
+    Duos,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoginState {
+    Connected,
+    SignInRequired,
+    Connecting,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SessionStatus {
+    pub state: LoginState,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Sessions {
+    pub mithf: SessionStatus,
+    pub duos: SessionStatus,
+}

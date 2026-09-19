@@ -12,7 +12,8 @@ Protocol v1 frames::
     error    {"protocol": 1, "id": "<opaque>", "event": "error",
               "payload": {"code": "<stable>", "message": "<Danish>", "detail": "<en>"}}
 
-Methods: ``ping``, ``app_paths``, ``home_status``, ``preview_fixture``.
+Methods: ``ping``, ``app_paths``, ``home_status``, ``preview_fixture``,
+``session_login`` and ``session_status``.
 Apply/progress streaming follows in issue #6 and reuses the same envelope.
 """
 
@@ -29,6 +30,9 @@ from . import operations
 from .config import ConfigError
 from .fixtures import FixtureError
 from .models import Outcome, SyncPlan
+from .sessions import BrowserSessions
+
+_sessions: BrowserSessions | None = None
 
 PROTOCOL_VERSION = operations.WORKER_PROTOCOL_VERSION
 
@@ -83,6 +87,16 @@ def _parse_datetime(value: Any) -> datetime | None:
 
 def handle_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
     """Execute one request; raises ValueError/ConfigError/FixtureError."""
+    global _sessions
+    if method in {"session_login", "session_status"}:
+        if _sessions is None:
+            _sessions = BrowserSessions(operations.app_data_dir())
+        if method == "session_login":
+            _sessions.submit(params["service"], login=True)
+        else:
+            for service in ("mithf", "duos"):
+                _sessions.submit(service, login=False)
+        return _sessions.snapshot()
     if method == "ping":
         return {"version": PROTOCOL_VERSION}
     if method == "app_paths":
@@ -205,6 +219,20 @@ def process_line(line: str) -> str | None:
 
 
 def main() -> int:
+    if "--install-browser" in sys.argv:
+        from playwright.__main__ import main as install
+
+        sys.argv = ["playwright", "install", "chromium", "--no-shell"]
+        install()
+        return 0
+    try:
+        return serve()
+    finally:
+        if _sessions is not None:
+            _sessions.close()
+
+
+def serve() -> int:
     for line in sys.stdin:
         if not line.strip():
             continue
