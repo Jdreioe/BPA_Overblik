@@ -774,7 +774,7 @@ fn week_grid(week: &Week) -> Element<'_, Message> {
                     .height(Length::FillPortion((to - from) as u16))
                     .width(Length::Fill)
                     .padding(3)
-                    .style(block_style(&block.status)),
+                    .style(block_style(&block.status, &block.helper_color)),
             );
             cursor = to;
         }
@@ -861,35 +861,59 @@ fn status_marker(status: &str) -> &'static str {
     }
 }
 
-fn block_style(status: &str) -> impl Fn(&iced::Theme) -> container::Style + use<> {
-    let (background, foreground) = match status {
-        "create" => (
-            Color::from_rgb8(0xC8, 0xE6, 0xC9),
-            Color::from_rgb8(0x1B, 0x5E, 0x20),
-        ),
-        "update" => (
-            Color::from_rgb8(0xFF, 0xE0, 0xB2),
-            Color::from_rgb8(0x7A, 0x33, 0x00),
-        ),
-        "matched" => (
-            Color::from_rgb8(0xE0, 0xE0, 0xE0),
-            Color::from_rgb8(0x37, 0x37, 0x37),
-        ),
-        "attention" => (
-            Color::from_rgb8(0xFF, 0xCD, 0xD2),
-            Color::from_rgb8(0xB7, 0x1C, 0x1C),
-        ),
-        _ => (
-            Color::from_rgb8(0xBB, 0xDE, 0xFB),
-            Color::from_rgb8(0x0D, 0x47, 0xA1),
-        ),
-    };
+/// Fill the block with the helper's own Teamup colour, tinted so the text
+/// stays readable, and outline it in the status colour. Colour therefore
+/// carries who is on the shift, exactly as in Teamup, while status keeps the
+/// outline plus its text marker and the day-by-day list below the grid.
+fn block_style(
+    status: &str,
+    helper_color: &str,
+) -> impl Fn(&iced::Theme) -> container::Style + use<> {
+    let accent = status_color(status);
+    let fill = parse_hex(helper_color)
+        .map(|color| tint(color, 0.72))
+        .unwrap_or(Color::from_rgb8(0xE8, 0xE8, 0xE8));
     move |_theme: &iced::Theme| container::Style {
-        background: Some(background.into()),
-        text_color: Some(foreground),
-        border: iced::border::rounded(4),
+        background: Some(fill.into()),
+        // Tinted fills are light in both themes, so the text is always dark.
+        text_color: Some(Color::from_rgb8(0x1A, 0x1A, 0x1A)),
+        border: iced::Border {
+            color: accent,
+            width: 2.0,
+            radius: 4.0.into(),
+        },
         ..container::Style::default()
     }
+}
+
+/// Outline colour per status, alongside the text marker in `status_marker`.
+fn status_color(status: &str) -> Color {
+    match status {
+        "create" => Color::from_rgb8(0x1B, 0x5E, 0x20),
+        "update" => Color::from_rgb8(0x7A, 0x33, 0x00),
+        "matched" => Color::from_rgb8(0x75, 0x75, 0x75),
+        "attention" => Color::from_rgb8(0xB7, 0x1C, 0x1C),
+        _ => Color::from_rgb8(0x0D, 0x47, 0xA1),
+    }
+}
+
+/// Mix towards white. Teamup's palette is saturated; the raw colours would
+/// drown the block text.
+fn tint(color: Color, amount: f32) -> Color {
+    Color::from_rgb(
+        color.r + (1.0 - color.r) * amount,
+        color.g + (1.0 - color.g) * amount,
+        color.b + (1.0 - color.b) * amount,
+    )
+}
+
+fn parse_hex(value: &str) -> Option<Color> {
+    let digits = value.strip_prefix('#')?;
+    if digits.len() != 6 {
+        return None;
+    }
+    let channel = |at: usize| u8::from_str_radix(&digits[at..at + 2], 16).ok();
+    Some(Color::from_rgb8(channel(0)?, channel(2)?, channel(4)?))
 }
 
 fn status_line<'a>(label: &'a str, detail: &'a str) -> iced::widget::Column<'a, Message> {
@@ -1271,6 +1295,26 @@ mod tests {
 
             let _ = app.update(revoke);
             assert!(app.approval.is_none());
+        }
+    }
+
+    /// A helper colour tints the fill; anything unusable falls back to a
+    /// neutral block rather than a wrong or unreadable one.
+    #[test]
+    fn helper_colours_parse_and_fall_back() {
+        assert_eq!(
+            parse_hex("#4770d8"),
+            Some(Color::from_rgb8(0x47, 0x70, 0xd8))
+        );
+        for bad in ["", "#4770d", "4770d8", "#zzzzzz", "#4770d8ff"] {
+            assert_eq!(parse_hex(bad), None, "{bad}");
+        }
+        let tinted = tint(Color::from_rgb8(0, 0, 0), 0.72);
+        assert!(tinted.r > 0.7 && tinted.r < 0.75);
+        // Every state builds a style, with and without a colour.
+        for status in ["create", "update", "matched", "attention", "pending"] {
+            let _ = block_style(status, "#4770d8")(&iced::Theme::Light);
+            let _ = block_style(status, "")(&iced::Theme::Dark);
         }
     }
 

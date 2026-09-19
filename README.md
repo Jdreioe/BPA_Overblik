@@ -200,6 +200,13 @@ its label. A shift split for several SPS intervals shows its parts. Under the
 grid, the same week is repeated as text with the values the grid has no room
 for, including old and new values for changes and the affected destination.
 
+Blocks are filled with the helper's own TeamUp calendar colour, so the week
+reads the way it does in TeamUp, and outlined in a status colour: new,
+changed, unchanged or needs attention. Status never depends on colour alone —
+each block also carries a text marker, and the day-by-day list below spells it
+out. The guided setup reads colours from TeamUp automatically; a
+configuration-driven run can set `teamup_color` per helper.
+
 Items needing attention come first, each with a plain-language cause and the
 next action. Empty weeks, unchanged weeks and an unread destination each read
 differently, and an unread destination is never shown as empty.

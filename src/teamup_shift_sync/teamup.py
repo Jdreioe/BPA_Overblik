@@ -212,6 +212,75 @@ class TeamUpClient:
         )
 
 
+#: Teamup's 48 sub-calendar colours, indexed by the ``color`` id that
+#: ``/configuration`` returns for each sub-calendar. Read from Teamup's own
+#: calendar stylesheet (``.cal-bg-<id>``) on 2026-09-19; the API publishes
+#: only the id, and the reference table is a rendered page, not data.
+SUBCALENDAR_COLORS: tuple[str, ...] = (
+    "#f2665b",
+    "#cf2424",
+    "#a01a1a",
+    "#7e3838",
+    "#ca7609",
+    "#f16c20",
+    "#f58a4b",
+    "#d2b53b",
+    "#d96fbf",
+    "#b84e9d",
+    "#9d3283",
+    "#7a0f60",
+    "#542382",
+    "#7742a9",
+    "#8763ca",
+    "#b586e2",
+    "#668cb3",
+    "#4770d8",
+    "#2951b9",
+    "#133897",
+    "#1a5173",
+    "#1a699c",
+    "#0080a6",
+    "#4aaace",
+    "#88b347",
+    "#5a8121",
+    "#2d850e",
+    "#176413",
+    "#0f4c30",
+    "#386651",
+    "#00855b",
+    "#4fb5a1",
+    "#553711",
+    "#724f22",
+    "#9c6013",
+    "#f6c811",
+    "#ce1212",
+    "#b20d47",
+    "#d8135a",
+    "#e81f78",
+    "#f5699a",
+    "#5c1c1c",
+    "#a55757",
+    "#c37070",
+    "#000000",
+    "#383838",
+    "#757575",
+    "#a3a3a3",
+)
+
+
+def subcalendar_color(index: Any) -> str:
+    """Hex for a Teamup colour id, or "" when it is missing or unknown.
+
+    An unrecognised id is not an error: Teamup may add colours, and a helper
+    simply falls back to a neutral block.
+    """
+    if not isinstance(index, int) or isinstance(index, bool):
+        return ""
+    if not 1 <= index <= len(SUBCALENDAR_COLORS):
+        return ""
+    return SUBCALENDAR_COLORS[index - 1]
+
+
 def _helper_key(raw: dict[str, Any], field: str) -> str:
     if field in {"who", "title"}:
         value = raw.get(field)

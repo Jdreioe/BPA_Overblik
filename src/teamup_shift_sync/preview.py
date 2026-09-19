@@ -190,6 +190,9 @@ class Block:
     """One MitHF shift as drawn in a single day column of the week grid."""
 
     helper: str
+    #: The helper's own Teamup calendar colour as hex, so the week reads the
+    #: way it does in Teamup. Empty when unknown; the block renders neutral.
+    helper_color: str
     status: str
     status_label: str
     #: Minutes from local midnight; the grid draws the block between them.
@@ -261,6 +264,7 @@ def build_week_preview(
             continue
         planned_shifts += 1
         helper = _helper_name(config, shift)
+        helper_color = config.teamup_subcalendar_colors.get(shift.helper_key, "")
         segments = _segments(items)
         # A source or mapping problem belongs to the whole shift, so every
         # block it produced must be marked, not only the step that failed.
@@ -271,6 +275,7 @@ def build_week_preview(
         for index, segment in sorted(segments.items()):
             described = _describe_segment(
                 helper,
+                helper_color,
                 segment,
                 destination,
                 timezone,
@@ -375,6 +380,7 @@ def _segment_for(item: PlanItem, segments: dict[int, dict[str, list[PlanItem]]])
 
 def _describe_segment(
     helper: str,
+    helper_color: str,
     segment: dict[str, list[PlanItem]],
     destination: DestinationSnapshot,
     timezone: ZoneInfo,
@@ -408,6 +414,7 @@ def _describe_segment(
     status = "attention" if shift_blocked else _status(flat, create[0])
     block = Block(
         helper=helper,
+        helper_color=helper_color,
         status=status,
         status_label=STATUS_LABELS[status],
         minutes_from=0,

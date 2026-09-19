@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 
 from helpers import config, moment, source_shift
 
@@ -64,6 +65,34 @@ class PreviewTests(unittest.TestCase):
             "2 registreringer til DUOS.",
             week.apply_summary,
         )
+
+    def test_blocks_carry_the_helpers_teamup_colour(self):
+        week = self.week(source_shift(comment=None))
+        ((_, block),) = self.blocks(week)
+
+        # fixture-helper config has no colour; the block renders neutral.
+        self.assertEqual("", block.helper_color)
+
+        coloured = replace(config(), teamup_subcalendar_colors={"helper": "#4770d8"})
+        with SyncState(":memory:") as state:
+            plan = build_plan(
+                config=coloured,
+                shifts=(source_shift(comment=None),),
+                destination=DestinationSnapshot(),
+                range_start=self.range_start,
+                range_end=self.range_end,
+                now=self.now,
+                state=state,
+                live=True,
+            )
+        week = build_week_preview(
+            config=coloured,
+            shifts=(source_shift(comment=None),),
+            plan=plan,
+            destination=DestinationSnapshot(),
+            destination_read=True,
+        )
+        self.assertEqual("#4770d8", week.days[0].blocks[0].helper_color)
 
     def test_overnight_shift_appears_in_both_days_with_both_dates(self):
         week = self.week(

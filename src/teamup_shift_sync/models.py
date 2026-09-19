@@ -89,6 +89,9 @@ class AppConfig:
     duos_registration_type: str
     helpers: dict[str, HelperMapping]
     teamup_subcalendar_helpers: dict[str, str] = field(default_factory=dict)
+    #: Subcalendar id to Teamup's own colour, as hex. Empty for helpers whose
+    #: colour is unknown; those simply render neutral.
+    teamup_subcalendar_colors: dict[str, str] = field(default_factory=dict)
     teamup_lookback_days: int = 7
     mithf_customer_id: str = ""
     mithf_grant_id: str = ""

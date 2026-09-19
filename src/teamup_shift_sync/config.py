@@ -5,6 +5,7 @@ import tomllib
 from pathlib import Path
 
 from .models import AppConfig, HelperMapping
+from .teamup import subcalendar_color
 
 
 class ConfigError(ValueError):
@@ -20,6 +21,7 @@ def load_config(path: Path) -> AppConfig:
         raise ConfigError(f"Invalid TOML in {path}: {error}") from error
 
     helpers: dict[str, HelperMapping] = {}
+    colors: dict[str, str] = {}
     for raw in data.get("helpers", []):
         mapping = HelperMapping(
             teamup_key=_required(raw, "teamup_key", "helpers"),
@@ -31,9 +33,19 @@ def load_config(path: Path) -> AppConfig:
         if mapping.teamup_key in helpers:
             raise ConfigError(f"Duplicate TeamUp helper key: {mapping.teamup_key}")
         helpers[mapping.teamup_key] = mapping
+        # Optional: the helper's Teamup colour id, so a config-driven run
+        # shows the same week colours the guided setup reads automatically.
+        color = raw.get("teamup_color")
+        if color is not None:
+            if type(color) is not int or not 1 <= color <= 48:
+                raise ConfigError(
+                    "helpers.teamup_color must be a Teamup colour id 1-48"
+                )
+            colors[mapping.teamup_key] = subcalendar_color(color)
 
     teamup = data.get("teamup", {})
     duos = data.get("duos", {})
+
     subcalendar_helpers = teamup.get("helper_subcalendars", {})
     if not isinstance(subcalendar_helpers, dict) or any(
         not key.isdigit() or not isinstance(value, str) or not value.strip()
@@ -63,6 +75,7 @@ def load_config(path: Path) -> AppConfig:
         duos_arrangement_id=str(duos.get("arrangement_id", "")),
         duos_registration_type=str(duos.get("registration_type", "")),
         helpers=helpers,
+        teamup_subcalendar_colors=colors,
         teamup_subcalendar_helpers=subcalendar_helpers,
         teamup_lookback_days=lookback_days,
     )

@@ -34,3 +34,7 @@ registration_type = ""
 # mithf_name = "Zain Alnemr"
 # duos_name = "Zain Alnemr"
 # duos_employee_number = "281550"
+# Optional. The helper's TeamUp colour id, 1-48, so the weekly preview shows
+# the same colours as the calendar. The guided desktop setup reads this from
+# TeamUp itself and needs no entry here.
+# teamup_color = 18

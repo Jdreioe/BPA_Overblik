@@ -25,6 +25,25 @@ provides current request and response examples.
 - Send credentials only to `https://api.teamup.com`; do not log headers or the
   calendar key.
 
+## Sub-calendar colours
+
+`GET /{calendarKeyOrId}/configuration` returns each sub-calendar's `color` as
+an integer id from 1 to 48, never a hex value. Teamup's reference table for
+those ids is published only as a client-rendered documentation page and, in
+the knowledge base, as an image; neither is machine-readable. The OpenAPI
+export documents the field but not the palette.
+
+The palette in `teamup.SUBCALENDAR_COLORS` was therefore read from Teamup's
+own calendar stylesheet, where each id appears as
+`.cal-bg-<id>{background-color:#rrggbb}` (read 2026-09-19 from
+`https://teamup.com/assets-<build>/build/calendar_styles.css`; the build
+segment changes, so find the stylesheet from a calendar page). The sibling
+`.cal-fg-` and `.cal-text-` rules use the same hex for text on white, so they
+give no contrasting foreground; the preview tints the colour instead.
+
+An unknown id must never be an error. Teamup can add colours, and a helper
+without a usable one simply renders neutral.
+
 ## Weekly event fetch
 
 Use:

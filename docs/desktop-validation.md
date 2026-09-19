@@ -38,9 +38,15 @@ issue #6.
 The worker returns the week already translated: day labels, block geometry in
 minutes from local midnight, Danish status labels, detail lines and the
 attention list. The shell renders those fields and never parses summaries,
-step keys, digests or outcome names. Blocks carry a text marker (`[NY]`,
-`[ÆNDRET]`, `[OK]`, `[!]`) beside their colour, so status never depends on
-colour alone, and the grid is repeated as text below it for screen readers.
+step keys, digests or outcome names. The block fill is the helper's TeamUp colour,
+tinted towards white so dark text stays readable on Teamup's saturated
+palette; the outline carries status. Blocks also carry a text marker (`[NY]`,
+`[ÆNDRET]`, `[OK]`, `[!]`), so neither identity nor status depends on colour
+alone, and the grid is repeated as text below it for screen readers.
+
+Colour is appearance, not identity: it is kept out of the sub-calendar
+comparison in `Setup.revalidate`, so recolouring a calendar in TeamUp adopts
+the new colour without discarding confirmed mappings or an approval.
 
 Python tests cover the split, overnight days, future DUOS hours, changed
 values, empty and unchanged weeks and an unread destination. Rust tests cover
