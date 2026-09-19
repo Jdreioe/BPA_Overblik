@@ -8,3 +8,5 @@ __pycache__/
 config.toml
 .env
 playwright/.auth/
+target/
+desktop/target/

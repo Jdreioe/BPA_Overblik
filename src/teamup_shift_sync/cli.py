@@ -11,7 +11,7 @@ from .browser import BrowserTransport, DestinationError
 from .config import ConfigError, configuration_issues, load_config
 from .destinations import Destinations
 from .environment import load_local_environment
-from .fixtures import FixtureError, load_fixture
+from .fixtures import FixtureError
 from .models import AppConfig, Outcome, PlanItem, SyncPlan
 from .parser import parse_sps_instructions
 from .planner import build_plan
@@ -175,23 +175,19 @@ def _dry_run(args: argparse.Namespace) -> int:
         )
         print(render_plan(plan))
         return 1 if any(item.outcome == Outcome.REVIEW for item in plan.items) else 0
-    shifts, destination = load_fixture(args.fixture)
-    with SyncState(args.state) as state:
-        plan = build_plan(
-            config=config,
-            shifts=shifts,
-            destination=destination,
-            range_start=range_start,
-            range_end=range_end,
+    if not args.live:
+        from .operations import fixture_preview_from_paths
+
+        preview = fixture_preview_from_paths(
+            config_path=args.config,
+            fixture_path=args.fixture,
+            state_path=args.state,
+            from_date=args.from_date,
+            to_date=args.to_date,
             now=now,
-            state=state,
         )
-    print(render_plan(plan))
-    return (
-        1
-        if any(item.outcome.value in {"conflicted", "failed"} for item in plan.items)
-        else 0
-    )
+        print(render_plan(preview.plan))
+        return 1 if preview.has_conflicts else 0
 
 
 def _destination_plan(args, config, from_date, to_date, range_start, range_end, now):
