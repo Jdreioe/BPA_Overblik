@@ -64,7 +64,11 @@ enum Message {
     WeekNext,
     WeekCurrent,
     PreviewRequested,
-    PreviewLoaded(Result<PlanPreview, WorkerError>),
+    PreviewLoaded {
+        from: String,
+        to: String,
+        result: Result<PlanPreview, WorkerError>,
+    },
     Retry,
     ApproveRequested,
     ApprovalDismissed,
@@ -302,9 +306,11 @@ impl App {
                     from: from.clone(),
                     to: to.clone(),
                 };
+                let request_from = from.clone();
+                let request_to = to.clone();
                 Task::perform(
                     async move {
-                        tokio::task::spawn_blocking(move || {
+                        let result = tokio::task::spawn_blocking(move || {
                             if fixture {
                                 worker.preview_fixture(&from, &to)
                             } else {
@@ -313,17 +319,21 @@ impl App {
                         })
                         .await
                         .map_err(|e| WorkerError::exited(format!("Intern opgave fejlede: {e}")))
-                        .and_then(|inner| inner)
+                        .and_then(|inner| inner);
+                        (request_from, request_to, result)
                     },
-                    Message::PreviewLoaded,
+                    |(from, to, result)| Message::PreviewLoaded { from, to, result },
                 )
             }
-            Message::PreviewLoaded(result) => {
+            Message::PreviewLoaded { from, to, result } => {
                 // Ignore late arrivals for a week the user already left.
-                let current = matches!(&self.preview, PreviewState::Loading { from, to }
-                    if *from == self.week_start.format("%Y-%m-%d").to_string()
-                        && *to == self.week_end().format("%Y-%m-%d").to_string());
-                if current {
+                // The check uses the week the request was sent for, not the
+                // week a load happens to be in flight for: otherwise a slow
+                // response for the previous week can overwrite the week the
+                // user is looking at (or vice versa).
+                let expected_from = self.week_start.format("%Y-%m-%d").to_string();
+                let expected_to = self.week_end().format("%Y-%m-%d").to_string();
+                if from == expected_from && to == expected_to {
                     if let Err(error) = &result {
                         if error.code == "worker_exit" {
                             self.worker = None;
@@ -1136,8 +1146,41 @@ mod tests {
             to: "2026-09-27".to_string(),
         };
         app.week_start = NaiveDate::from_ymd_opt(2026, 9, 28).unwrap();
-        let _ = app.update(Message::PreviewLoaded(Ok(ready_preview())));
+        let _ = app.update(Message::PreviewLoaded {
+            from: "2026-09-21".to_string(),
+            to: "2026-09-27".to_string(),
+            result: Ok(ready_preview()),
+        });
         assert!(matches!(app.preview, PreviewState::Loading { .. }));
+    }
+
+    #[test]
+    fn slow_previous_response_does_not_overwrite_current_week() {
+        // Reported bug: navigate two weeks back, ask for that week, and a
+        // slow response for the current week overwrote the old week's grid
+        // (header showed Uge 36 while the grid showed 14.–20. september).
+        let mut app = test_app();
+        app.week_start = NaiveDate::from_ymd_opt(2026, 8, 31).unwrap();
+        app.preview = PreviewState::Loading {
+            from: "2026-08-31".to_string(),
+            to: "2026-09-06".to_string(),
+        };
+        // The stale current-week response arrives while the old week loads:
+        // it must be ignored even though a load is in flight.
+        let _ = app.update(Message::PreviewLoaded {
+            from: "2026-09-14".to_string(),
+            to: "2026-09-20".to_string(),
+            result: Ok(ready_preview()),
+        });
+        assert!(matches!(app.preview, PreviewState::Loading { .. }));
+        assert!(app.approval.is_none());
+        // The response for the week on screen is accepted.
+        let _ = app.update(Message::PreviewLoaded {
+            from: "2026-08-31".to_string(),
+            to: "2026-09-06".to_string(),
+            result: Ok(ready_preview()),
+        });
+        assert!(matches!(app.preview, PreviewState::Ready(_)));
     }
 
     #[test]
@@ -1154,7 +1197,11 @@ mod tests {
             from: "2026-09-14".to_string(),
             to: "2026-09-20".to_string(),
         };
-        let _ = app.update(Message::PreviewLoaded(Err(WorkerError::exited("stopped"))));
+        let _ = app.update(Message::PreviewLoaded {
+            from: "2026-09-14".to_string(),
+            to: "2026-09-20".to_string(),
+            result: Err(WorkerError::exited("stopped")),
+        });
         assert!(app.worker.is_none());
         assert!(app.startup_error.is_some());
         let _ = app.view();
@@ -1202,11 +1249,15 @@ mod tests {
             from: "2026-09-14".into(),
             to: "2026-09-20".into(),
         };
-        let _ = app.update(Message::PreviewLoaded(Err(WorkerError {
-            code: "setup_error".into(),
-            message: "Bekræft igen".into(),
-            detail: String::new(),
-        })));
+        let _ = app.update(Message::PreviewLoaded {
+            from: "2026-09-14".to_string(),
+            to: "2026-09-20".to_string(),
+            result: Err(WorkerError {
+                code: "setup_error".into(),
+                message: "Bekræft igen".into(),
+                detail: String::new(),
+            }),
+        });
         assert!(!app.setup.ready());
         assert!(!app.setup.busy);
         assert!(matches!(app.preview, PreviewState::Failed(_)));
@@ -1232,7 +1283,11 @@ mod tests {
         awaiting_reread(&mut app, "abc123");
         assert!(app.approval.is_none(), "not approved before the re-read");
 
-        let _ = app.update(Message::PreviewLoaded(Ok(ready_preview())));
+        let _ = app.update(Message::PreviewLoaded {
+            from: "2026-09-14".to_string(),
+            to: "2026-09-20".to_string(),
+            result: Ok(ready_preview()),
+        });
         let approval = app.approval.as_ref().expect("approved");
         assert_eq!(approval.digest, "abc123");
         assert_eq!(approval.summary, "Overfører 1 ny vagt til MitHF.");
@@ -1247,7 +1302,11 @@ mod tests {
 
         let mut changed = ready_preview();
         changed.digest = "def456".to_string();
-        let _ = app.update(Message::PreviewLoaded(Ok(changed)));
+        let _ = app.update(Message::PreviewLoaded {
+            from: "2026-09-14".to_string(),
+            to: "2026-09-20".to_string(),
+            result: Ok(changed),
+        });
 
         assert!(app.approval.is_none());
         assert!(app.plan_changed);
@@ -1264,7 +1323,11 @@ mod tests {
         let mut blocked = ready_preview();
         blocked.week.can_apply = false;
         blocked.week.blocked_reason = "Løs punkterne først.".to_string();
-        let _ = app.update(Message::PreviewLoaded(Ok(blocked)));
+        let _ = app.update(Message::PreviewLoaded {
+            from: "2026-09-14".to_string(),
+            to: "2026-09-20".to_string(),
+            result: Ok(blocked),
+        });
 
         assert!(app.approval.is_none());
         assert!(app.plan_changed);
@@ -1290,7 +1353,11 @@ mod tests {
         for revoke in [Message::WeekNext, Message::WeekCurrent, Message::Retry] {
             let mut app = test_app();
             awaiting_reread(&mut app, "abc123");
-            let _ = app.update(Message::PreviewLoaded(Ok(ready_preview())));
+            let _ = app.update(Message::PreviewLoaded {
+                from: "2026-09-14".to_string(),
+                to: "2026-09-20".to_string(),
+                result: Ok(ready_preview()),
+            });
             assert!(app.approval.is_some());
 
             let _ = app.update(revoke);
