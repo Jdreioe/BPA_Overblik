@@ -153,6 +153,21 @@ class SetupTests(unittest.TestCase):
         if os.name != "nt":
             self.assertEqual(0o600, self.setup.path.stat().st_mode & 0o777)
 
+    def test_resume_preserves_danish_names_with_windows_default_encoding(self):
+        self.destination.customers[0]["navn"] = "Søren Ærø"
+        self.configured()
+        original_read = Path.read_text
+
+        def windows_read(path, *args, **kwargs):
+            kwargs.setdefault("encoding", "cp1252")
+            return original_read(path, *args, **kwargs)
+
+        with patch.object(Path, "read_text", windows_read):
+            restarted = self.restart()
+            self.assertEqual(self.setup.data["account"], restarted.data["account"])
+            restarted.confirm()
+            self.assertEqual("ready", self.restart().data["stage"])
+
     def test_failed_calendar_access_retains_retryable_credentials(self):
         with patch.object(Calendar, "failure", True), self.assertRaises(TeamUpError):
             self.connected()

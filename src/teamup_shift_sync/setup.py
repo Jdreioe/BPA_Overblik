@@ -160,7 +160,7 @@ class Setup:
         }
         if self.path.exists():
             try:
-                saved = json.loads(self.path.read_text())
+                saved = json.loads(self.path.read_text(encoding="utf-8"))
                 if saved["version"] != 1:
                     raise ValueError
                 self.data.update(saved)
