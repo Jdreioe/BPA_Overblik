@@ -148,7 +148,28 @@ class Outcome(StrEnum):
     REVIEW = "review"
     EXCLUDED = "excluded"
     PENDING_INTEGRATION = "pending_integration"
-    PENDING_MITHF_BUG = "pending_mithf_bug"
+
+
+#: Separates a MitHF step key from the shift segment it belongs to. MitHF
+#: carries one SPS interval per shift, so a source shift with several
+#: intervals becomes several consecutive MitHF shifts (see ``planner``).
+#: Segment 0 keeps the plain key, so a shift that later gains a second SPS
+#: interval keeps the synchronization record it already has.
+SEGMENT_SEPARATOR = "#"
+
+
+def segment_step(base: str, index: int) -> str:
+    return base if index == 0 else f"{base}{SEGMENT_SEPARATOR}{index}"
+
+
+def step_base(step_key: str) -> str:
+    """The operation a step performs, without its shift segment."""
+    return step_key.split(SEGMENT_SEPARATOR, 1)[0]
+
+
+def step_segment(step_key: str) -> int:
+    _, _, suffix = step_key.partition(SEGMENT_SEPARATOR)
+    return int(suffix) if suffix else 0
 
 
 @dataclass(frozen=True)
@@ -160,6 +181,9 @@ class PlanItem:
     summary: str
     payload: dict[str, Any] = field(default_factory=dict)
     destination_id: str | None = None
+    #: Stable machine-readable cause, so user-facing text is never produced by
+    #: parsing ``summary``. Empty for items that need no explanation.
+    reason: str = ""
 
 
 @dataclass(frozen=True)

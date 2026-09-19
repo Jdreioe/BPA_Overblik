@@ -51,8 +51,9 @@ dialog contents remain in the DOM: do not treat their presence as open state.
 - The confirmation state after choosing a helper and the read-back path for the
   saved assignment.
 - SPS save/read-back behavior, including overnight interval editing.
-- Actual behavior of multiple SPS intervals. Until verified otherwise, the
-  planner keeps all intervals internally and reports `pending_mithf_bug`.
+- SPS read-back on a shift created by splitting. The planner cuts a shift at
+  the start of each further SPS interval so every MitHF shift carries exactly
+  one, but the saved result has not been read back from a real shift.
 
 No live shift should be created merely to discover these details. Use an
 already authorized batch or explicit permission for a harmless concrete test.

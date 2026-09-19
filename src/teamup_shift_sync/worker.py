@@ -29,6 +29,7 @@ from . import operations
 from .config import ConfigError
 from .fixtures import FixtureError
 from .models import Outcome, SyncPlan
+from .preview import to_dict as week_to_dict
 from .sessions import BrowserSessions
 from .setup import Setup, SetupError
 
@@ -67,6 +68,7 @@ def plan_item_to_dict(item: Any) -> dict[str, Any]:
         "summary": item.summary,
         "payload": item.payload,
         "destination_id": item.destination_id,
+        "reason": item.reason,
     }
 
 
@@ -120,7 +122,7 @@ def handle_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
                     digest=preview.digest,
                     has_conflicts=preview.has_blockers,
                     counts=operations.plan_summaries_by_outcome(preview.plan),
-                    blockers=list(operations.describe_blockers(preview.plan)),
+                    week=week_to_dict(preview.week),
                 )
                 return payload
             elif action != "status":
@@ -183,7 +185,7 @@ def handle_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
         payload["digest"] = preview.digest
         payload["has_conflicts"] = preview.has_conflicts
         payload["counts"] = operations.plan_summaries_by_outcome(preview.plan)
-        payload["blockers"] = list(operations.describe_blockers(preview.plan))
+        payload["week"] = week_to_dict(preview.week)
         return payload
     raise ValueError(f"unknown method: {method}")
 

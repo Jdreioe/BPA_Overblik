@@ -145,8 +145,16 @@ is flagged for review. Unsupported syntax, overlaps, times outside the source
 shift, and ambiguous/nonexistent DST clock times are never guessed.
 
 DUOS entries are planned only after their interval has ended. Multiple SPS
-intervals remain independent DUOS steps. They are preserved for MitHF but
-reported as `pending_mithf_bug`; they are never merged into one interval.
+intervals remain independent DUOS steps; they are never merged into one
+interval.
+
+MitHF stores at most one SPS interval per shift, so a shift carrying several
+intervals is planned as several consecutive MitHF shifts. Each cut is at the
+start of the next interval: `uni 8-10 & 13-14` on a 07:30-24:00 shift becomes
+07:30-13:00 with SPS 08:00-10:00, and 13:00-24:00 with SPS 13:00-14:00. The
+parts cover exactly the original hours and leave no gap. An instruction that
+could not be resolved never moves a boundary: the shift stays whole and the
+SPS step is reported for review instead.
 
 ## Tests
 
@@ -172,6 +180,25 @@ Build and verify the portable bundle for the current operating system with:
 
 The same worker handshake and fixture preview run in CI on Windows, macOS and
 Linux. See `docs/desktop-validation.md` for the package and accessibility checks.
+
+## The weekly preview
+
+"Se ændringer" shows the selected Monday-to-Sunday week as a grid of seven day
+columns, one block per MitHF shift over the hours it covers. A shift crossing
+midnight appears in both days, marked as continuing, and keeps both dates in
+its label. A shift split for several SPS intervals shows its parts. Under the
+grid, the same week is repeated as text with the values the grid has no room
+for, including old and new values for changes and the affected destination.
+
+Items needing attention come first, each with a plain-language cause and the
+next action. Empty weeks, unchanged weeks and an unread destination each read
+differently, and an unread destination is never shown as empty.
+
+"Overfør ændringer" is enabled only for a fully reconciled week with no
+unresolved items and at least one write. Clicking it re-reads the source and
+both destinations; only an unchanged plan counts as approved. Changing the
+week, the setup or the plan revokes an approval. Running the transfer itself
+is issue #6: this version approves a plan and sends nothing.
 
 ## Desktop login
 

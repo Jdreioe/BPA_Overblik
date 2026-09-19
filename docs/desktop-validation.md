@@ -33,6 +33,23 @@ accessibility integration, but this first shell has no explicit heading or
 live-region semantics. Progress announcements belong to the transfer screen in
 issue #6.
 
+## Weekly preview and approval (issue #5)
+
+The worker returns the week already translated: day labels, block geometry in
+minutes from local midnight, Danish status labels, detail lines and the
+attention list. The shell renders those fields and never parses summaries,
+step keys, digests or outcome names. Blocks carry a text marker (`[NY]`,
+`[ÆNDRET]`, `[OK]`, `[!]`) beside their colour, so status never depends on
+colour alone, and the grid is repeated as text below it for screen readers.
+
+Python tests cover the split, overnight days, future DUOS hours, changed
+values, empty and unchanged weeks and an unread destination. Rust tests cover
+approval requiring an unchanged re-read, a changed or newly blocked plan
+returning to review, and revocation on week, setup or retry changes.
+
+Fixture mode can never enable a transfer: it reconciles no destination, so
+`can_apply` stays false and the primary action stays disabled with its reason.
+
 ## Browser sessions (issue #3)
 
 The home screen now offers separate MitHF and DUOS login buttons. On first use,

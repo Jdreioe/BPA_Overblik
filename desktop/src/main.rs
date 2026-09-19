@@ -9,9 +9,9 @@ mod setup;
 
 use chrono::{Datelike, Local, NaiveDate};
 use iced::widget::{button, column, container, row, rule, scrollable, space, text};
-use iced::{Element, Length, Subscription, Task};
+use iced::{Color, Element, Length, Subscription, Task};
 use teamup_shift_sync_gui::protocol::{
-    HomeStatus, LoginState, PlanPreview, Service, Sessions, WorkerError,
+    Block, HomeStatus, LoginState, PlanPreview, Service, Sessions, Week, WorkerError,
 };
 use teamup_shift_sync_gui::worker::{AppFiles, WorkerHandle};
 
@@ -66,6 +66,8 @@ enum Message {
     PreviewRequested,
     PreviewLoaded(Result<PlanPreview, WorkerError>),
     Retry,
+    ApproveRequested,
+    ApprovalDismissed,
     SessionTick,
     Login(Service),
     SessionsLoaded(Result<Sessions, WorkerError>),
@@ -89,8 +91,24 @@ enum HomeState {
 enum PreviewState {
     Idle,
     Loading { from: String, to: String },
-    Ready(PlanPreview),
+    // Boxed: a full week preview dwarfs the other variants.
+    Ready(Box<PlanPreview>),
     Failed(WorkerError),
+}
+
+/// A plan the user approved by clicking "Overfør ændringer".
+///
+/// The click approves exactly the plan that was on screen. The digest is
+/// kept internally and never shown; a re-read that produces a different
+/// digest returns to review instead of transferring unexpected changes.
+#[derive(Debug, Clone)]
+struct Approval {
+    /// Carried internally and never shown; the transfer in #6 sends it back
+    /// so the engine can refuse a batch that no longer matches.
+    #[allow(dead_code)]
+    digest: String,
+    summary: String,
+    week: String,
 }
 
 struct App {
@@ -104,6 +122,11 @@ struct App {
     sessions: Option<Sessions>,
     sessions_loading: bool,
     session_error: Option<String>,
+    /// Digest the user clicked on, awaiting confirmation from a fresh read.
+    approving: Option<String>,
+    approval: Option<Approval>,
+    /// Set when a re-read before transfer found a different plan.
+    plan_changed: bool,
 }
 
 fn current_monday() -> NaiveDate {
@@ -125,6 +148,9 @@ impl App {
             sessions: None,
             sessions_loading: false,
             session_error: None,
+            approving: None,
+            approval: None,
+            plan_changed: false,
         };
         (app, Self::spawn_task(files))
     }
@@ -252,6 +278,7 @@ impl App {
                 // A new week invalidates the shown preview; the user asks
                 // for a fresh "Se ændringer" rather than trusting stale data.
                 self.preview = PreviewState::Idle;
+                self.invalidate_approval();
                 self.reload_home()
             }
             Message::PreviewRequested => {
@@ -259,10 +286,14 @@ impl App {
                     self.preview = PreviewState::Failed(WorkerError::exited(
                         "Baggrundsarbejderen kører ikke. Genstart appen.",
                     ));
+                    self.invalidate_approval();
                     return Task::none();
                 };
                 if !self.files.is_fixture && !self.setup.ready() {
                     return Task::none();
+                }
+                if self.approving.is_none() {
+                    self.invalidate_approval();
                 }
                 let fixture = self.files.is_fixture;
                 let from = self.week_start.format("%Y-%m-%d").to_string();
@@ -307,8 +338,22 @@ impl App {
                             self.setup.error = Some(error.message.clone());
                         }
                     }
+                    let approving = self.approving.take();
                     self.preview = match result {
-                        Ok(preview) => PreviewState::Ready(preview),
+                        Ok(preview) => {
+                            if let Some(expected) = approving {
+                                if expected == preview.digest && preview.week.can_apply {
+                                    self.approval = Some(Approval {
+                                        digest: preview.digest.clone(),
+                                        summary: preview.week.apply_summary.clone(),
+                                        week: format_week_da(self.week_start, self.week_end()),
+                                    });
+                                } else {
+                                    self.plan_changed = true;
+                                }
+                            }
+                            PreviewState::Ready(Box::new(preview))
+                        }
                         Err(error) => PreviewState::Failed(error),
                     };
                 }
@@ -318,7 +363,26 @@ impl App {
                 self.startup_error = None;
                 self.home = HomeState::Loading;
                 self.preview = PreviewState::Idle;
+                self.invalidate_approval();
                 Self::spawn_task(self.files.clone())
+            }
+            Message::ApprovalDismissed => {
+                self.invalidate_approval();
+                Task::none()
+            }
+            Message::ApproveRequested => {
+                // Approval binds to the displayed plan, so the source and
+                // both destinations are read again before anything is
+                // treated as approved.
+                let PreviewState::Ready(preview) = &self.preview else {
+                    return Task::none();
+                };
+                if !preview.week.can_apply {
+                    return Task::none();
+                }
+                self.approving = Some(preview.digest.clone());
+                self.plan_changed = false;
+                self.update(Message::PreviewRequested)
             }
         }
     }
@@ -334,6 +398,7 @@ impl App {
         self.setup.error = None;
         if action != "status" {
             self.preview = PreviewState::Idle;
+            self.invalidate_approval();
         }
         Task::perform(
             async move {
@@ -381,6 +446,15 @@ impl App {
     fn shift_week(&mut self, days: i64) {
         self.week_start += chrono::Duration::days(days);
         self.preview = PreviewState::Idle;
+        self.invalidate_approval();
+    }
+
+    /// Any change to dates, account, mapping or plan revokes approval: the
+    /// next transfer must be approved from a preview the user actually saw.
+    fn invalidate_approval(&mut self) {
+        self.approving = None;
+        self.approval = None;
+        self.plan_changed = false;
     }
 
     fn reload_home(&mut self) -> Task<Message> {
@@ -461,7 +535,8 @@ impl App {
         ]
         .spacing(12)
         .padding(20)
-        .max_width(720);
+        // Wide enough for seven readable day columns in the week grid.
+        .max_width(1100);
 
         container(scrollable(content))
             .width(Length::Fill)
@@ -578,46 +653,242 @@ impl App {
                     .into()
                 }
             }
-            PreviewState::Ready(preview) => {
-                let mut view = column![text(counts_line_da(&preview.counts)).size(16)].spacing(8);
-                if preview.items.is_empty() {
-                    view = view.push(text("Ingen vagter i denne uge."));
-                } else if !preview.blockers.is_empty() {
-                    let mut attention = column![text("Kræver opmærksomhed").size(16)].spacing(4);
-                    for blocker in preview.blockers.iter().take(20) {
-                        attention = attention.push(text(format!("• {blocker}")).size(14));
-                    }
-                    view = view.push(attention);
-                } else {
-                    view = view.push(text("Ingen ændringer at overføre i denne uge."));
-                }
-                let shown = preview.items.iter().take(50);
-                let mut rows = column![text("Alle punkter").size(16)].spacing(2);
-                for item in shown {
-                    rows = rows.push(
-                        text(format!(
-                            "• [{}] {} — {}",
-                            outcome_da(&item.outcome),
-                            item.step_key,
-                            item.summary
-                        ))
-                        .size(13),
-                    );
-                }
-                if preview.items.len() > 50 {
-                    rows = rows.push(
-                        text(format!("… og {} punkter mere.", preview.items.len() - 50)).size(13),
-                    );
-                }
-                view = view.push(rows).push(space::vertical().height(4)).push(
-                    button("Se ændringer igen")
-                        .padding(12)
-                        .on_press(Message::PreviewRequested),
-                );
-                view.into()
-            }
+            PreviewState::Ready(preview) => self.week_view(&preview.week),
         };
         section.push(body).into()
+    }
+
+    /// The readable week: what needs attention, the grid, then the details.
+    fn week_view<'a>(&'a self, week: &'a Week) -> Element<'a, Message> {
+        let mut view = column![text(&week.headline).size(16)].spacing(10);
+        if !week.notice.is_empty() {
+            view = view.push(text(&week.notice).size(13));
+        }
+        if !week.attention.is_empty() {
+            let mut block = column![text("Kræver opmærksomhed").size(16)].spacing(6);
+            for item in &week.attention {
+                block = block.push(
+                    column![
+                        text(format!("{} · {}", item.when, item.who)).size(13),
+                        text(&item.explanation).size(14),
+                        text(format!("Gør sådan: {}", item.action)).size(13),
+                    ]
+                    .spacing(1),
+                );
+            }
+            view = view.push(block);
+        }
+        if week.days.iter().any(|day| !day.blocks.is_empty()) {
+            view = view.push(week_grid(week)).push(day_details(week));
+        }
+        if !week.summary.is_empty() {
+            let mut lines = column![text("Det overføres").size(16)].spacing(2);
+            for line in &week.summary {
+                lines = lines.push(text(format!("• {line}")).size(14));
+            }
+            view = view.push(lines);
+        }
+        view.push(self.approval_row(week)).into()
+    }
+
+    /// The primary action. Enabled only for a reconciled, unblocked plan
+    /// that actually writes something.
+    fn approval_row<'a>(&'a self, week: &'a Week) -> Element<'a, Message> {
+        if let Some(approval) = &self.approval {
+            return column![
+                text(format!("Godkendt: {}", approval.week)).size(16),
+                text(&approval.summary).size(14),
+                text(
+                    "Selve overførslen til MitHF og DUOS er ikke bygget endnu, \
+                     så intet er sendt. Godkendelsen gælder kun den uge, du ser."
+                )
+                .size(13),
+                button("Gennemgå ugen igen")
+                    .padding(12)
+                    .on_press(Message::ApprovalDismissed),
+            ]
+            .spacing(6)
+            .into();
+        }
+        let mut block = column![].spacing(6);
+        if self.plan_changed {
+            block = block.push(
+                text(
+                    "Ugen har ændret sig, siden du så den. Gennemgå den nye \
+                     visning, og godkend igen.",
+                )
+                .size(14),
+            );
+        }
+        if week.can_apply {
+            block = block.push(text(&week.apply_summary).size(14)).push(
+                button("Overfør ændringer")
+                    .padding(14)
+                    .on_press(Message::ApproveRequested),
+            );
+        } else if !week.blocked_reason.is_empty() {
+            block = block
+                .push(text(&week.blocked_reason).size(14))
+                .push(button("Overfør ændringer").padding(14));
+        }
+        block
+            .push(
+                button("Se ændringer igen")
+                    .padding(12)
+                    .on_press(Message::PreviewRequested),
+            )
+            .into()
+    }
+}
+
+const GRID_HEIGHT: f32 = 520.0;
+
+/// Seven day columns with each shift drawn over the hours it covers.
+fn week_grid(week: &Week) -> Element<'_, Message> {
+    let mut hours = column![].width(Length::Fixed(28.0));
+    for hour in 0..24 {
+        hours = hours.push(
+            container(text(format!("{hour:02}")).size(9))
+                .height(Length::FillPortion(60))
+                .width(Length::Fill),
+        );
+    }
+    let mut columns = row![column![
+        text(" ").size(11),
+        container(hours).height(Length::Fixed(GRID_HEIGHT)),
+    ]
+    .spacing(4)]
+    .spacing(4);
+    for day in &week.days {
+        let mut lane = column![].width(Length::Fill);
+        let mut cursor = 0u32;
+        for block in &day.blocks {
+            let from = block.minutes_from.min(1440);
+            let to = block.minutes_to.clamp(from + 1, 1440);
+            if from > cursor {
+                lane = lane
+                    .push(space::vertical().height(Length::FillPortion((from - cursor) as u16)));
+            }
+            lane = lane.push(
+                container(block_body(block))
+                    .height(Length::FillPortion((to - from) as u16))
+                    .width(Length::Fill)
+                    .padding(3)
+                    .style(block_style(&block.status)),
+            );
+            cursor = to;
+        }
+        if cursor < 1440 {
+            lane = lane.push(space::vertical().height(Length::FillPortion((1440 - cursor) as u16)));
+        }
+        columns = columns.push(
+            column![
+                text(&day.label).size(11),
+                container(lane)
+                    .height(Length::Fixed(GRID_HEIGHT))
+                    .width(Length::Fill),
+            ]
+            .spacing(4)
+            .width(Length::FillPortion(1)),
+        );
+    }
+    columns.into()
+}
+
+fn block_body(block: &Block) -> Element<'_, Message> {
+    let mut body = column![
+        text(format!("{} {}", status_marker(&block.status), block.helper)).size(11),
+        text(&block.time_label).size(10),
+    ]
+    .spacing(0);
+    if !block.sps_label.is_empty() {
+        body = body.push(text(format!("◆ SPS {}", block.sps_label)).size(10));
+    }
+    if !block.part_label.is_empty() {
+        body = body.push(text(&block.part_label).size(9));
+    }
+    if block.continues_before {
+        body = body.push(text("▲ fortsat fra dagen før").size(9));
+    }
+    if block.continues_after {
+        body = body.push(text("▼ fortsætter i morgen").size(9));
+    }
+    body.into()
+}
+
+/// The same week as text, with the values the grid has no room for.
+fn day_details(week: &Week) -> Element<'_, Message> {
+    let mut list = column![text("Dag for dag").size(16)].spacing(8);
+    for day in &week.days {
+        // A shift is described once, on the day it starts, so a day holding
+        // only the tail of an overnight shift adds nothing here.
+        if day.blocks.iter().all(|block| block.continues_before) {
+            continue;
+        }
+        let mut entry = column![text(&day.label).size(14)].spacing(2);
+        for block in &day.blocks {
+            if block.continues_before {
+                continue;
+            }
+            let mut heading = format!(
+                "{} {} · {} · {}",
+                status_marker(&block.status),
+                block.helper,
+                block.time_label,
+                block.status_label
+            );
+            if !block.part_label.is_empty() {
+                heading.push_str(&format!(" · {}", block.part_label));
+            }
+            entry = entry.push(text(heading).size(13));
+            for detail in &block.details {
+                entry = entry.push(text(format!("    {detail}")).size(13));
+            }
+        }
+        list = list.push(entry);
+    }
+    list.into()
+}
+
+/// Text cue beside every colour, so status never depends on colour alone.
+fn status_marker(status: &str) -> &'static str {
+    match status {
+        "create" => "[NY]",
+        "update" => "[ÆNDRET]",
+        "matched" => "[OK]",
+        "attention" => "[!]",
+        _ => "[?]",
+    }
+}
+
+fn block_style(status: &str) -> impl Fn(&iced::Theme) -> container::Style + use<> {
+    let (background, foreground) = match status {
+        "create" => (
+            Color::from_rgb8(0xC8, 0xE6, 0xC9),
+            Color::from_rgb8(0x1B, 0x5E, 0x20),
+        ),
+        "update" => (
+            Color::from_rgb8(0xFF, 0xE0, 0xB2),
+            Color::from_rgb8(0x7A, 0x33, 0x00),
+        ),
+        "matched" => (
+            Color::from_rgb8(0xE0, 0xE0, 0xE0),
+            Color::from_rgb8(0x37, 0x37, 0x37),
+        ),
+        "attention" => (
+            Color::from_rgb8(0xFF, 0xCD, 0xD2),
+            Color::from_rgb8(0xB7, 0x1C, 0x1C),
+        ),
+        _ => (
+            Color::from_rgb8(0xBB, 0xDE, 0xFB),
+            Color::from_rgb8(0x0D, 0x47, 0xA1),
+        ),
+    };
+    move |_theme: &iced::Theme| container::Style {
+        background: Some(background.into()),
+        text_color: Some(foreground),
+        border: iced::border::rounded(4),
+        ..container::Style::default()
     }
 }
 
@@ -667,50 +938,6 @@ fn format_week_da(start: NaiveDate, end: NaiveDate) -> String {
     }
 }
 
-fn outcome_da(outcome: &str) -> &str {
-    match outcome {
-        "already_matched" => "matcher",
-        "would_create" => "oprettes",
-        "would_update" => "opdateres",
-        "review" => "gennemgå",
-        "conflicted" => "konflikt",
-        "failed" => "fejlet",
-        "excluded" => "udeladt",
-        "pending_integration" => "afventer",
-        "pending_mithf_bug" => "afventer",
-        other => other,
-    }
-}
-
-fn counts_line_da(counts: &std::collections::BTreeMap<String, u64>) -> String {
-    const ORDER: [&str; 9] = [
-        "already_matched",
-        "would_create",
-        "would_update",
-        "review",
-        "conflicted",
-        "failed",
-        "excluded",
-        "pending_integration",
-        "pending_mithf_bug",
-    ];
-    let mut parts = Vec::new();
-    for key in ORDER {
-        if let Some(n) = counts.get(key) {
-            parts.push(format!("{n} {}", outcome_da(key)));
-        }
-    }
-    for (key, n) in counts {
-        if !ORDER.contains(&key.as_str()) {
-            parts.push(format!("{n} {key}"));
-        }
-    }
-    if parts.is_empty() {
-        return "Ingen punkter.".to_string();
-    }
-    parts.join(" · ")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -735,6 +962,9 @@ mod tests {
             sessions: None,
             sessions_loading: false,
             session_error: None,
+            approving: None,
+            approval: None,
+            plan_changed: false,
         }
     }
 
@@ -760,7 +990,39 @@ mod tests {
             "digest": "abc123",
             "has_conflicts": false,
             "counts": {"already_matched": 3, "would_create": 5, "review": 1},
-            "blockers": ["k mithf.set_sps: gennemgå SPS-teksten"],
+            "blockers": [],
+            "week": {
+                "days": [
+                    {"date": "2026-09-14", "label": "man 14. sep", "blocks": [
+                        {"helper": "Zain Alnemr", "status": "matched",
+                         "status_label": "Uændret", "minutes_from": 450,
+                         "minutes_to": 780, "time_label": "07:30–13:00",
+                         "sps_label": "08:00–10:00", "part_label": "Del 1 af 2",
+                         "continues_before": false, "continues_after": false,
+                         "details": ["SPS-timer 08:00–10:00 er allerede sat."]},
+                        {"helper": "Zain Alnemr", "status": "create",
+                         "status_label": "Oprettes", "minutes_from": 780,
+                         "minutes_to": 1440, "time_label": "13:00–24:00",
+                         "sps_label": "13:00–14:00", "part_label": "Del 2 af 2",
+                         "continues_before": false, "continues_after": true,
+                         "details": ["Vagten oprettes i MitHF."]}
+                    ]},
+                    {"date": "2026-09-15", "label": "tir 15. sep", "blocks": [
+                        {"helper": "Zain Alnemr", "status": "create",
+                         "status_label": "Oprettes", "minutes_from": 0,
+                         "minutes_to": 420, "time_label": "13:00 14. sep – 07:00 15. sep",
+                         "sps_label": "", "part_label": "",
+                         "continues_before": true, "continues_after": false,
+                         "details": []}
+                    ]}
+                ],
+                "attention": [],
+                "headline": "Ugen er klar til overførsel.",
+                "notice": "",
+                "summary": ["1 ny vagt i MitHF"],
+                "apply_summary": "Overfører 1 ny vagt til MitHF.",
+                "can_apply": true, "blocked_reason": "", "destination_read": true
+            },
             "items": [
                 {
                     "source_key": "k", "system": "mithf",
@@ -800,14 +1062,14 @@ mod tests {
         };
         let _ = app.view(); // preview loading
 
-        app.preview = PreviewState::Ready(ready_preview());
+        app.preview = PreviewState::Ready(Box::new(ready_preview()));
         let _ = app.view(); // preview with attention items + rows
 
         let mut empty = ready_preview();
         empty.items = Vec::new();
         empty.counts.clear();
         empty.blockers.clear();
-        app.preview = PreviewState::Ready(empty);
+        app.preview = PreviewState::Ready(Box::new(empty));
         let _ = app.view(); // empty week
 
         app.preview = PreviewState::Failed(failed());
@@ -827,7 +1089,7 @@ mod tests {
     #[test]
     fn week_navigation_shifts_monday_and_invalidates_preview() {
         let mut app = test_app();
-        app.preview = PreviewState::Ready(ready_preview());
+        app.preview = PreviewState::Ready(Box::new(ready_preview()));
 
         let _ = app.update(Message::WeekNext);
         assert_eq!(
@@ -925,6 +1187,91 @@ mod tests {
         assert!(!app.setup.busy);
         assert!(matches!(app.preview, PreviewState::Failed(_)));
         let _ = app.view();
+    }
+
+    /// Stand in for the worker round trip: the app has asked for a fresh
+    /// read of the week it is trying to approve and is waiting for it.
+    fn awaiting_reread(app: &mut App, digest: &str) {
+        app.approving = Some(digest.to_string());
+        app.preview = PreviewState::Loading {
+            from: "2026-09-14".to_string(),
+            to: "2026-09-20".to_string(),
+        };
+    }
+
+    /// The click approves exactly the plan on screen: the app re-reads
+    /// before treating anything as approved, and only a matching digest
+    /// counts.
+    #[test]
+    fn approval_requires_an_unchanged_re_read() {
+        let mut app = test_app();
+        awaiting_reread(&mut app, "abc123");
+        assert!(app.approval.is_none(), "not approved before the re-read");
+
+        let _ = app.update(Message::PreviewLoaded(Ok(ready_preview())));
+        let approval = app.approval.as_ref().expect("approved");
+        assert_eq!(approval.digest, "abc123");
+        assert_eq!(approval.summary, "Overfører 1 ny vagt til MitHF.");
+        assert!(!app.plan_changed);
+        let _ = app.view();
+    }
+
+    #[test]
+    fn a_changed_plan_returns_to_review_instead_of_approving() {
+        let mut app = test_app();
+        awaiting_reread(&mut app, "abc123");
+
+        let mut changed = ready_preview();
+        changed.digest = "def456".to_string();
+        let _ = app.update(Message::PreviewLoaded(Ok(changed)));
+
+        assert!(app.approval.is_none());
+        assert!(app.plan_changed);
+        let _ = app.view();
+    }
+
+    /// A week that became blocked between the click and the re-read must not
+    /// approve either, even though nothing else changed.
+    #[test]
+    fn a_week_blocked_since_the_click_is_not_approved() {
+        let mut app = test_app();
+        awaiting_reread(&mut app, "abc123");
+
+        let mut blocked = ready_preview();
+        blocked.week.can_apply = false;
+        blocked.week.blocked_reason = "Løs punkterne først.".to_string();
+        let _ = app.update(Message::PreviewLoaded(Ok(blocked)));
+
+        assert!(app.approval.is_none());
+        assert!(app.plan_changed);
+        let _ = app.view();
+    }
+
+    #[test]
+    fn a_blocked_week_cannot_be_approved() {
+        let mut app = test_app();
+        let mut blocked = ready_preview();
+        blocked.week.can_apply = false;
+        blocked.week.blocked_reason = "Løs punkterne først.".to_string();
+        app.preview = PreviewState::Ready(Box::new(blocked));
+
+        let _ = app.update(Message::ApproveRequested);
+        assert!(app.approving.is_none());
+        assert!(app.approval.is_none());
+        let _ = app.view();
+    }
+
+    #[test]
+    fn changing_the_week_or_the_mapping_revokes_approval() {
+        for revoke in [Message::WeekNext, Message::WeekCurrent, Message::Retry] {
+            let mut app = test_app();
+            awaiting_reread(&mut app, "abc123");
+            let _ = app.update(Message::PreviewLoaded(Ok(ready_preview())));
+            assert!(app.approval.is_some());
+
+            let _ = app.update(revoke);
+            assert!(app.approval.is_none());
+        }
     }
 
     #[test]

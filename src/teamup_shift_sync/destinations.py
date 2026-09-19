@@ -12,6 +12,7 @@ from .models import (
     MitHfShift,
     PlanItem,
     TimeInterval,
+    step_base,
 )
 from .teamup import _teamup_datetime
 
@@ -254,6 +255,9 @@ class Destinations:
     def write(self, item: PlanItem, snapshot: DestinationSnapshot) -> str:
         """Send one planned operation. The caller checkpoints and verifies read-back."""
         payload = item.payload
+        # Step keys carry the shift segment they belong to; the operation is
+        # the same for every segment of a split shift.
+        step = step_base(item.step_key)
         if item.system == "duos":
             start, end = (
                 self.timestamp(payload["starts_at"]),
@@ -296,7 +300,7 @@ class Destinations:
             # The registration endpoint's response need not contain an ID.
             # Reconciliation finds the unique persisted interval after the write.
             return item.destination_id or ""
-        if item.step_key == "mithf.create_shift":
+        if step == "mithf.create_shift":
             if payload["helper_count"] != 1:
                 raise DestinationError(
                     "Automatic MitHF creation supports exactly one helper per source shift"
@@ -339,7 +343,7 @@ class Destinations:
             raise DestinationError(
                 "MitHF parent shift must be read back before assignment or categories"
             )
-        if item.step_key == "mithf.assign_helper":
+        if step == "mithf.assign_helper":
             response = self.call(
                 "mithf",
                 "book",
@@ -349,13 +353,13 @@ class Destinations:
                 start=existing.starts_at.strftime("%H:%M"),
             )
             return str(response.get("eid") or existing.id)
-        if item.step_key in {"mithf.set_sps", "mithf.set_meeting"}:
+        if step in {"mithf.set_sps", "mithf.set_meeting"}:
             intervals = payload["intervals"]
             if len(intervals) != 1:
-                raise DestinationError(
-                    "Multiple MitHF SPS writes remain blocked pending live verification"
-                )
-            meeting = item.step_key == "mithf.set_meeting"
+                # Splitting gives every MitHF shift exactly one interval; a
+                # plan that reaches here with more is a planner defect.
+                raise DestinationError("A MitHF shift carries exactly one SPS interval")
+            meeting = step == "mithf.set_meeting"
             ids = existing.meeting_record_ids if meeting else existing.sps_record_ids
             if len(ids) > 1:
                 raise DestinationError(
