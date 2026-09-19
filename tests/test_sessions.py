@@ -1,8 +1,11 @@
+import io
+import sys
+from contextlib import redirect_stderr
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event
 from unittest import TestCase
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from teamup_shift_sync.sessions import SERVICES, BrowserSessions
 
@@ -95,6 +98,25 @@ class SessionTests(TestCase):
         self.sessions.submit("mithf", login=True)
         self.settle()
         self.assertEqual(self.sessions.snapshot()["mithf"]["state"], "connected")
+
+    def test_missing_browser_runtime_says_so_instead_of_blaming_windows(self):
+        """A missing browser is not a stuck window; closing windows cannot fix it."""
+        diagnostics = io.StringIO()
+        with (
+            patch.dict(sys.modules, {"playwright": None, "playwright.sync_api": None}),
+            redirect_stderr(diagnostics),
+        ):
+            self.sessions.submit("mithf", login=True)
+            self.settle()
+        status = self.sessions.snapshot()["mithf"]
+
+        self.assertEqual(status["state"], "unavailable")
+        self.assertIn("Appens egen browser mangler", status["message"])
+        self.assertNotIn("app-vinduer", status["message"])
+        self.assertEqual(
+            "session error [mithf] ModuleNotFoundError",
+            diagnostics.getvalue().strip(),
+        )
 
     def test_duplicate_clicks_do_not_launch_more_browsers(self):
         entered, release = Event(), Event()

@@ -171,6 +171,16 @@ The Iced shell lives in `desktop/`. For development it starts the worker with
 the repository virtual environment through `TEAMUP_WORKER_CMD`. Release bundles
 place a standalone worker beside the GUI, so users do not need Python.
 
+Desktop login needs the app-managed browser, so a development virtual
+environment must include the `browser` extra:
+
+```bash
+.venv/bin/python -m pip install -e '.[dev,browser]'
+```
+
+Without it, both **Log ind** buttons report that the browser could not be
+prepared. The packaged worker always bundles it.
+
 Build and verify the portable bundle for the current operating system with:
 
 ```bash

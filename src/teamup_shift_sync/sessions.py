@@ -13,6 +13,15 @@ from urllib.parse import urlsplit
 
 from .browser import REQUEST_SCRIPT, DestinationError
 
+
+class BrowserUnavailable(Exception):
+    """The app's own browser is missing and could not be prepared.
+
+    Kept separate from an ordinary open failure: telling the user to close
+    other windows is useless when the browser itself is not there.
+    """
+
+
 SERVICES = {
     "mithf": "https://mithf.handicapformidlingen.dk/vagtplan/index.php",
     "duos": "https://mit.duos.dk/usage/timeregistrations",
@@ -80,8 +89,16 @@ class BrowserSessions:
             elif restore:
                 self._open(service, headless=True)
             self._check(service)
-        except Exception:  # noqa: BLE001 - isolate failures and redact browser diagnostics
+        except BrowserUnavailable as error:
+            self._report(service, error)
+            self._set(
+                service,
+                "unavailable",
+                "Appens egen browser mangler og kunne ikke hentes. Kontrollér internetforbindelsen, og prøv igen.",
+            )
+        except Exception as error:  # noqa: BLE001 - isolate failures and redact browser diagnostics
             # Playwright exceptions can contain URLs, DOM text and credentials.
+            self._report(service, error)
             self._set(
                 service,
                 "unavailable",
@@ -91,10 +108,23 @@ class BrowserSessions:
             with self.lock:
                 self.busy.discard(service)
 
+    @staticmethod
+    def _report(service, error: BaseException) -> None:
+        """Name the failure on stderr for Help diagnostics.
+
+        Only the service and the exception type: Playwright messages can
+        carry capability URLs, DOM text and credentials.
+        """
+        cause = error.__cause__ or error
+        print(f"session error [{service}] {type(cause).__name__}", file=sys.stderr)
+
     def _start(self, service):
         if self.runtime is not None:
             return
-        from playwright.sync_api import sync_playwright
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as error:
+            raise BrowserUnavailable("browser runtime is not installed") from error
 
         self.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         if os.name != "nt":
@@ -122,13 +152,16 @@ class BrowserSessions:
                         "--no-shell",
                     ]
                 )
-                subprocess.run(
-                    command,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    check=True,
-                    timeout=600,
-                )
+                try:
+                    subprocess.run(
+                        command,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=True,
+                        timeout=600,
+                    )
+                except (subprocess.SubprocessError, OSError) as error:
+                    raise BrowserUnavailable("browser download failed") from error
             self.runtime = runtime
         except Exception:
             runtime.stop()
