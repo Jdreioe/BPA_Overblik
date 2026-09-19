@@ -205,14 +205,16 @@ def preview_live(
     issues = configuration_issues(config)
     if issues:
         raise ConfigError("; ".join(issues))
+    # All-day events carry no hours, so there is nothing to transfer; like
+    # reminders they are calendar annotations, not shifts.
     shifts = tuple(
         client.to_source_shift(occurrence, config.teamup_helper_field)
         for occurrence in occurrences
-        if not is_reminder(occurrence.title)
+        if not is_reminder(occurrence.title) and not occurrence.all_day
     )
     with BrowserTransport(cdp_url) as transport, SyncState(state_path) as state:
         destinations = Destinations(transport, config)
-        destinations.validate(week.range_start)
+        destinations.validate(now)
         destination = destinations.read(
             *reconciliation_range(shifts, week.range_start, week.range_end)
         )
@@ -248,7 +250,9 @@ def preview_connected(*, config, transport, state_path, from_date, to_date, now)
     client = TeamUpClient(config)
     shifts = []
     for event in client.fetch_occurrences(from_date, to_date):
-        if is_reminder(event.title):
+        # All-day events carry no hours, so there is nothing to transfer;
+        # like reminders they are calendar annotations, not shifts.
+        if is_reminder(event.title) or event.all_day:
             continue
         assignments = event.raw.get("subcalendar_ids")
         if not isinstance(assignments, list) or not assignments:
@@ -259,7 +263,7 @@ def preview_connected(*, config, transport, state_path, from_date, to_date, now)
             shifts.append(client.to_source_shift(event, config.teamup_helper_field))
     shifts = tuple(shifts)
     destinations = Destinations(transport, config)
-    destinations.validate(week.range_start)
+    destinations.validate(now)
     with SyncState(state_path) as state:
         destination = destinations.read(
             *reconciliation_range(shifts, week.range_start, week.range_end)
@@ -329,14 +333,17 @@ def apply_live(
         to_date=to_date,
     )
     client = TeamUpClient(config)
+    # All-day events carry no hours, so there is nothing to transfer; like
+    # reminders they are calendar annotations, not shifts. Apply must read
+    # the same shifts as the approved preview, or its digest check fails.
     shifts = tuple(
         client.to_source_shift(occurrence, config.teamup_helper_field)
         for occurrence in client.fetch_occurrences(from_date, to_date)
-        if not is_reminder(occurrence.title)
+        if not is_reminder(occurrence.title) and not occurrence.all_day
     )
     with BrowserTransport(cdp_url) as transport, SyncState(state_path) as state:
         destinations = Destinations(transport, config)
-        destinations.validate(week.range_start)
+        destinations.validate(now)
         apply_plan(
             config=config,
             shifts=shifts,
