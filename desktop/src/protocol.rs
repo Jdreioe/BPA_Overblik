@@ -8,20 +8,21 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::path::Path;
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
 /// A request frame sent to the worker on stdin.
 #[derive(Debug, Serialize)]
-pub struct Request {
+pub struct Request<P: Serialize> {
     pub protocol: u32,
     pub id: String,
     pub method: String,
-    pub params: Value,
+    pub params: P,
 }
 
-impl Request {
-    pub fn new(id: impl Into<String>, method: &str, params: Value) -> Self {
+impl<P: Serialize> Request<P> {
+    pub fn new(id: impl Into<String>, method: &str, params: P) -> Self {
         Self {
             protocol: PROTOCOL_VERSION,
             id: id.into(),
@@ -29,6 +30,25 @@ impl Request {
             params,
         }
     }
+}
+
+#[derive(Debug, Serialize)]
+pub struct EmptyParams {}
+
+#[derive(Debug, Serialize)]
+pub struct HomeStatusParams<'a> {
+    pub config_path: &'a Path,
+    pub state_path: &'a Path,
+    pub now: Option<&'a str>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FixturePreviewParams<'a> {
+    pub config_path: &'a Path,
+    pub fixture_path: &'a Path,
+    pub state_path: &'a Path,
+    pub from: &'a str,
+    pub to: &'a str,
 }
 
 /// A response frame read from the worker on stdout.
@@ -39,6 +59,15 @@ pub struct Response {
     pub id: Option<String>,
     pub event: String,
     pub payload: Value,
+}
+
+/// Progress event shape reserved by protocol v1 for long-running apply work.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Progress {
+    pub stage: String,
+    pub message: String,
+    pub current: Option<u64>,
+    pub total: Option<u64>,
 }
 
 /// User-facing worker failure. `message` is Danish and safe to display;
@@ -195,5 +224,18 @@ mod tests {
         let error = WorkerError::from_payload(&raw);
         assert_eq!(error.code, "fixture_error");
         assert!(error.message.contains("Testugen"));
+    }
+
+    #[test]
+    fn progress_payload_deserializes() {
+        let progress: Progress = serde_json::from_value(serde_json::json!({
+            "stage": "verify",
+            "message": "Kontrollerer MitHF",
+            "current": 2,
+            "total": 4
+        }))
+        .unwrap();
+        assert_eq!(progress.stage, "verify");
+        assert_eq!(progress.current, Some(2));
     }
 }

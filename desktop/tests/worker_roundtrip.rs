@@ -1,10 +1,13 @@
 //! End-to-end round-trip against the real Python worker.
 //!
-//! Uses the repo `.venv` interpreter when present so `cargo test` exercises
-//! the actual protocol, not a mock. Skips gracefully when the interpreter is
-//! missing (e.g. a Rust-only checkout); the unit tests in `protocol` still run.
+//! Tries every plausible interpreter in order — an explicit
+//! `TEAMUP_TEST_PYTHON` override, the repo `.venv` (POSIX and Windows
+//! layouts), then `python3`/`python` on `PATH` — and runs the assertions
+//! against the first one that answers the protocol handshake. Skips
+//! gracefully only when no interpreter can serve the worker (e.g. a
+//! Rust-only checkout); the unit tests in `protocol` still run.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use teamup_shift_sync_gui::worker::{AppFiles, WorkerHandle};
 
 fn repo_root() -> PathBuf {
@@ -14,17 +17,31 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn dev_files() -> Option<AppFiles> {
-    let root = repo_root();
-    let python = root.join(".venv/bin/python");
-    if !python.is_file() {
-        return None;
+fn worker_commands(root: &Path) -> Vec<String> {
+    let mut commands = Vec::new();
+    if let Ok(python) = std::env::var("TEAMUP_TEST_PYTHON") {
+        commands.push(format!("{python} -m teamup_shift_sync.worker"));
     }
-    // Point the supervisor at the dev interpreter explicitly.
-    std::env::set_var(
-        "TEAMUP_WORKER_CMD",
-        format!("{} -m teamup_shift_sync.worker", python.display()),
-    );
+    for candidate in [
+        root.join(".venv/bin/python"),
+        root.join(".venv/Scripts/python.exe"),
+    ] {
+        if candidate.is_file() {
+            commands.push(format!(
+                "{} -m teamup_shift_sync.worker",
+                candidate.display()
+            ));
+        }
+    }
+    // CI installs the package into its own interpreter, so a bare
+    // `python3`/`python` on PATH can serve the worker there.
+    commands.push("python3 -m teamup_shift_sync.worker".to_string());
+    commands.push("python -m teamup_shift_sync.worker".to_string());
+    commands
+}
+
+fn dev_files() -> AppFiles {
+    let root = repo_root();
     std::env::set_var(
         "TEAMUP_SHIFT_SYNC_CONFIG",
         root.join("fixtures/offline-config.toml"),
@@ -33,20 +50,36 @@ fn dev_files() -> Option<AppFiles> {
         "TEAMUP_FIXTURE",
         root.join("fixtures/representative-week.json"),
     );
-    let data_dir = root.join(".local/gui-roundtrip");
-    std::env::set_var("TEAMUP_SHIFT_SYNC_DATA_DIR", &data_dir);
-    Some(AppFiles::resolve())
+    std::env::set_var(
+        "TEAMUP_SHIFT_SYNC_DATA_DIR",
+        root.join(".local/gui-roundtrip"),
+    );
+    AppFiles::resolve()
 }
 
 #[test]
 fn worker_roundtrip_home_and_fixture_preview() {
-    let Some(files) = dev_files() else {
-        eprintln!("SKIP: repo .venv interpreter not found");
-        return;
-    };
+    let root = repo_root();
+    let files = dev_files();
     assert!(files.is_fixture, "dev fixture must exist");
 
-    let worker = WorkerHandle::spawn(&files).expect("worker must spawn and answer ping");
+    let mut worker = None;
+    for command in worker_commands(&root) {
+        std::env::set_var("TEAMUP_WORKER_CMD", &command);
+        match WorkerHandle::spawn(&files) {
+            Ok(handle) => {
+                worker = Some(handle);
+                break;
+            }
+            Err(error) => {
+                eprintln!("worker candidate {command:?} unavailable: {error}");
+            }
+        }
+    }
+    let Some(worker) = worker else {
+        eprintln!("SKIP: no Python interpreter could serve the worker");
+        return;
+    };
 
     let status = worker
         .home_status(Some("2026-09-19T12:00:00+02:00"))

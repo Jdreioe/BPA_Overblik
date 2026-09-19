@@ -3,22 +3,17 @@ from __future__ import annotations
 import argparse
 import shutil
 import sys
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .browser import BrowserTransport, DestinationError
+from .browser import DestinationError
 from .config import ConfigError, configuration_issues, load_config
-from .destinations import Destinations
 from .environment import load_local_environment
 from .fixtures import FixtureError
-from .models import AppConfig, Outcome, PlanItem, SyncPlan
-from .parser import parse_sps_instructions
-from .planner import build_plan
 from .report import render_plan
-from .source_rules import is_reminder, meeting_item
+from .source_rules import is_reminder
 from .state import SyncState
-from .sync import BLOCKERS, apply_plan, plan_digest, reconciliation_range
 from .teamup import TeamUpClient, TeamUpError
 
 
@@ -151,6 +146,8 @@ def _init(args: argparse.Namespace) -> int:
 
 
 def _dry_run(args: argparse.Namespace) -> int:
+    from .operations import apply_live_from_paths, preview_live_from_paths
+
     config = load_config(args.config)
     timezone = ZoneInfo(config.timezone)
     now = args.now or datetime.now(timezone)
@@ -163,18 +160,33 @@ def _dry_run(args: argparse.Namespace) -> int:
     to_date = args.to_date or (from_date + timedelta(days=6))
     if to_date < from_date:
         raise ValueError("--to must be on or after --from")
-    range_start = datetime.combine(from_date, time.min, timezone)
-    range_end = datetime.combine(to_date + timedelta(days=1), time.min, timezone)
     if args.live:
-        if args.cdp_url:
-            return _destination_plan(
-                args, config, from_date, to_date, range_start, range_end, now
+        if args.command == "apply":
+            apply_live_from_paths(
+                config_path=args.config,
+                state_path=args.state,
+                from_date=from_date,
+                to_date=to_date,
+                expected_digest=args.approve,
+                cdp_url=args.cdp_url,
+                now=now,
             )
-        plan = _live_source_plan(
-            config, from_date, to_date, range_start, range_end, now
+            print(
+                "Synchronization finished; all selected operations were read back and verified."
+            )
+            return 0
+        preview = preview_live_from_paths(
+            config_path=args.config,
+            state_path=args.state,
+            from_date=from_date,
+            to_date=to_date,
+            now=now,
+            cdp_url=args.cdp_url,
         )
-        print(render_plan(plan))
-        return 1 if any(item.outcome == Outcome.REVIEW for item in plan.items) else 0
+        print(render_plan(preview.plan))
+        if args.cdp_url:
+            print(f"Plan digest: {preview.digest}")
+        return 1 if preview.has_blockers else 0
     if not args.live:
         from .operations import fixture_preview_from_paths
 
@@ -188,148 +200,6 @@ def _dry_run(args: argparse.Namespace) -> int:
         )
         print(render_plan(preview.plan))
         return 1 if preview.has_conflicts else 0
-
-
-def _destination_plan(args, config, from_date, to_date, range_start, range_end, now):
-    issues = configuration_issues(config)
-    if issues:
-        raise ConfigError("; ".join(issues))
-    client = TeamUpClient(config)
-    shifts = tuple(
-        client.to_source_shift(o, config.teamup_helper_field)
-        for o in client.fetch_occurrences(from_date, to_date)
-        if not is_reminder(o.title)
-    )
-    with BrowserTransport(args.cdp_url) as transport, SyncState(args.state) as state:
-        destinations = Destinations(transport, config)
-        destinations.validate(range_start)
-        if args.command == "apply":
-            apply_plan(
-                config=config,
-                shifts=shifts,
-                destinations=destinations,
-                state=state,
-                start=range_start,
-                end=range_end,
-                expected_digest=args.approve,
-                now=now,
-            )
-            print(
-                "Synchronization finished; all selected operations were read back and verified."
-            )
-            return 0
-        plan = build_plan(
-            config=config,
-            shifts=shifts,
-            destination=destinations.read(*reconciliation_range(shifts, range_start, range_end)),
-            range_start=range_start,
-            range_end=range_end,
-            now=now,
-            state=state,
-            live=True,
-        )
-    print(render_plan(plan))
-    print(f"Plan digest: {plan_digest(plan)}")
-    return 1 if any(i.outcome in BLOCKERS for i in plan.items) else 0
-
-
-def _live_source_plan(
-    config: AppConfig,
-    from_date: date,
-    to_date: date,
-    range_start: datetime,
-    range_end: datetime,
-    now: datetime,
-) -> SyncPlan:
-    client = TeamUpClient(config)
-    items: list[PlanItem] = []
-    for occurrence in client.fetch_occurrences(from_date, to_date):
-        if occurrence.ends_at <= range_start or occurrence.starts_at >= range_end:
-            continue
-        key = f"{client.calendar_id}:{occurrence.series_id}:{occurrence.id}"
-        if is_reminder(occurrence.title):
-            items.append(
-                PlanItem(
-                    key,
-                    "source",
-                    "source.reminder",
-                    Outcome.EXCLUDED,
-                    "Shared 'Husk at checke' reminder, not a shift",
-                )
-            )
-            continue
-        meeting = meeting_item(
-            occurrence.title, key, occurrence.starts_at, occurrence.ends_at
-        )
-        if meeting:
-            items.append(meeting)
-        try:
-            shift = client.to_source_shift(occurrence, config.teamup_helper_field)
-        except TeamUpError as error:
-            items.append(
-                PlanItem(key, "source", "source.helper", Outcome.REVIEW, str(error))
-            )
-            continue
-        parsed = parse_sps_instructions(shift, ZoneInfo(config.timezone))
-        helper = config.teamup_subcalendar_helpers.get(
-            shift.helper_key, shift.helper_key
-        )
-        items.append(
-            PlanItem(
-                key,
-                "mithf",
-                "mithf.readback",
-                Outcome.PENDING_INTEGRATION,
-                f"{helper}: {shift.starts_at.isoformat()} to {shift.ends_at.isoformat()}; destination not reconciled",
-            )
-        )
-        for issue in parsed.issues:
-            items.append(
-                PlanItem(
-                    key,
-                    "source",
-                    f"sps:{issue.source_id}:{issue.code}",
-                    Outcome.REVIEW,
-                    issue.message,
-                )
-            )
-        for interval in parsed.intervals:
-            future = interval.interval.ends_at > now
-            outcome = (
-                Outcome.EXCLUDED
-                if future
-                else (Outcome.REVIEW if parsed.issues else Outcome.PENDING_INTEGRATION)
-            )
-            items.append(
-                PlanItem(
-                    key,
-                    "duos",
-                    interval.key,
-                    outcome,
-                    f"{interval.interval.starts_at.isoformat()} to {interval.interval.ends_at.isoformat()} ({interval.interval.hours:g} hours): "
-                    + (
-                        "future or ongoing"
-                        if future
-                        else "destination reconciliation required"
-                    ),
-                    {
-                        "starts_at": interval.interval.starts_at.isoformat(),
-                        "ends_at": interval.interval.ends_at.isoformat(),
-                        "hours": interval.interval.hours,
-                    },
-                )
-            )
-        if len(parsed.intervals) > 1:
-            items.append(
-                PlanItem(
-                    key,
-                    "mithf",
-                    "mithf.sps",
-                    Outcome.PENDING_MITHF_BUG,
-                    "Separate SPS intervals preserved; no merging or workaround",
-                )
-            )
-    return SyncPlan(range_start, range_end, now, tuple(items))
 
 
 def _forget(args: argparse.Namespace) -> int:
