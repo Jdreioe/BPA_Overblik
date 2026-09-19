@@ -5,6 +5,8 @@
 //! in the app-owned Python worker on blocking threads — never on the UI
 //! thread — and every worker failure lands in a readable recovery state.
 
+mod setup;
+
 use chrono::{Datelike, Local, NaiveDate};
 use iced::widget::{button, column, container, row, rule, scrollable, space, text};
 use iced::{Element, Length, Subscription, Task};
@@ -54,6 +56,8 @@ fn main() -> iced::Result {
 
 #[derive(Debug, Clone)]
 enum Message {
+    Setup(setup::Message),
+    SetupLoaded(Result<setup::SetupState, WorkerError>),
     WorkerSpawned(Result<WorkerReady, WorkerError>),
     HomeLoaded(Result<HomeStatus, WorkerError>),
     WeekPrev,
@@ -90,6 +94,7 @@ enum PreviewState {
 }
 
 struct App {
+    setup: setup::SetupUi,
     files: AppFiles,
     worker: Option<WorkerHandle>,
     startup_error: Option<WorkerError>,
@@ -110,6 +115,7 @@ impl App {
     fn new() -> (Self, Task<Message>) {
         let files = AppFiles::resolve();
         let app = Self {
+            setup: setup::SetupUi::default(),
             files: files.clone(),
             worker: None,
             startup_error: None,
@@ -129,6 +135,52 @@ impl App {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::Setup(message) => {
+                match message {
+                    setup::Message::Link(value) => self.setup.link = value,
+                    setup::Message::Key(value) => self.setup.key = value,
+                    setup::Message::Connect => {
+                        let params =
+                            serde_json::json!({"link":self.setup.link,"api_key":self.setup.key});
+                        return self.setup_task("connect", params);
+                    }
+                    setup::Message::Action(action, params) => {
+                        return self.setup_task(action, params)
+                    }
+                }
+                Task::none()
+            }
+            Message::SetupLoaded(result) => {
+                self.setup.busy = false;
+                match result {
+                    Ok(state) => {
+                        let was_ready = self.setup.ready();
+                        self.setup.state = Some(state);
+                        self.setup.error = None;
+                        self.setup.link.clear();
+                        self.setup.key.clear();
+                        if self.setup.ready() && !was_ready {
+                            self.week_start = self
+                                .setup
+                                .state
+                                .as_ref()
+                                .and_then(|s| {
+                                    NaiveDate::parse_from_str(&s.week_start, "%Y-%m-%d").ok()
+                                })
+                                .unwrap_or_else(current_monday);
+                            return self.update(Message::PreviewRequested);
+                        }
+                    }
+                    Err(error) => {
+                        self.setup.error = Some(error.message.clone());
+                        if error.code == "worker_exit" {
+                            self.worker = None;
+                            self.startup_error = Some(error);
+                        }
+                    }
+                }
+                Task::none()
+            }
             Message::SessionTick => self.session_task(None),
             Message::Login(service) => self.session_task(Some(service)),
             Message::SessionsLoaded(result) => {
@@ -167,7 +219,12 @@ impl App {
                 };
                 self.sessions = None;
                 self.sessions_loading = false;
-                self.session_task(None)
+                let sessions = self.session_task(None);
+                if self.files.is_fixture {
+                    sessions
+                } else {
+                    Task::batch([sessions, self.setup_task("status", serde_json::json!({}))])
+                }
             }
             Message::HomeLoaded(result) => {
                 if let Err(error) = &result {
@@ -204,6 +261,10 @@ impl App {
                     ));
                     return Task::none();
                 };
+                if !self.files.is_fixture && !self.setup.ready() {
+                    return Task::none();
+                }
+                let fixture = self.files.is_fixture;
                 let from = self.week_start.format("%Y-%m-%d").to_string();
                 let to = self.week_end().format("%Y-%m-%d").to_string();
                 self.preview = PreviewState::Loading {
@@ -212,10 +273,16 @@ impl App {
                 };
                 Task::perform(
                     async move {
-                        tokio::task::spawn_blocking(move || worker.preview_fixture(&from, &to))
-                            .await
-                            .map_err(|e| WorkerError::exited(format!("Intern opgave fejlede: {e}")))
-                            .and_then(|inner| inner)
+                        tokio::task::spawn_blocking(move || {
+                            if fixture {
+                                worker.preview_fixture(&from, &to)
+                            } else {
+                                worker.preview_connected(&from, &to)
+                            }
+                        })
+                        .await
+                        .map_err(|e| WorkerError::exited(format!("Intern opgave fejlede: {e}")))
+                        .and_then(|inner| inner)
                     },
                     Message::PreviewLoaded,
                 )
@@ -232,6 +299,14 @@ impl App {
                             self.startup_error = Some(error.clone());
                         }
                     }
+                    if let Err(error) = &result {
+                        if !self.files.is_fixture {
+                            if let Some(state) = &mut self.setup.state {
+                                state.stage = "destinations".to_string();
+                            }
+                            self.setup.error = Some(error.message.clone());
+                        }
+                    }
                     self.preview = match result {
                         Ok(preview) => PreviewState::Ready(preview),
                         Err(error) => PreviewState::Failed(error),
@@ -246,6 +321,34 @@ impl App {
                 Self::spawn_task(self.files.clone())
             }
         }
+    }
+
+    fn setup_task(&mut self, action: &'static str, params: serde_json::Value) -> Task<Message> {
+        if self.setup.busy {
+            return Task::none();
+        }
+        let Some(worker) = self.worker.clone() else {
+            return Task::none();
+        };
+        self.setup.busy = true;
+        self.setup.error = None;
+        if action != "status" {
+            self.preview = PreviewState::Idle;
+        }
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    worker.setup(action, params).and_then(|v| {
+                        serde_json::from_value(v)
+                            .map_err(|_| WorkerError::exited("Opsætningen kunne ikke læses."))
+                    })
+                })
+                .await
+                .map_err(|_| WorkerError::exited("Opsætningen stoppede."))
+                .and_then(|r| r)
+            },
+            Message::SetupLoaded,
+        )
     }
 
     fn subscription(&self) -> Subscription<Message> {
@@ -313,6 +416,40 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
+        if !self.files.is_fixture && !self.setup.ready() && self.startup_error.is_none() {
+            let mut content = column![self.setup.view().map(Message::Setup)]
+                .spacing(16)
+                .padding(20)
+                .max_width(760);
+            if self
+                .setup
+                .state
+                .as_ref()
+                .is_some_and(|s| s.stage != "source")
+            {
+                for (service, name) in [(Service::Mithf, "MitHF"), (Service::Duos, "DUOS")] {
+                    let status = self.sessions.as_ref().map(|s| match service {
+                        Service::Mithf => &s.mithf,
+                        Service::Duos => &s.duos,
+                    });
+                    content = content
+                        .push(text(format!(
+                            "{}: {}",
+                            name,
+                            status.map_or("Kontrollerer login …", |s| s.message.as_str())
+                        )))
+                        .push(
+                            button(text(format!("Log ind i {name}")))
+                                .padding(12)
+                                .on_press(Message::Login(service)),
+                        );
+                }
+            }
+            return container(scrollable(content))
+                .center_x(Length::Fill)
+                .height(Length::Fill)
+                .into();
+        }
         let content = column![
             text("Vagtplanlægning").size(28),
             rule::horizontal(2),
@@ -362,7 +499,7 @@ impl App {
             HomeState::Ready(status) => {
                 let mut items: Vec<Element<'_, Message>> = Vec::new();
                 items.push(text("Tjenester").size(18).into());
-                if status.config_issues.is_empty() {
+                if self.setup.ready() || status.config_issues.is_empty() {
                     items.push(
                         status_line("TeamUp: klar til kontrol", "Konfigurationen er komplet.")
                             .into(),
@@ -420,23 +557,19 @@ impl App {
         let mut section = column![text("Ugens ændringer").size(18)].spacing(8);
         if self.files.is_fixture {
             section = section.push(text("Viser testuge (eksempeldata).").size(13));
-        } else {
-            section = section.push(
-                text("Eksempeldata mangler — sæt TEAMUP_FIXTURE for at vise en testuge.").size(13),
-            );
         }
         let body: Element<'_, Message> = match &self.preview {
             PreviewState::Idle => button("Se ændringer")
                 .padding(14)
                 .on_press(Message::PreviewRequested)
                 .into(),
-            PreviewState::Loading { .. } => text("Henter eksempel …").into(),
+            PreviewState::Loading { .. } => text("Henter ugens ændringer …").into(),
             PreviewState::Failed(error) => {
                 if self.worker.is_none() {
-                    failure_block("Eksemplet kunne ikke hentes.", error, true)
+                    failure_block("Ugens ændringer kunne ikke hentes.", error, true)
                 } else {
                     column![
-                        failure_block("Eksemplet kunne ikke hentes.", error, false),
+                        failure_block("Ugens ændringer kunne ikke hentes.", error, false),
                         button("Prøv igen")
                             .padding(12)
                             .on_press(Message::PreviewRequested),
@@ -587,6 +720,7 @@ mod tests {
 
     fn test_app() -> App {
         App {
+            setup: setup::SetupUi::default(),
             files: AppFiles {
                 config_path: PathBuf::from("fixtures/offline-config.toml"),
                 state_path: PathBuf::from(":memory:"),
@@ -737,6 +871,59 @@ mod tests {
         let _ = app.update(Message::PreviewLoaded(Err(WorkerError::exited("stopped"))));
         assert!(app.worker.is_none());
         assert!(app.startup_error.is_some());
+        let _ = app.view();
+    }
+
+    fn setup_state(stage: &str) -> setup::SetupState {
+        serde_json::from_value(serde_json::json!({
+            "stage": stage, "week_start":"2026-09-14", "calendars":[{"id":"1","name":"Helper"}],
+            "arrangements":[{"id":"4","name":"SPS"}], "types":[{"id":"0","name":"Timer"}],
+            "mithf":[{"id":"2","name":"Helper"}], "duos":[{"id":"3","name":"Helper"}],
+            "mappings":[{"source":"1","mithf":"2","duos":"3","excluded":false}],
+            "arrangement":"4", "registration_type":"0", "account":"Kunde", "notice":"",
+            "can_import":true, "has_credentials":true
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn setup_screens_render_and_preserve_partial_choices_on_failure() {
+        let mut app = test_app();
+        app.files.is_fixture = false;
+        for stage in ["source", "destinations", "helpers"] {
+            app.setup.state = Some(setup_state(stage));
+            let _ = app.view();
+        }
+        app.setup.busy = true;
+        let _ = app.view();
+        let _ = app.update(Message::SetupLoaded(Err(WorkerError {
+            code: "setup_error".into(),
+            message: "Log ind igen".into(),
+            detail: String::new(),
+        })));
+        assert!(!app.setup.busy);
+        assert_eq!(app.setup.state.as_ref().unwrap().mappings[0].duos, "3");
+        assert_eq!(app.setup.error.as_deref(), Some("Log ind igen"));
+        let _ = app.view();
+    }
+
+    #[test]
+    fn changed_mapping_returns_to_setup_without_retrying_preview() {
+        let mut app = test_app();
+        app.files.is_fixture = false;
+        app.setup.state = Some(setup_state("ready"));
+        app.preview = PreviewState::Loading {
+            from: "2026-09-14".into(),
+            to: "2026-09-20".into(),
+        };
+        let _ = app.update(Message::PreviewLoaded(Err(WorkerError {
+            code: "setup_error".into(),
+            message: "Bekræft igen".into(),
+            detail: String::new(),
+        })));
+        assert!(!app.setup.ready());
+        assert!(!app.setup.busy);
+        assert!(matches!(app.preview, PreviewState::Failed(_)));
         let _ = app.view();
     }
 

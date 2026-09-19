@@ -195,3 +195,10 @@ Before apply mode can be enabled, the following must be completed:
    approval are still unknown.
 4. Get authorization for the concrete live batch. Merely running a dry-run is
    never authorization to submit it.
+
+## Guided desktop setup
+
+Normal desktop launches now offer Danish, resumable setup and a live current-week
+preview. See [guided setup](docs/guided-setup.md) for calendar access, the one-time
+Teamup API key requirement, credential storage and validation limits. Fixture
+mode is opt-in through `TEAMUP_FIXTURE`.

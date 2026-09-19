@@ -16,6 +16,18 @@ from .models import (
 from .teamup import _teamup_datetime
 
 
+def employment_available(employment: dict[str, Any], day: date) -> bool:
+    """Match DUOS's active flag or an employment covering the selected date."""
+    if employment.get("isActive") is True:
+        return True
+    try:
+        start = date.fromisoformat(str(employment["startDate"])[:10])
+        end = employment.get("endDate")
+        return start <= day and (not end or day <= date.fromisoformat(str(end)[:10]))
+    except (KeyError, ValueError):
+        return False
+
+
 class Destinations:
     def __init__(self, transport: DestinationTransport, config: AppConfig):
         self.transport = transport
@@ -48,6 +60,13 @@ class Destinations:
             "klient": str(customers[0]["id"]),
             "bevilling": str(grants[0]["id"]),
         }
+        if (
+            self.config.mithf_customer_id
+            and self.creation_options["klient"] != self.config.mithf_customer_id
+            or self.config.mithf_grant_id
+            and self.creation_options["bevilling"] != self.config.mithf_grant_id
+        ):
+            raise DestinationError("MitHF account changed; confirm setup again")
         portfolios = self.call(
             "duos", "portfolios", dateOfActivePortfolio=start.date().isoformat()
         )
@@ -68,12 +87,17 @@ class Destinations:
             dateOfActiveEmployment=start.date().isoformat(),
         )
         for mapping in self.config.helpers.values():
-            if mapping.mithf_name not in self.helpers:
+            if (
+                mapping.mithf_name not in self.helpers
+                or mapping.mithf_id
+                and self.helpers[mapping.mithf_name] != mapping.mithf_id
+            ):
                 raise DestinationError(
                     "A configured helper does not uniquely match MitHF"
                 )
             if not any(
-                str(e["helperId"]) == mapping.duos_employee_number
+                employment_available(e, start.date())
+                and str(e["helperId"]) == mapping.duos_employee_number
                 and " ".join(e["helperName"].split())
                 == " ".join(mapping.duos_name.split())
                 for e in employments

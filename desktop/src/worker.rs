@@ -122,7 +122,7 @@ impl AppFiles {
         let fixture_path = std::env::var("TEAMUP_FIXTURE")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("fixtures/representative-week.json"));
-        let is_fixture = fixture_path.is_file();
+        let is_fixture = std::env::var_os("TEAMUP_FIXTURE").is_some();
         Self {
             config_path,
             state_path: data_dir.join("sync.sqlite3"),
@@ -304,6 +304,22 @@ impl WorkerHandle {
         )?;
         serde_json::from_value(payload)
             .map_err(|e| WorkerError::exited(format!("Ugyldigt home_status-svar: {e}")))
+    }
+
+    pub fn setup(&self, action: &str, mut params: Value) -> Result<Value, WorkerError> {
+        params["config_path"] = serde_json::json!(self.files.config_path);
+        self.request(&format!("setup_{action}"), params)
+    }
+
+    pub fn preview_connected(&self, from: &str, to: &str) -> Result<PlanPreview, WorkerError> {
+        let payload = self.request(
+            "preview_connected",
+            serde_json::json!({
+                "from":from, "to":to, "state_path":self.files.state_path
+            }),
+        )?;
+        serde_json::from_value(payload)
+            .map_err(|_| WorkerError::exited("Ugens ændringer kunne ikke læses."))
     }
 
     pub fn preview_fixture(&self, from: &str, to: &str) -> Result<PlanPreview, WorkerError> {

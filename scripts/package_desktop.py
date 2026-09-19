@@ -41,6 +41,8 @@ def main() -> int:
         "teamup_shift_sync",
         "--collect-all",
         "tzdata",
+        "--collect-all",
+        "keyring",
         "--distpath",
         str(BUNDLE),
         "--workpath",

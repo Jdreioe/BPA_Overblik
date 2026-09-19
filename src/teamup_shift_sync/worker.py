@@ -13,7 +13,7 @@ Protocol v1 frames::
               "payload": {"code": "<stable>", "message": "<Danish>", "detail": "<en>"}}
 
 Methods: ``ping``, ``app_paths``, ``home_status``, ``preview_fixture``,
-``session_login`` and ``session_status``.
+``session_login``, ``session_status``, ``setup_*`` and ``preview_connected``.
 Apply/progress streaming follows in issue #6 and reuses the same envelope.
 """
 
@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import json
 import sys
-import traceback
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -31,6 +30,7 @@ from .config import ConfigError
 from .fixtures import FixtureError
 from .models import Outcome, SyncPlan
 from .sessions import BrowserSessions
+from .setup import Setup, SetupError
 
 _sessions: BrowserSessions | None = None
 
@@ -88,6 +88,51 @@ def _parse_datetime(value: Any) -> datetime | None:
 def handle_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
     """Execute one request; raises ValueError/ConfigError/FixtureError."""
     global _sessions
+    if method.startswith("setup_") or method == "preview_connected":
+        if _sessions is None:
+            _sessions = BrowserSessions(operations.app_data_dir())
+        setup = Setup(operations.app_data_dir(), _sessions)
+        action = method.removeprefix("setup_")
+        try:
+            if action == "source":
+                setup.data["stage"] = "source"
+                setup.save()
+            elif action == "connect":
+                setup.connect(params["link"], params["api_key"])
+            elif action == "retry_source":
+                setup.refresh_source()
+            elif action == "import":
+                setup.import_config(params["config_path"])
+            elif action == "discover":
+                setup.discover(params.get("arrangement"))
+            elif action == "edit":
+                setup.edit(params)
+            elif action == "confirm":
+                setup.confirm()
+            elif method == "preview_connected":
+                preview = setup.preview(
+                    Path(params["state_path"]),
+                    _parse_date(params["from"]),
+                    _parse_date(params["to"]),
+                )
+                payload = plan_to_dict(preview.plan)
+                payload.update(
+                    digest=preview.digest,
+                    has_conflicts=preview.has_blockers,
+                    counts=operations.plan_summaries_by_outcome(preview.plan),
+                    blockers=list(operations.describe_blockers(preview.plan)),
+                )
+                return payload
+            elif action != "status":
+                raise SetupError("Ukendt opsætningstrin.")
+            return setup.view(params.get("config_path"))
+        except SetupError:
+            raise
+        except Exception:  # noqa: BLE001 - redact credential and browser exceptions
+            # Remote exceptions can contain capability URLs or response bodies.
+            raise SetupError(
+                "Oplysningerne kunne ikke kontrolleres. Kontrollér kalenderlink, adgang til detaljer og kommentarer samt login i begge tjenester, og prøv igen."
+            ) from None
     if method in {"session_login", "session_status"}:
         if _sessions is None:
             _sessions = BrowserSessions(operations.app_data_dir())
@@ -146,20 +191,24 @@ def handle_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
 def error_payload(code: str, detail: str = "") -> dict[str, Any]:
     return {
         "code": code,
-        "message": ERROR_DANISH.get(code, ERROR_DANISH["internal"]),
+        "message": detail
+        if code == "setup_error"
+        else ERROR_DANISH.get(code, ERROR_DANISH["internal"]),
         "detail": detail,
     }
 
 
 def classify_error(error: BaseException) -> tuple[str, str]:
     # ConfigError/FixtureError subclass ValueError, so check them first.
+    if isinstance(error, SetupError):
+        return "setup_error", str(error)
     if isinstance(error, ConfigError):
         return "config_error", str(error)
     if isinstance(error, FixtureError):
         return "fixture_error", str(error)
     if isinstance(error, (ValueError, KeyError)):
         return "bad_request", str(error)
-    return "internal", f"{type(error).__name__}: {error}"
+    return "internal", type(error).__name__
 
 
 def process_line(line: str) -> str | None:
@@ -203,8 +252,7 @@ def process_line(line: str) -> str | None:
         code, detail = classify_error(error)
         if code == "bad_request" and "unsupported protocol" in detail:
             code = "bad_protocol"
-        print(f"worker error [{code}]: {detail}", file=sys.stderr)
-        traceback.print_exc(file=sys.stderr)
+        print(f"worker error [{code}]", file=sys.stderr)
         # Config/fixture messages may name a local path, which is fine for
         # the app-owned Help view but never includes tokens or shift text.
         return json.dumps(
