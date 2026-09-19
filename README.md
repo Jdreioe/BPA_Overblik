@@ -150,8 +150,8 @@ reported as `pending_mithf_bug`; they are never merged into one interval.
 
 ## Tests
 
-The offline suite uses Python's standard library, so it has no package download
-prerequisite:
+The offline suite uses unittest and the installed `tzdata` dependency, which
+supplies timezone rules on systems without an IANA timezone database:
 
 ```bash
 .venv/bin/python -m unittest discover -s tests -v

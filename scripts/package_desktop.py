@@ -39,6 +39,8 @@ def main() -> int:
         "src",
         "--collect-data",
         "teamup_shift_sync",
+        "--collect-all",
+        "tzdata",
         "--distpath",
         str(BUNDLE),
         "--workpath",
@@ -62,6 +64,7 @@ def main() -> int:
                 ),
                 "TEAMUP_FIXTURE": str(BUNDLE / "fixtures" / "representative-week.json"),
                 "TEAMUP_SHIFT_SYNC_DATA_DIR": data_dir,
+                "PYTHONTZPATH": "",
             }
         )
         run(str(BUNDLE / gui.name), "--self-check", env=env)
