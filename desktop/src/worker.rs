@@ -281,6 +281,18 @@ impl WorkerHandle {
             .map_err(|e| WorkerError::exited(format!("Ugyldigt app_paths-svar: {e}")))
     }
 
+    pub fn sessions(
+        &self,
+        login: Option<crate::protocol::Service>,
+    ) -> Result<crate::protocol::Sessions, WorkerError> {
+        let (method, params) = match login {
+            Some(service) => ("session_login", serde_json::json!({"service": service})),
+            None => ("session_status", serde_json::json!({})),
+        };
+        serde_json::from_value(self.request(method, params)?)
+            .map_err(|_| WorkerError::exited("Loginstatus kunne ikke læses."))
+    }
+
     pub fn home_status(&self, now_iso: Option<&str>) -> Result<HomeStatus, WorkerError> {
         let payload = self.request(
             "home_status",

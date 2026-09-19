@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import fcntl
+import errno
 import hashlib
 import json
+import os
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -86,15 +87,30 @@ class SyncState:
         if self.path == ":memory:":
             yield
             return
-        with open(self.path + ".lock", "a") as lock:
+        with open(self.path + ".lock", "a+b") as lock:
+            # Windows locks a byte range starting at the current file position.
+            # Both contenders must use byte zero, including for an empty file.
+            lock.seek(0)
+            if os.name == "nt":
+                import msvcrt
+            else:
+                import fcntl
             try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
+                if os.name == "nt":
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as error:
+                if error.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                    raise
                 raise ValueError("Another apply run is using this state file") from None
             try:
                 yield
             finally:
-                fcntl.flock(lock, fcntl.LOCK_UN)
+                if os.name == "nt":
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(lock, fcntl.LOCK_UN)
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
         existing = {

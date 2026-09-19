@@ -150,8 +150,8 @@ reported as `pending_mithf_bug`; they are never merged into one interval.
 
 ## Tests
 
-The offline suite uses Python's standard library, so it has no package download
-prerequisite:
+The offline suite uses unittest and the installed `tzdata` dependency, which
+supplies timezone rules on systems without an IANA timezone database:
 
 ```bash
 .venv/bin/python -m unittest discover -s tests -v
@@ -172,6 +172,14 @@ Build and verify the portable bundle for the current operating system with:
 
 The same worker handshake and fixture preview run in CI on Windows, macOS and
 Linux. See `docs/desktop-validation.md` for the package and accessibility checks.
+
+## Desktop login
+
+Use **Log ind** beside MitHF or DUOS. The app downloads its own browser on first
+use, then opens the service website for login and MFA. It saves each service's
+session in a separate local profile and checks access read-only. A failed login
+can be retried without changing the selected week. Passwords are entered only
+on the service website. See `docs/desktop-validation.md` for validation limits.
 
 ## Live integration gates
 

@@ -32,3 +32,42 @@ Known limitation: Iced 0.14 exposes button text and focus through its platform
 accessibility integration, but this first shell has no explicit heading or
 live-region semantics. Progress announcements belong to the transfer screen in
 issue #6.
+
+## Browser sessions (issue #3)
+
+The home screen now offers separate MitHF and DUOS login buttons. On first use,
+Playwright downloads its matching Chromium into the per-user app data directory.
+The UI shows an indeterminate download stage, then opens the real service site.
+Download and launch failures offer another login attempt. The packaged worker
+includes Playwright and its installer; users need no Python or terminal command.
+The implementation follows Playwright's [browser installation](https://playwright.dev/python/docs/browsers)
+and [persistent context](https://playwright.dev/python/docs/api/class-browsertype#browser-type-launch-persistent-context)
+APIs.
+
+Each service has a separate persistent profile under `profiles/`. Browser control
+uses Playwright's private pipe, with no TCP debugging listener. Login and MFA
+happen in the visible service browser. A background thread checks access through
+read-only helper-list/portfolio requests; only fixed status messages reach Iced.
+The selected week and setup survive reconnecting either service. Closing the app
+closes its browser contexts after pending operations finish. It never attaches to
+or closes a normal browser. The CLI's existing CDP mode remains separate.
+
+Automated checks cover read-only probes, MFA redirects, expired sessions,
+redacted failures, duplicate clicks, closed browsers, and service isolation.
+Before closing #3, manually verify on Windows, macOS and Linux:
+
+- First download, failed download and retry, including a machine without Python.
+- First login and MFA, restart with persisted login, expiry and reconnect.
+- Duplicate tabs, a second app holding the profile lock, browser and worker
+  crashes, and app exit with browser windows open.
+- Required Chromium OS libraries on the supported Linux distribution. Browser
+  acquisition cannot install system packages without an OS installer.
+
+Local Linux validation passed the Python and Rust suites, built the standalone
+worker, downloaded Chromium using that executable, and launched the downloaded
+browser with a temporary isolated profile. Real-service login and clean-machine
+checks have not yet been performed for this change. On startup, existing profiles
+are opened headlessly and checked read-only. The UI shows a checking state until
+the result arrives. Clicking Log ind switches that service to a visible browser
+using the same profile; a browser opened for interactive login stays visible.
+No registration or approval request is made by this flow.

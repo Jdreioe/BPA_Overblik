@@ -7,8 +7,10 @@
 
 use chrono::{Datelike, Local, NaiveDate};
 use iced::widget::{button, column, container, row, rule, scrollable, space, text};
-use iced::{Element, Length, Task};
-use teamup_shift_sync_gui::protocol::{HomeStatus, PlanPreview, WorkerError};
+use iced::{Element, Length, Subscription, Task};
+use teamup_shift_sync_gui::protocol::{
+    HomeStatus, LoginState, PlanPreview, Service, Sessions, WorkerError,
+};
 use teamup_shift_sync_gui::worker::{AppFiles, WorkerHandle};
 
 const DANISH_MONTHS: [&str; 12] = [
@@ -46,6 +48,7 @@ fn main() -> iced::Result {
     }
     iced::application(App::new, App::update, App::view)
         .title("Vagtplanlægning")
+        .subscription(App::subscription)
         .run()
 }
 
@@ -59,6 +62,9 @@ enum Message {
     PreviewRequested,
     PreviewLoaded(Result<PlanPreview, WorkerError>),
     Retry,
+    SessionTick,
+    Login(Service),
+    SessionsLoaded(Result<Sessions, WorkerError>),
 }
 
 /// Carried from the blocking spawn task back to the UI thread.
@@ -90,6 +96,9 @@ struct App {
     week_start: NaiveDate,
     home: HomeState,
     preview: PreviewState,
+    sessions: Option<Sessions>,
+    sessions_loading: bool,
+    session_error: Option<String>,
 }
 
 fn current_monday() -> NaiveDate {
@@ -107,6 +116,9 @@ impl App {
             week_start: current_monday(),
             home: HomeState::Loading,
             preview: PreviewState::Idle,
+            sessions: None,
+            sessions_loading: false,
+            session_error: None,
         };
         (app, Self::spawn_task(files))
     }
@@ -117,6 +129,27 @@ impl App {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::SessionTick => self.session_task(None),
+            Message::Login(service) => self.session_task(Some(service)),
+            Message::SessionsLoaded(result) => {
+                self.sessions_loading = false;
+                match result {
+                    Ok(status) => {
+                        self.sessions = Some(status);
+                        self.session_error = None;
+                    }
+                    Err(error) => {
+                        self.sessions = None;
+                        self.session_error = Some(error.message.clone());
+                        if error.code == "worker_exit" {
+                            self.worker = None;
+                            self.startup_error = Some(error);
+                        }
+                    }
+                }
+                Task::none()
+            }
+
             Message::WorkerSpawned(Err(error)) => {
                 self.worker = None;
                 self.startup_error = Some(error);
@@ -132,7 +165,9 @@ impl App {
                     Ok(status) => HomeState::Ready(status),
                     Err(error) => HomeState::Failed(error),
                 };
-                Task::none()
+                self.sessions = None;
+                self.sessions_loading = false;
+                self.session_task(None)
             }
             Message::HomeLoaded(result) => {
                 if let Err(error) = &result {
@@ -211,6 +246,33 @@ impl App {
                 Self::spawn_task(self.files.clone())
             }
         }
+    }
+
+    fn subscription(&self) -> Subscription<Message> {
+        if self.worker.is_some() {
+            iced::time::every(std::time::Duration::from_secs(3)).map(|_| Message::SessionTick)
+        } else {
+            Subscription::none()
+        }
+    }
+
+    fn session_task(&mut self, login: Option<Service>) -> Task<Message> {
+        if self.sessions_loading {
+            return Task::none();
+        }
+        let Some(worker) = self.worker.clone() else {
+            return Task::none();
+        };
+        self.sessions_loading = true;
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || worker.sessions(login))
+                    .await
+                    .map_err(|_| WorkerError::exited("Loginstatus kunne ikke hentes."))
+                    .and_then(|result| result)
+            },
+            Message::SessionsLoaded,
+        )
     }
 
     fn shift_week(&mut self, days: i64) {
@@ -310,20 +372,37 @@ impl App {
                         items.push(status_line("TeamUp: opsætning mangler", issue).into());
                     }
                 }
-                items.push(
-                    status_line(
-                        "MitHF: login afventer",
-                        "Login via app-browser følger i næste trin.",
-                    )
-                    .into(),
-                );
-                items.push(
-                    status_line(
-                        "DUOS: login afventer",
-                        "Login via app-browser følger i næste trin.",
-                    )
-                    .into(),
-                );
+                if let Some(error) = &self.session_error {
+                    items.push(text(error).into());
+                }
+                for (service, name) in [(Service::Mithf, "MitHF"), (Service::Duos, "DUOS")] {
+                    let status = self.sessions.as_ref().map(|sessions| match service {
+                        Service::Mithf => &sessions.mithf,
+                        Service::Duos => &sessions.duos,
+                    });
+                    let label = match status.map(|s| s.state) {
+                        Some(LoginState::Connected) => "forbundet",
+                        Some(LoginState::Connecting) => "forbinder …",
+                        Some(LoginState::Unavailable) => "ikke tilgængelig",
+                        Some(LoginState::SignInRequired) => "login kræves",
+                        None => "kontrollerer login …",
+                    };
+                    let mut action = button("Log ind").padding(12);
+                    if !self.sessions_loading
+                        && status.is_some()
+                        && !matches!(status.map(|s| s.state), Some(LoginState::Connecting))
+                    {
+                        action = action.on_press(Message::Login(service));
+                    }
+                    items.push(
+                        row![text(format!("{name}: {label}")), action]
+                            .spacing(12)
+                            .into(),
+                    );
+                    if let Some(status) = status {
+                        items.push(text(&status.message).size(13).into());
+                    }
+                }
                 let transfer = match &status.last_verified_at {
                     Some(at) => format!(
                         "Sidst verificeret overførsel: {} ({} verificerede trin)",
@@ -519,6 +598,9 @@ mod tests {
             week_start: NaiveDate::from_ymd_opt(2026, 9, 14).unwrap(),
             home: HomeState::Loading,
             preview: PreviewState::Idle,
+            sessions: None,
+            sessions_loading: false,
+            session_error: None,
         }
     }
 
