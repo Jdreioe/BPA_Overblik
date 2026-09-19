@@ -13,3 +13,6 @@ desktop/target/
 build/
 dist/
 *.spec
+setup.json
+.setup-*
+profiles/

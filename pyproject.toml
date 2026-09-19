@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "A manually triggered TeamUp to MitHF and DUOS shift importer"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = ["tzdata>=2025.2"]
+dependencies = ["tzdata>=2025.2", "keyring>=25.6,<26"]
 
 [project.optional-dependencies]
 dev = ["ruff>=0.13,<1"]

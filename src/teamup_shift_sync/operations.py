@@ -219,6 +219,45 @@ def preview_live(
     )
 
 
+def preview_connected(*, config, transport, state_path, from_date, to_date, now):
+    """Read the same live plan through the app-owned browser transport."""
+    week = resolve_week(
+        timezone_name=config.timezone, now=now, from_date=from_date, to_date=to_date
+    )
+    client = TeamUpClient(config)
+    shifts = []
+    for event in client.fetch_occurrences(from_date, to_date):
+        if is_reminder(event.title):
+            continue
+        assignments = event.raw.get("subcalendar_ids")
+        if not isinstance(assignments, list) or not assignments:
+            raise TeamUpError(
+                "En vagt mangler en læsbar kalender. Kontrollér TeamUp-adgangen."
+            )
+        if set(map(str, assignments)) & config.helpers.keys():
+            shifts.append(client.to_source_shift(event, config.teamup_helper_field))
+    shifts = tuple(shifts)
+    destinations = Destinations(transport, config)
+    destinations.validate(week.range_start)
+    with SyncState(state_path) as state:
+        destination = destinations.read(
+            *reconciliation_range(shifts, week.range_start, week.range_end)
+        )
+        plan = build_plan(
+            config=config,
+            shifts=shifts,
+            destination=destination,
+            range_start=week.range_start,
+            range_end=week.range_end,
+            now=now,
+            state=state,
+            live=True,
+        )
+    return LivePreview(
+        plan, plan_digest(plan), any(item.outcome in BLOCKERS for item in plan.items)
+    )
+
+
 def preview_live_from_paths(
     *,
     config_path: Path,

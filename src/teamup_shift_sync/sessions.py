@@ -11,7 +11,7 @@ from pathlib import Path
 from threading import Event, Lock
 from urllib.parse import urlsplit
 
-from .browser import REQUEST_SCRIPT
+from .browser import REQUEST_SCRIPT, DestinationError
 
 SERVICES = {
     "mithf": "https://mithf.handicapformidlingen.dk/vagtplan/index.php",
@@ -96,6 +96,9 @@ class BrowserSessions:
             return
         from playwright.sync_api import sync_playwright
 
+        self.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if os.name != "nt":
+            self.data_dir.chmod(0o700)
         browser_dir = self.data_dir / "browsers"
         browser_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(browser_dir)
@@ -164,6 +167,9 @@ class BrowserSessions:
         self.pages.pop(service, None)
         profile = self.data_dir / "profiles" / service
         profile.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if os.name != "nt":
+            profile.parent.chmod(0o700)
+            profile.chmod(0o700)
         context = self.runtime.chromium.launch_persistent_context(
             str(profile),
             headless=headless,
@@ -218,6 +224,41 @@ class BrowserSessions:
                 "sign_in_required",
                 "Log ind i browseren, eller genindlæs siden, hvis login er udløbet.",
             )
+
+    def request(self, system, action, payload):
+        """Read only, on the Playwright owner thread. No session data leaves it."""
+        allowed = {
+            "mithf": {"hjaelperliste", "muligheder", "plan", "ekstra"},
+            "duos": {"portfolios", "types", "employments", "search", "detail"},
+        }
+        if action not in allowed.get(system, set()):
+            raise DestinationError("Setup supports read-only requests")
+
+        def read():
+            try:
+                if system in self.restore_pending:
+                    self._run(system, False)
+                page = self.pages.get(system)
+                if page is None or page.is_closed():
+                    raise DestinationError("Log ind i begge tjenester først.")
+                result = page.evaluate(
+                    REQUEST_SCRIPT,
+                    {"system": system, "action": action, "payload": payload},
+                )
+                if not isinstance(result, dict) or "data" not in result:
+                    self._set(
+                        system, "sign_in_required", "Log ind igen for at fortsætte."
+                    )
+                    raise DestinationError("Log ind igen for at læse tjenesten.")
+                return result["data"]
+            except DestinationError:
+                raise
+            except Exception:  # noqa: BLE001 - redact credential and browser exceptions
+                raise DestinationError(
+                    "Tjenesten kunne ikke læses. Prøv at logge ind igen."
+                ) from None
+
+        return self.executor.submit(read).result()
 
     def close(self):
         self.closing.set()

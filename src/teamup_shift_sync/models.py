@@ -74,6 +74,7 @@ class HelperMapping:
     mithf_name: str
     duos_name: str
     duos_employee_number: str
+    mithf_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -89,6 +90,8 @@ class AppConfig:
     helpers: dict[str, HelperMapping]
     teamup_subcalendar_helpers: dict[str, str] = field(default_factory=dict)
     teamup_lookback_days: int = 7
+    mithf_customer_id: str = ""
+    mithf_grant_id: str = ""
 
 
 @dataclass(frozen=True)

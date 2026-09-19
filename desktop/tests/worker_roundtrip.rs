@@ -89,6 +89,13 @@ fn worker_roundtrip_home_and_fixture_preview() {
     assert_eq!(status.login_state, "unknown");
     assert_eq!(status.last_verified_at, None);
 
+    let setup = worker
+        .setup("status", serde_json::json!({}))
+        .expect("first-run status must succeed without a keychain");
+    assert_eq!(setup["stage"], "source");
+    assert_eq!(setup["has_credentials"], false);
+    assert!(setup.get("credential").is_none());
+
     let preview = worker
         .preview_fixture("2026-09-14", "2026-09-20")
         .expect("fixture preview must succeed");
