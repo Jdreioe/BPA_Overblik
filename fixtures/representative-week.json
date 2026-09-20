@@ -47,10 +47,15 @@
     {
       "id": "mithf-existing-split",
       "starts_at": "2026-09-14T07:30:00+02:00",
-      "ends_at": "2026-09-14T15:00:00+02:00",
+      "ends_at": "2026-09-14T13:00:00+02:00",
       "helper_count": 1,
       "helper_name": "Zain Alnemr",
-      "sps_intervals": []
+      "sps_intervals": [
+        {
+          "starts_at": "2026-09-14T08:00:00+02:00",
+          "ends_at": "2026-09-14T10:00:00+02:00"
+        }
+      ]
     }
   ],
   "duos_registrations": [
@@ -64,4 +69,3 @@
     }
   ]
 }
-

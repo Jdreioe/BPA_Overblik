@@ -14,6 +14,7 @@ registration_type = "Almindelig"
 [[helpers]]
 teamup_key = "fixture-zain"
 teamup_display_name = "Zain Fixture"
+teamup_color = 18
 mithf_name = "Zain Alnemr"
 duos_name = "Zain Alnemr"
 duos_employee_number = "281550"
@@ -21,6 +22,7 @@ duos_employee_number = "281550"
 [[helpers]]
 teamup_key = "fixture-anton"
 teamup_display_name = "Anton Fixture"
+teamup_color = 27
 mithf_name = "Anton Skadhede"
 duos_name = "Anton Skadhede"
 duos_employee_number = "281549"

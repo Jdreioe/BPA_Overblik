@@ -10,6 +10,7 @@ from teamup_shift_sync.models import (
     MitHfShift,
     Outcome,
     TimeInterval,
+    step_base,
 )
 from teamup_shift_sync.planner import build_plan
 from teamup_shift_sync.state import SyncState
@@ -28,42 +29,67 @@ class MemoryDestinations:
     def write(self, item, snapshot):
         self.writes.append(item.step_key)
         p = item.payload
-        if item.step_key == "mithf.create_shift":
-            shift = MitHfShift(
-                "new", moment(p["starts_at"]), moment(p["ends_at"]), 1, None
+        # A split shift writes several MitHF shifts, so the fake keys them by
+        # the destination ID the planner resolved rather than assuming one.
+        step = step_base(item.step_key)
+        shifts = {shift.id: shift for shift in snapshot.mithf_shifts}
+        if step == "mithf.create_shift":
+            new_id = item.destination_id or f"new-{len(shifts)}"
+            shifts[new_id] = MitHfShift(
+                new_id, moment(p["starts_at"]), moment(p["ends_at"]), 1, None
             )
-            self.snapshot = replace(snapshot, mithf_shifts=(shift,))
+            self._store(snapshot, shifts)
             if self.timeout_after_create:
                 self.timeout_after_create = False
                 raise DestinationError("Response lost")
-            return shift.id
-        if item.step_key == "mithf.assign_helper":
+            return new_id
+        if step == "mithf.assign_helper":
             # MitHF can return a different shift ID after booking.
-            shift = replace(
-                snapshot.mithf_shifts[0], id="booked", helper_name=p["helper_name"]
+            previous = shifts.pop(item.destination_id)
+            booked = replace(
+                previous,
+                id=f"booked-{item.destination_id}",
+                helper_name=p["helper_name"],
             )
-            self.snapshot = replace(snapshot, mithf_shifts=(shift,))
-            return shift.id
-        if item.step_key == "mithf.set_sps":
+            shifts[booked.id] = booked
+            self._store(snapshot, shifts)
+            return booked.id
+        if step == "mithf.set_sps":
             intervals = tuple(
                 TimeInterval(moment(i["starts_at"]), moment(i["ends_at"]))
                 for i in p["intervals"]
             )
-            shift = replace(snapshot.mithf_shifts[0], sps_intervals=intervals)
-            self.snapshot = replace(snapshot, mithf_shifts=(shift,))
-            return shift.id
+            shifts[item.destination_id] = replace(
+                shifts[item.destination_id], sps_intervals=intervals
+            )
+            self._store(snapshot, shifts)
+            return item.destination_id
         if item.system == "duos":
             entry = DuosRegistration(
-                "duos",
+                f"duos-{len(snapshot.duos_registrations)}",
                 p["arrangement_id"],
                 p["employee_number"],
                 p["registration_type"],
                 moment(p["starts_at"]),
                 moment(p["ends_at"]),
             )
-            self.snapshot = replace(snapshot, duos_registrations=(entry,))
+            self.snapshot = replace(
+                snapshot,
+                duos_registrations=tuple(
+                    r
+                    for r in snapshot.duos_registrations
+                    if r.id != item.destination_id
+                )
+                + (entry,),
+            )
             return ""
         raise AssertionError("Unexpected write")
+
+    def _store(self, snapshot, shifts):
+        self.snapshot = replace(
+            snapshot,
+            mithf_shifts=tuple(sorted(shifts.values(), key=lambda s: s.starts_at)),
+        )
 
 
 class SyncTests(unittest.TestCase):
@@ -106,7 +132,8 @@ class SyncTests(unittest.TestCase):
                 all(i.outcome == Outcome.ALREADY_MATCHED for i in final.items)
             )
             self.assertEqual(
-                "booked", state.get_step(shift.key, "mithf.create_shift").destination_id
+                "booked-new-0",
+                state.get_step(shift.key, "mithf.create_shift").destination_id,
             )
             writes = list(destination.writes)
             self.apply(state, destination, shift)
@@ -146,9 +173,55 @@ class SyncTests(unittest.TestCase):
                 self.apply(state, destination, changed, digest)
             self.assertEqual([], destination.writes)
 
-    def test_unverified_split_sps_blocks_entire_batch(self):
+    def test_split_sps_writes_one_mithf_shift_per_interval(self):
+        """``uni 8-10 & 13-14`` becomes two consecutive MitHF shifts.
+
+        MitHF holds one SPS interval per shift, so the 07:30-15:00 source
+        shift is cut at 13:00, the start of the second interval.
+        """
         destination = MemoryDestinations()
         with SyncState(":memory:") as state:
-            with self.assertRaisesRegex(DestinationError, "unresolved"):
-                self.apply(state, destination, source_shift())
+            final = self.apply(state, destination, source_shift())
+
+            self.assertEqual(
+                [
+                    ("2026-09-14T07:30:00+02:00", "2026-09-14T13:00:00+02:00"),
+                    ("2026-09-14T13:00:00+02:00", "2026-09-14T15:00:00+02:00"),
+                ],
+                [
+                    (s.starts_at.isoformat(), s.ends_at.isoformat())
+                    for s in destination.snapshot.mithf_shifts
+                ],
+            )
+            self.assertEqual(
+                [
+                    (
+                        TimeInterval(
+                            moment("2026-09-14T08:00:00+02:00"),
+                            moment("2026-09-14T10:00:00+02:00"),
+                        ),
+                    ),
+                    (
+                        TimeInterval(
+                            moment("2026-09-14T13:00:00+02:00"),
+                            moment("2026-09-14T14:00:00+02:00"),
+                        ),
+                    ),
+                ],
+                [s.sps_intervals for s in destination.snapshot.mithf_shifts],
+            )
+            self.assertEqual(2, len(destination.snapshot.duos_registrations))
+            self.assertTrue(
+                all(
+                    item.outcome in {Outcome.ALREADY_MATCHED, Outcome.EXCLUDED}
+                    for item in final.items
+                )
+            )
+
+    def test_reapplying_a_split_week_writes_nothing(self):
+        destination = MemoryDestinations()
+        with SyncState(":memory:") as state:
+            self.apply(state, destination, source_shift())
+            destination.writes.clear()
+            self.apply(state, destination, source_shift())
             self.assertEqual([], destination.writes)

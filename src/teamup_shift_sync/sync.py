@@ -14,6 +14,9 @@ from .models import (
     PlanItem,
     SourceShift,
     SyncPlan,
+    segment_step,
+    step_base,
+    step_segment,
 )
 from .planner import build_plan
 from .state import SyncState
@@ -24,7 +27,6 @@ BLOCKERS = {
     Outcome.REVIEW,
     Outcome.FAILED,
     Outcome.PENDING_INTEGRATION,
-    Outcome.PENDING_MITHF_BUG,
 }
 
 
@@ -104,7 +106,7 @@ def _apply_plan(
     # Detect a source batch attempting to use one destination for different shifts.
     claims: dict[tuple[str, str], str] = {}
     for item in approved.items:
-        if item.destination_id and item.step_key == "mithf.create_shift":
+        if item.destination_id and step_base(item.step_key) == "mithf.create_shift":
             key = (item.system, item.destination_id)
             if key in claims and claims[key] != item.source_key:
                 raise DestinationError(
@@ -143,8 +145,13 @@ def _apply_plan(
         id_ = destinations.write(item, snapshot)
         if id_:
             _record(state, item, "uncertain", id_)
-        if item.step_key == "mithf.assign_helper" and id_:
-            parent = state.get_step(item.source_key, "mithf.create_shift")
+        if step_base(item.step_key) == "mithf.assign_helper" and id_:
+            # Resume-safety: the shift exists once assignment succeeded, so
+            # its own segment's creation record is verified by that read-back.
+            parent = state.get_step(
+                item.source_key,
+                segment_step("mithf.create_shift", step_segment(item.step_key)),
+            )
             if parent:
                 state.record_step(
                     source_key=item.source_key,

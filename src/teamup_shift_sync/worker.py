@@ -29,6 +29,7 @@ from . import operations
 from .config import ConfigError
 from .fixtures import FixtureError
 from .models import Outcome, SyncPlan
+from .preview import to_dict as week_to_dict
 from .sessions import BrowserSessions
 from .setup import Setup, SetupError
 
@@ -67,6 +68,7 @@ def plan_item_to_dict(item: Any) -> dict[str, Any]:
         "summary": item.summary,
         "payload": item.payload,
         "destination_id": item.destination_id,
+        "reason": item.reason,
     }
 
 
@@ -83,6 +85,12 @@ def _parse_datetime(value: Any) -> datetime | None:
     if parsed.tzinfo is None:
         raise ValueError("datetime must include a UTC offset")
     return parsed
+
+
+def _stage(name: str) -> None:
+    """Mark progress on stderr. Static names only: stderr may surface in
+    diagnostics, so it never carries paths, tokens, or shift text."""
+    print(f"worker stage: {name}", file=sys.stderr, flush=True)
 
 
 def handle_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -120,7 +128,7 @@ def handle_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
                     digest=preview.digest,
                     has_conflicts=preview.has_blockers,
                     counts=operations.plan_summaries_by_outcome(preview.plan),
-                    blockers=list(operations.describe_blockers(preview.plan)),
+                    week=week_to_dict(preview.week),
                 )
                 return payload
             elif action != "status":
@@ -151,6 +159,7 @@ def handle_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
             "state_path": str(operations.default_state_path(data_dir)),
         }
     if method == "home_status":
+        _stage("home_status start")
         status = operations.home_status(
             config_path=Path(params["config_path"]),
             state_path=Path(
@@ -158,6 +167,7 @@ def handle_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
             ),
             now=_parse_datetime(params.get("now")),
         )
+        _stage("home_status done")
         return {
             "timezone": status.timezone,
             "week_start": status.week_start.isoformat(),
@@ -169,6 +179,7 @@ def handle_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
             "login_detail": status.login_detail,
         }
     if method == "preview_fixture":
+        _stage("preview_fixture start")
         preview = operations.fixture_preview_from_paths(
             config_path=Path(params["config_path"]),
             fixture_path=Path(params["fixture_path"]),
@@ -179,11 +190,12 @@ def handle_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
             to_date=_parse_date(params.get("to")),
             now=_parse_datetime(params.get("now")),
         )
+        _stage("preview_fixture done")
         payload = plan_to_dict(preview.plan)
         payload["digest"] = preview.digest
         payload["has_conflicts"] = preview.has_conflicts
         payload["counts"] = operations.plan_summaries_by_outcome(preview.plan)
-        payload["blockers"] = list(operations.describe_blockers(preview.plan))
+        payload["week"] = week_to_dict(preview.week)
         return payload
     raise ValueError(f"unknown method: {method}")
 
@@ -280,7 +292,24 @@ def main() -> int:
             _sessions.close()
 
 
+def _ensure_utf8_stdio() -> None:
+    """Force UTF-8 on stdio regardless of locale or frozen packaging.
+
+    The protocol is UTF-8 JSON and responses carry Danish dashes and
+    arrows. A frozen Windows worker ignores PYTHONUTF8 and falls back to
+    the ANSI code page, which encodes e.g. '–' as 0x96 — invalid UTF-8
+    that the desktop shell must reject. Reconfiguring here is
+    deterministic in every runtime; on an interpreter that already uses
+    UTF-8 it is a no-op. Loud failure (never mojibake): if a stream
+    cannot be reconfigured the worker exits at startup instead of
+    corrupting the protocol stream.
+    """
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        stream.reconfigure(encoding="utf-8")
+
+
 def serve() -> int:
+    _ensure_utf8_stdio()
     for line in sys.stdin:
         if not line.strip():
             continue

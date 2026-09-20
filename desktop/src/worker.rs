@@ -17,12 +17,22 @@ use crate::protocol::{
 };
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::Duration;
 
 pub const WORKER_MODULE: &str = "teamup_shift_sync.worker";
+
+/// Upper bound for one worker candidate's ping handshake. A healthy local
+/// worker answers in about a second; a candidate that starts but never
+/// answers must fail fast so the next one is tried. Notably, `python3` on
+/// Windows may resolve to the Microsoft Store stub, which waits on an
+/// unseen install prompt instead of exiting — without this bound the
+/// caller blocks in `read_line` forever.
+const SPAWN_PING_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How the GUI finds its worker.
 ///
@@ -132,11 +142,87 @@ impl AppFiles {
     }
 }
 
+/// One ping round-trip on the handshake thread's own pipes. Mirrors the
+/// protocol checks in [`WorkerHandle::request`] without touching shared
+/// state, so the pipes can be handed back to the new handle on success.
+fn ping_once(
+    stdin: &mut ChildStdin,
+    stdout: &mut BufReader<ChildStdout>,
+) -> Result<Value, WorkerError> {
+    let frame = Request::new("1", "ping", EmptyParams {});
+    let mut line = serde_json::to_string(&frame)
+        .map_err(|e| WorkerError::exited(format!("Kunne ikke kode forespørgsel: {e}")))?;
+    line.push('\n');
+    if stdin.write_all(line.as_bytes()).is_err() || stdin.flush().is_err() {
+        return Err(WorkerError::exited(
+            "Baggrundsarbejderen tog ikke imod håndtrykket.",
+        ));
+    }
+    let mut response_line = String::new();
+    match stdout.read_line(&mut response_line) {
+        Ok(0) => Err(WorkerError::exited(
+            "Baggrundsarbejderen lukkede forbindelsen under håndtrykket.",
+        )),
+        Ok(_) => {
+            let response: Response = serde_json::from_str(&response_line).map_err(|e| {
+                WorkerError::exited(format!("Baggrundsarbejderen svarede ulæseligt: {e}"))
+            })?;
+            if response.protocol != crate::protocol::PROTOCOL_VERSION {
+                return Err(WorkerError::exited(format!(
+                    "Protokol v{} blev svaret, men v{} forventes. Opdatér app og arbejder samlet.",
+                    response.protocol,
+                    crate::protocol::PROTOCOL_VERSION
+                )));
+            }
+            if response.event == "result" {
+                Ok(response.payload)
+            } else {
+                Err(WorkerError::from_payload(&response.payload))
+            }
+        }
+        Err(e) => Err(WorkerError::exited(format!(
+            "Håndtrykket med baggrundsarbejderen mislykkedes: {e}"
+        ))),
+    }
+}
+
+/// Best effort: an unusable candidate must not linger as an orphan,
+/// whether it exited on its own or is still waiting silently.
+fn reap(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Lines of worker stderr kept for diagnostics.
+const STDERR_TAIL_LINES: usize = 100;
+
+/// Drain worker stderr on its own thread into a bounded tail buffer.
+/// Besides surfacing the worker's own stage markers in failure detail,
+/// this closes a real deadlock: stderr is piped but was only read after
+/// a failure, so a chatty worker could fill the pipe and block forever
+/// while the parent waited on stdout.
+fn drain_stderr(stderr: std::process::ChildStderr) -> Arc<Mutex<VecDeque<String>>> {
+    let tail = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_TAIL_LINES)));
+    let kept = tail.clone();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines() {
+            let Ok(line) = line else { break };
+            if let Ok(mut tail) = kept.lock() {
+                tail.push_back(line);
+                while tail.len() > STDERR_TAIL_LINES {
+                    tail.pop_front();
+                }
+            }
+        }
+    });
+    tail
+}
+
 struct WorkerInner {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
-    stderr: Option<std::process::ChildStderr>,
+    stderr_tail: Arc<Mutex<VecDeque<String>>>,
     next_id: u64,
     command_display: String,
 }
@@ -165,6 +251,11 @@ impl WorkerHandle {
         let command = WorkerCommand::resolve();
         let mut child = Command::new(&command.program)
             .args(&command.args)
+            // The protocol is UTF-8 JSON, and responses carry Danish
+            // dashes and arrows (`–`, `→`). Windows pipes default to the
+            // ANSI code page, which cannot encode those — the worker would
+            // crash on its first preview response. Force UTF-8 instead.
+            .env("PYTHONUTF8", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -183,22 +274,48 @@ impl WorkerHandle {
             .stdout
             .take()
             .ok_or_else(|| WorkerError::startup("Baggrundsarbejderens stdout kunne ikke åbnes."))?;
-        let stderr = child.stderr.take();
-        let handle = Self {
-            inner: Arc::new(Mutex::new(WorkerInner {
-                child,
-                stdin,
-                stdout: BufReader::new(stdout),
-                stderr,
-                next_id: 1,
-                command_display: command.display(),
-            })),
-            files: files.clone(),
-        };
+        let stderr_tail = child
+            .stderr
+            .take()
+            .map(drain_stderr)
+            .unwrap_or_else(|| Arc::new(Mutex::new(VecDeque::new())));
         // The ping doubles as a protocol-version handshake: a worker that
-        // answers with another version fails here, not mid-preview.
-        handle.request("ping", EmptyParams {})?;
-        Ok(handle)
+        // answers with another version fails here, not mid-preview. It runs
+        // on its own thread so a candidate that never answers is killed
+        // after SPAWN_PING_TIMEOUT instead of blocking the caller forever.
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut stdin = stdin;
+            let mut stdout = BufReader::new(stdout);
+            let outcome = ping_once(&mut stdin, &mut stdout);
+            let _ = tx.send((outcome, stdin, stdout));
+        });
+        match rx.recv_timeout(SPAWN_PING_TIMEOUT) {
+            Ok((Ok(_), stdin, stdout)) => Ok(Self {
+                inner: Arc::new(Mutex::new(WorkerInner {
+                    child,
+                    stdin,
+                    stdout,
+                    stderr_tail,
+                    // The handshake thread already used request id "1".
+                    next_id: 2,
+                    command_display: command.display(),
+                })),
+                files: files.clone(),
+            }),
+            Ok((Err(error), _, _)) => {
+                reap(&mut child);
+                Err(error)
+            }
+            Err(_) => {
+                reap(&mut child);
+                Err(WorkerError::startup(format!(
+                    "'{}' svarede ikke inden for {} sekunder. Peg på en anden fortolker med TEAMUP_WORKER_CMD.",
+                    command.display(),
+                    SPAWN_PING_TIMEOUT.as_secs(),
+                )))
+            }
+        }
     }
 
     fn request<P: Serialize>(&self, method: &str, params: P) -> Result<Value, WorkerError> {
@@ -241,24 +358,23 @@ impl WorkerHandle {
 
     /// Build an "unexpected exit" error, attaching the stderr tail as
     /// technical detail. Stderr never contains tokens or shift text by
-    /// worker construction — only exception summaries and paths.
+    /// worker construction — only exception summaries, stage markers and
+    /// paths. The tail is drained continuously, so reading it never blocks
+    /// and a chatty worker can never fill the pipe.
     fn describe_exit(&self, inner: &mut WorkerInner, phase: &str) -> WorkerError {
-        use std::io::Read as _;
         let mut detail = format!(
             "Kommunikationen med '{}' brød sammen under {}.",
             inner.command_display, phase
         );
-        if let Some(stderr) = inner.stderr.as_mut() {
-            let mut tail = String::new();
-            // Best effort: the child has exited or is exiting; do not block.
-            let _ = stderr.read_to_string(&mut tail);
+        if let Ok(tail) = inner.stderr_tail.lock() {
             let trimmed: String = tail
-                .lines()
+                .iter()
                 .rev()
                 .take(8)
                 .collect::<Vec<_>>()
                 .into_iter()
                 .rev()
+                .map(String::as_str)
                 .collect::<Vec<_>>()
                 .join("\n");
             if !trimmed.trim().is_empty() {

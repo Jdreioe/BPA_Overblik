@@ -69,16 +69,63 @@ class PlannerTests(unittest.TestCase):
     def test_split_sps_creates_independent_duos_steps(self) -> None:
         plan = self.plan(source_shift())
         duos = [item for item in plan.items if item.system == "duos"]
-        mithf_sps = next(
-            item for item in plan.items if item.step_key == "mithf.set_sps"
-        )
 
         self.assertEqual(2, len(duos))
         self.assertEqual(
             [Outcome.WOULD_CREATE, Outcome.WOULD_CREATE],
             [item.outcome for item in duos],
         )
-        self.assertEqual(Outcome.PENDING_MITHF_BUG, mithf_sps.outcome)
+
+    def test_two_sps_intervals_become_two_mithf_shifts(self) -> None:
+        """MitHF holds one SPS interval per shift, so the shift is cut at the
+        start of the second interval."""
+        plan = self.plan(source_shift())
+        shifts = [
+            item
+            for item in plan.items
+            if item.step_key.startswith("mithf.create_shift")
+        ]
+        sps = [item for item in plan.items if item.step_key.startswith("mithf.set_sps")]
+
+        self.assertEqual(
+            [
+                ("2026-09-14T07:30:00+02:00", "2026-09-14T13:00:00+02:00"),
+                ("2026-09-14T13:00:00+02:00", "2026-09-14T15:00:00+02:00"),
+            ],
+            [(item.payload["starts_at"], item.payload["ends_at"]) for item in shifts],
+        )
+        self.assertEqual(
+            [
+                [
+                    {
+                        "starts_at": "2026-09-14T08:00:00+02:00",
+                        "ends_at": "2026-09-14T10:00:00+02:00",
+                    }
+                ],
+                [
+                    {
+                        "starts_at": "2026-09-14T13:00:00+02:00",
+                        "ends_at": "2026-09-14T14:00:00+02:00",
+                    }
+                ],
+            ],
+            [item.payload["intervals"] for item in sps],
+        )
+
+    def test_unresolved_instruction_never_moves_a_shift_boundary(self) -> None:
+        plan = self.plan(source_shift(comment="uni 8-10 & 13-14 & later"))
+        shifts = [
+            item
+            for item in plan.items
+            if item.step_key.startswith("mithf.create_shift")
+        ]
+
+        self.assertEqual(1, len(shifts))
+        self.assertEqual("2026-09-14T15:00:00+02:00", shifts[0].payload["ends_at"])
+        self.assertEqual(
+            Outcome.REVIEW,
+            next(i for i in plan.items if i.step_key == "mithf.set_sps").outcome,
+        )
 
     def test_first_duos_match_does_not_block_second_interval(self) -> None:
         existing = DuosRegistration(

@@ -92,6 +92,35 @@ class DestinationTests(unittest.TestCase):
         with self.assertRaisesRegex(DestinationError, "coverage"):
             Destinations(transport, config()).read_mithf(self.start, self.end)
 
+    def validating_transport(self):
+        return Responses(
+            {"grupper": [{"hjaelpere": [{"navn": "Mit Helper", "vid": 7}]}]},
+            {"muligheder": {"kunder": [{"id": 1}], "bevillinger": [{"id": 2, "valgbar": True}]}},
+            [{"id": "arrangement", "type": "Ordnings SPS"}],
+            [{"id": "Almindelig"}],
+            # Employed as of today, but not on the past Monday below.
+            [{"helperId": "123", "helperName": "DUOS Helper", "startDate": "2026-09-10"}],
+        )
+
+    def test_validate_resolves_identities_as_of_today(self):
+        transport = self.validating_transport()
+        Destinations(transport, config()).validate(moment("2026-09-19T12:00:00+02:00"))
+        duos_reads = [payload for _, action, payload in transport.requests if action in {"portfolios", "employments"}]
+        self.assertEqual(
+            ["2026-09-19", "2026-09-19"],
+            [
+                duos_reads[0]["dateOfActivePortfolio"],
+                duos_reads[1]["dateOfActiveEmployment"],
+            ],
+        )
+
+    def test_validate_against_a_past_monday_rejects_current_employment(self):
+        # Documents why callers must pass today: a helper hired after the
+        # selected week is valid now but was not employed then.
+        transport = self.validating_transport()
+        with self.assertRaisesRegex(DestinationError, "employment"):
+            Destinations(transport, config()).validate(moment("2026-08-31T00:00:00+02:00"))
+
     def test_duos_write_sends_offset_and_does_not_accept_registration(self):
         transport = Responses(None)
         cfg = replace(config(), duos_arrangement_id="35505", duos_registration_type="0")

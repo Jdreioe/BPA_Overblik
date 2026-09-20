@@ -10,6 +10,7 @@ worker in ``worker.py`` exposes them to the Rust shell.
 from __future__ import annotations
 
 import sqlite3
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
@@ -23,6 +24,7 @@ from .fixtures import load_fixture
 from .models import Outcome, PlanItem, SyncPlan
 from .parser import parse_sps_instructions
 from .planner import build_plan
+from .preview import WeekPreview, build_week_preview
 from .source_rules import is_reminder, meeting_item
 from .state import SyncState
 from .sync import BLOCKERS, apply_plan, plan_digest, reconciliation_range
@@ -45,6 +47,7 @@ class FixturePreview:
     plan: SyncPlan
     digest: str
     has_conflicts: bool
+    week: WeekPreview
 
 
 @dataclass(frozen=True)
@@ -52,6 +55,9 @@ class LivePreview:
     plan: SyncPlan
     digest: str
     has_blockers: bool
+    #: ``None`` only for the source-only CLI preview, which reconciles no
+    #: destination and has no GUI consumer.
+    week: WeekPreview | None = None
 
 
 @dataclass(frozen=True)
@@ -122,8 +128,13 @@ def preview_fixture(
         from_date=from_date,
         to_date=to_date,
     )
+    # Static stderr markers only (no paths or shift text): the desktop
+    # shell surfaces the tail in diagnostics, and markers localize a
+    # silent hang to one step.
+    print("worker stage: fixture load", file=sys.stderr, flush=True)
     shifts, destination = load_fixture(fixture_path)
     with SyncState(state_path) as state:
+        print("worker stage: plan build", file=sys.stderr, flush=True)
         plan = build_plan(
             config=config,
             shifts=shifts,
@@ -133,11 +144,21 @@ def preview_fixture(
             now=resolved_now,
             state=state,
         )
+    print("worker stage: week build", file=sys.stderr, flush=True)
     return FixturePreview(
         plan=plan,
         digest=plan_digest(plan),
         has_conflicts=any(
             item.outcome.value in {"conflicted", "failed"} for item in plan.items
+        ),
+        week=build_week_preview(
+            config=config,
+            shifts=shifts,
+            plan=plan,
+            destination=destination,
+            # A fixture proves the layout; it never proves what MitHF and
+            # DUOS actually contain, so it can never enable a transfer.
+            destination_read=False,
         ),
     )
 
@@ -191,14 +212,16 @@ def preview_live(
     issues = configuration_issues(config)
     if issues:
         raise ConfigError("; ".join(issues))
+    # All-day events carry no hours, so there is nothing to transfer; like
+    # reminders they are calendar annotations, not shifts.
     shifts = tuple(
         client.to_source_shift(occurrence, config.teamup_helper_field)
         for occurrence in occurrences
-        if not is_reminder(occurrence.title)
+        if not is_reminder(occurrence.title) and not occurrence.all_day
     )
     with BrowserTransport(cdp_url) as transport, SyncState(state_path) as state:
         destinations = Destinations(transport, config)
-        destinations.validate(week.range_start)
+        destinations.validate(now)
         destination = destinations.read(
             *reconciliation_range(shifts, week.range_start, week.range_end)
         )
@@ -216,6 +239,13 @@ def preview_live(
         plan=plan,
         digest=plan_digest(plan),
         has_blockers=any(item.outcome in BLOCKERS for item in plan.items),
+        week=build_week_preview(
+            config=config,
+            shifts=shifts,
+            plan=plan,
+            destination=destination,
+            destination_read=True,
+        ),
     )
 
 
@@ -227,7 +257,9 @@ def preview_connected(*, config, transport, state_path, from_date, to_date, now)
     client = TeamUpClient(config)
     shifts = []
     for event in client.fetch_occurrences(from_date, to_date):
-        if is_reminder(event.title):
+        # All-day events carry no hours, so there is nothing to transfer;
+        # like reminders they are calendar annotations, not shifts.
+        if is_reminder(event.title) or event.all_day:
             continue
         assignments = event.raw.get("subcalendar_ids")
         if not isinstance(assignments, list) or not assignments:
@@ -238,7 +270,7 @@ def preview_connected(*, config, transport, state_path, from_date, to_date, now)
             shifts.append(client.to_source_shift(event, config.teamup_helper_field))
     shifts = tuple(shifts)
     destinations = Destinations(transport, config)
-    destinations.validate(week.range_start)
+    destinations.validate(now)
     with SyncState(state_path) as state:
         destination = destinations.read(
             *reconciliation_range(shifts, week.range_start, week.range_end)
@@ -254,7 +286,16 @@ def preview_connected(*, config, transport, state_path, from_date, to_date, now)
             live=True,
         )
     return LivePreview(
-        plan, plan_digest(plan), any(item.outcome in BLOCKERS for item in plan.items)
+        plan,
+        plan_digest(plan),
+        any(item.outcome in BLOCKERS for item in plan.items),
+        build_week_preview(
+            config=config,
+            shifts=shifts,
+            plan=plan,
+            destination=destination,
+            destination_read=True,
+        ),
     )
 
 
@@ -299,14 +340,17 @@ def apply_live(
         to_date=to_date,
     )
     client = TeamUpClient(config)
+    # All-day events carry no hours, so there is nothing to transfer; like
+    # reminders they are calendar annotations, not shifts. Apply must read
+    # the same shifts as the approved preview, or its digest check fails.
     shifts = tuple(
         client.to_source_shift(occurrence, config.teamup_helper_field)
         for occurrence in client.fetch_occurrences(from_date, to_date)
-        if not is_reminder(occurrence.title)
+        if not is_reminder(occurrence.title) and not occurrence.all_day
     )
     with BrowserTransport(cdp_url) as transport, SyncState(state_path) as state:
         destinations = Destinations(transport, config)
-        destinations.validate(week.range_start)
+        destinations.validate(now)
         apply_plan(
             config=config,
             shifts=shifts,
@@ -436,8 +480,10 @@ def _source_only_plan(
                     key,
                     "mithf",
                     "mithf.sps",
-                    Outcome.PENDING_MITHF_BUG,
-                    "Separate SPS intervals preserved; no merging or workaround",
+                    Outcome.PENDING_INTEGRATION,
+                    f"Separate SPS intervals become {len(parsed.intervals)} consecutive MitHF shifts; destination not reconciled",
+                    {"segments": len(parsed.intervals)},
+                    reason="offline_preview",
                 )
             )
     return SyncPlan(week.range_start, week.range_end, now, tuple(items))

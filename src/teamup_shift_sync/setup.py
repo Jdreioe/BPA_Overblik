@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 from .config import load_config
 from .destinations import employment_available
 from .models import AppConfig, HelperMapping
-from .teamup import TeamUpClient
+from .teamup import TeamUpClient, subcalendar_color
 
 
 class SetupError(RuntimeError):
@@ -148,6 +148,7 @@ class Setup:
             "stage": "source",
             "credential": "",
             "calendars": [],
+            "colors": {},
             "arrangements": [],
             "types": [],
             "mithf": [],
@@ -234,6 +235,10 @@ class Setup:
             teamup_subcalendar_helpers={
                 k: m.teamup_display_name for k, m in mappings.items()
             },
+            teamup_subcalendar_colors={
+                k: subcalendar_color(self.data.get("colors", {}).get(k))
+                for k in mappings
+            },
             teamup_lookback_days=self.data.get("lookback_days", 7),
             mithf_customer_id=self.data.get("account_ids", {}).get("customer", ""),
             mithf_grant_id=self.data.get("account_ids", {}).get("grant", ""),
@@ -255,13 +260,16 @@ class Setup:
     def source_catalog(self, secret):
         client = self.client_factory(self.source_config(secret))
         configuration = client._get("/configuration", {})["configuration"]
-        calendars = unique(
-            [
-                choice(r["id"], r["name"])
-                for r in configuration["subcalendars"]
-                if r.get("active", True)
-            ]
-        )
+        active = [r for r in configuration["subcalendars"] if r.get("active", True)]
+        calendars = unique([choice(r["id"], r["name"]) for r in active])
+        # Colour is appearance, not identity: it is kept out of ``calendars``
+        # so recolouring a calendar in Teamup never discards confirmed
+        # mappings or an approval.
+        colors = {
+            str(r["id"]): r.get("color")
+            for r in active
+            if isinstance(r.get("color"), int)
+        }
         if not calendars:
             raise SetupError(
                 "Kalenderlinket giver ingen aktive kalendere. Kontrollér delingsrettighederne."
@@ -282,10 +290,14 @@ class Setup:
             raise SetupError(
                 "Kalenderlinket skjuler vagtdetaljer. Bed kalenderens ejer om læseadgang til detaljer og kommentarer."
             )
-        return calendars, (
-            "Vagter og kommentarer er kontrolleret for denne uge."
-            if events
-            else "Ugen er tom. Adgang til hændelseslisten er kontrolleret; kommentarer kontrolleres, når der findes vagter."
+        return (
+            calendars,
+            colors,
+            (
+                "Vagter og kommentarer er kontrolleret for denne uge."
+                if events
+                else "Ugen er tom. Adgang til hændelseslisten er kontrolleret; kommentarer kontrolleres, når der findes vagter."
+            ),
         )
 
     def connect(self, link, api_key):
@@ -308,10 +320,14 @@ class Setup:
         self.refresh_source()
 
     def refresh_source(self):
-        calendars, notice = self.source_catalog(self.vault.get(self.data["credential"]))
+        calendars, colors, notice = self.source_catalog(
+            self.vault.get(self.data["credential"])
+        )
         if calendars != self.data["calendars"]:
             self.data.update(mappings=[], catalog=None)
-        self.data.update(calendars=calendars, notice=notice, stage="destinations")
+        self.data.update(
+            calendars=calendars, colors=colors, notice=notice, stage="destinations"
+        )
         self.save()
 
     def import_config(self, path):
@@ -529,9 +545,13 @@ class Setup:
                 )
 
     def revalidate(self):
-        calendars, _notice = self.source_catalog(
+        calendars, colors, _notice = self.source_catalog(
             self.vault.get(self.data["credential"])
         )
+        if colors != self.data.get("colors"):
+            # A recolour is cosmetic; adopt it without asking for anything.
+            self.data["colors"] = colors
+            self.save()
         fresh = self.destination_catalog(self.data["arrangement"])
         if calendars != self.data["calendars"] or fresh != self.data.get("catalog"):
             self.data.update(

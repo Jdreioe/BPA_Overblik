@@ -12,6 +12,7 @@ from .models import (
     MitHfShift,
     PlanItem,
     TimeInterval,
+    step_base,
 )
 from .teamup import _teamup_datetime
 
@@ -39,8 +40,16 @@ class Destinations:
     def call(self, system: str, action: str, **payload: Any) -> Any:
         return self.transport.request(system, action, payload)
 
-    def validate(self, start: datetime) -> None:
-        """Resolve configured identities against both services, without guessing."""
+    def validate(self, now: datetime) -> None:
+        """Resolve configured identities against both services, without guessing.
+
+        Identity is a property of today, not of the week being viewed: the
+        selected week only scopes which destination records are read, never
+        whether a helper, arrangement or employment is valid. Setup confirms
+        the same values against today, so previewing a past week must not
+        invalidate a confirmation that still holds.
+        """
+        today = now.date()
         response = self.call("mithf", "hjaelperliste")
         helpers: dict[str, list[str]] = {}
         for group in response["grupper"]:
@@ -68,7 +77,7 @@ class Destinations:
         ):
             raise DestinationError("MitHF account changed; confirm setup again")
         portfolios = self.call(
-            "duos", "portfolios", dateOfActivePortfolio=start.date().isoformat()
+            "duos", "portfolios", dateOfActivePortfolio=today.isoformat()
         )
         portfolio = [
             p for p in portfolios if str(p["id"]) == self.config.duos_arrangement_id
@@ -84,7 +93,7 @@ class Destinations:
             "duos",
             "employments",
             portfolioId=self.config.duos_arrangement_id,
-            dateOfActiveEmployment=start.date().isoformat(),
+            dateOfActiveEmployment=today.isoformat(),
         )
         for mapping in self.config.helpers.values():
             if (
@@ -96,7 +105,7 @@ class Destinations:
                     "A configured helper does not uniquely match MitHF"
                 )
             if not any(
-                employment_available(e, start.date())
+                employment_available(e, today)
                 and str(e["helperId"]) == mapping.duos_employee_number
                 and " ".join(e["helperName"].split())
                 == " ".join(mapping.duos_name.split())
@@ -254,6 +263,9 @@ class Destinations:
     def write(self, item: PlanItem, snapshot: DestinationSnapshot) -> str:
         """Send one planned operation. The caller checkpoints and verifies read-back."""
         payload = item.payload
+        # Step keys carry the shift segment they belong to; the operation is
+        # the same for every segment of a split shift.
+        step = step_base(item.step_key)
         if item.system == "duos":
             start, end = (
                 self.timestamp(payload["starts_at"]),
@@ -296,7 +308,7 @@ class Destinations:
             # The registration endpoint's response need not contain an ID.
             # Reconciliation finds the unique persisted interval after the write.
             return item.destination_id or ""
-        if item.step_key == "mithf.create_shift":
+        if step == "mithf.create_shift":
             if payload["helper_count"] != 1:
                 raise DestinationError(
                     "Automatic MitHF creation supports exactly one helper per source shift"
@@ -339,7 +351,7 @@ class Destinations:
             raise DestinationError(
                 "MitHF parent shift must be read back before assignment or categories"
             )
-        if item.step_key == "mithf.assign_helper":
+        if step == "mithf.assign_helper":
             response = self.call(
                 "mithf",
                 "book",
@@ -349,13 +361,13 @@ class Destinations:
                 start=existing.starts_at.strftime("%H:%M"),
             )
             return str(response.get("eid") or existing.id)
-        if item.step_key in {"mithf.set_sps", "mithf.set_meeting"}:
+        if step in {"mithf.set_sps", "mithf.set_meeting"}:
             intervals = payload["intervals"]
             if len(intervals) != 1:
-                raise DestinationError(
-                    "Multiple MitHF SPS writes remain blocked pending live verification"
-                )
-            meeting = item.step_key == "mithf.set_meeting"
+                # Splitting gives every MitHF shift exactly one interval; a
+                # plan that reaches here with more is a planner defect.
+                raise DestinationError("A MitHF shift carries exactly one SPS interval")
+            meeting = step == "mithf.set_meeting"
             ids = existing.meeting_record_ids if meeting else existing.sps_record_ids
             if len(ids) > 1:
                 raise DestinationError(

@@ -33,6 +33,37 @@ accessibility integration, but this first shell has no explicit heading or
 live-region semantics. Progress announcements belong to the transfer screen in
 issue #6.
 
+## Weekly preview and approval (issue #5)
+
+The worker returns the week already translated: day labels, block geometry in
+minutes from local midnight, Danish status labels, detail lines and the
+attention list. The shell renders those fields and never parses summaries,
+step keys, digests or outcome names. The block fill is the helper's TeamUp colour,
+tinted towards white so dark text stays readable on Teamup's saturated
+palette; the outline carries status. Blocks also carry a text marker (`[NY]`,
+`[ÆNDRET]`, `[OK]`, `[!]`), so neither identity nor status depends on colour
+alone, and the grid is repeated as text below it for screen readers.
+
+Colour is appearance, not identity: it is kept out of the sub-calendar
+comparison in `Setup.revalidate`, so recolouring a calendar in TeamUp adopts
+the new colour without discarding confirmed mappings or an approval.
+
+Python tests cover the split, overnight days, future DUOS hours, changed
+values, empty and unchanged weeks and an unread destination. Rust tests cover
+approval requiring an unchanged re-read, a changed or newly blocked plan
+returning to review, and revocation on week, setup or retry changes.
+
+The review fixes add checks for approval when only a helper assignment, SPS
+interval or Vagtmøde category changes, and for DUOS updates showing old and new
+hours. Continuations into Monday keep their detailed description on the first
+visible day. Simultaneous Vagtmøde helpers use separate grid lanes with the
+same clock positions. A Linux/Xvfb fixture check verified two helpers at
+08:00–12:00, the next shift at 12:00, and a Sunday-to-Monday shift in the text
+list. No live destination writes were exercised.
+
+Fixture mode can never enable a transfer: it reconciles no destination, so
+`can_apply` stays false and the primary action stays disabled with its reason.
+
 ## Browser sessions (issue #3)
 
 The home screen now offers separate MitHF and DUOS login buttons. On first use,
@@ -43,6 +74,16 @@ includes Playwright and its installer; users need no Python or terminal command.
 The implementation follows Playwright's [browser installation](https://playwright.dev/python/docs/browsers)
 and [persistent context](https://playwright.dev/python/docs/api/class-browsertype#browser-type-launch-persistent-context)
 APIs.
+
+MitHF login opens `/index.html`, the service home page. The app then clicks the
+site's “Åbn din vagtplan” action itself to enter `/vagtplan/index.php`; opening that URL
+directly can show MitHF's “Gå til BPA-universet” interstitial instead, so the
+calendar URL is never opened directly. The app does not probe MitHF until the
+visible page is inside `/vagtplan/`. The request script reads the calendar
+token only from that visible page. Regression checks cover the entry URL, the
+automatic entry click, the waiting state when the button is missing, and the
+absence of a direct background request. Live login after this fix still needs
+verification.
 
 Each service has a separate persistent profile under `profiles/`. Browser control
 uses Playwright's private pipe, with no TCP debugging listener. Login and MFA

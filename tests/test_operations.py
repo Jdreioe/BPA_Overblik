@@ -47,6 +47,139 @@ class OperationsTests(unittest.TestCase):
         # The report still renders; the GUI never parses it.
         self.assertIn("Range:", render_plan(preview.plan))
 
+    def test_connected_preview_validates_identities_as_of_today(self):
+        from datetime import date
+        from unittest.mock import patch
+
+        from helpers import config, moment
+
+        from teamup_shift_sync import operations
+        from teamup_shift_sync.destinations import Destinations
+        from teamup_shift_sync.models import DestinationSnapshot
+
+        now = moment("2026-09-19T12:00:00+02:00")
+        seen = {}
+
+        def fake_validate(self, when):
+            seen["when"] = when
+
+        with (
+            patch("teamup_shift_sync.operations.TeamUpClient") as client_cls,
+            patch.object(Destinations, "validate", fake_validate),
+            patch.object(Destinations, "read", return_value=DestinationSnapshot()),
+        ):
+            client_cls.return_value.fetch_occurrences.return_value = ()
+            operations.preview_connected(
+                config=config(),
+                transport=object(),
+                state_path=Path(":memory:"),
+                from_date=date(2026, 8, 31),
+                to_date=date(2026, 9, 6),
+                now=now,
+            )
+        # A past week must not invalidate the setup and kick the user back
+        # to the current week; identities are confirmed as of today.
+        self.assertEqual(seen["when"], now)
+
+    def test_connected_preview_skips_all_day_events(self):
+        from datetime import date
+        from unittest.mock import patch
+
+        from helpers import config, moment
+
+        from teamup_shift_sync import operations
+        from teamup_shift_sync.destinations import Destinations
+        from teamup_shift_sync.models import DestinationSnapshot, TeamUpOccurrence
+        from teamup_shift_sync.teamup import TeamUpClient
+
+        # A day-off wish carries no hours, so there is nothing to transfer.
+        # It must not fail the whole week the way an undecodable shift would.
+        # The real shift resolver raises on all-day events, so only the
+        # fetch is stubbed here.
+        wish = TeamUpOccurrence(
+            id="e1",
+            series_id="s1",
+            title="Ønsker fri",
+            starts_at=moment("2026-09-05T00:00:00+02:00"),
+            ends_at=moment("2026-09-05T23:59:00+02:00"),
+            all_day=True,
+            notes="",
+            comments=(),
+            recurrence_start=None,
+            version=None,
+            raw={"subcalendar_ids": ["helper"]},
+        )
+        client = TeamUpClient(config())
+        client.fetch_occurrences = lambda *args: (wish,)
+        with (
+            patch("teamup_shift_sync.operations.TeamUpClient", return_value=client),
+            patch.object(Destinations, "validate"),
+            patch.object(Destinations, "read", return_value=DestinationSnapshot()),
+        ):
+            preview = operations.preview_connected(
+                config=config(),
+                transport=object(),
+                state_path=Path(":memory:"),
+                from_date=date(2026, 8, 31),
+                to_date=date(2026, 9, 6),
+                now=moment("2026-09-19T12:00:00+02:00"),
+            )
+        self.assertEqual(preview.plan.items, ())
+        self.assertEqual(
+            [day.label for day in preview.week.days][0], "man 31. aug"
+        )
+
+    def test_apply_reads_the_same_shifts_as_preview(self):
+        from datetime import date
+        from unittest.mock import patch
+
+        from helpers import config, moment
+
+        from teamup_shift_sync import operations
+        from teamup_shift_sync.destinations import Destinations
+        from teamup_shift_sync.models import TeamUpOccurrence
+        from teamup_shift_sync.teamup import TeamUpClient
+
+        wish = TeamUpOccurrence(
+            id="e1",
+            series_id="s1",
+            title="Ønsker fri",
+            starts_at=moment("2026-09-05T00:00:00+02:00"),
+            ends_at=moment("2026-09-05T23:59:00+02:00"),
+            all_day=True,
+            notes="",
+            comments=(),
+            recurrence_start=None,
+            version=None,
+            raw={"subcalendar_ids": ["helper"]},
+        )
+        applied = {}
+
+        def fake_apply(**kwargs):
+            applied.update(kwargs)
+
+        client = TeamUpClient(config())
+        client.fetch_occurrences = lambda *args: (wish,)
+        with (
+            patch("teamup_shift_sync.operations.TeamUpClient", return_value=client),
+            patch("teamup_shift_sync.operations.BrowserTransport"),
+            patch.object(Destinations, "validate"),
+            patch("teamup_shift_sync.operations.apply_plan", fake_apply),
+        ):
+            operations.apply_live(
+                config=config(),
+                state_path=Path(":memory:"),
+                from_date=date(2026, 8, 31),
+                to_date=date(2026, 9, 6),
+                expected_digest="digest",
+                cdp_url="http://localhost:9222",
+                now=moment("2026-09-19T12:00:00+02:00"),
+                progress=lambda message: None,
+            )
+        # Apply must see the same shifts as the approved preview, or its
+        # digest check could never match a week containing an all-day event.
+        self.assertEqual(applied["shifts"], ())
+
     def test_home_status_missing_config_is_danish_guidance(self):
         from teamup_shift_sync.operations import home_status
 

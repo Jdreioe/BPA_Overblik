@@ -13,10 +13,48 @@ from urllib.parse import urlsplit
 
 from .browser import REQUEST_SCRIPT, DestinationError
 
+
+class BrowserUnavailable(Exception):
+    """The app's own browser is missing and could not be prepared.
+
+    Kept separate from an ordinary open failure: telling the user to close
+    other windows is useless when the browser itself is not there.
+    """
+
+
 SERVICES = {
-    "mithf": "https://mithf.handicapformidlingen.dk/vagtplan/index.php",
+    "mithf": "https://mithf.handicapformidlingen.dk/index.html",
     "duos": "https://mit.duos.dk/usage/timeregistrations",
 }
+
+# Opening /vagtplan/index.php directly shows MitHF's "Gå til BPA-universet"
+# interstitial instead of the calendar: entry requires the site's own
+# "Åbn din vagtplan" action, which POSTs a single-use billet. Never goto()
+# the calendar URL; click the site button so the ticket exchange runs.
+ENTER_VAGTPLAN_SCRIPT = """() => {
+  const visible = (el) => {
+    if (!el || el.disabled) return false;
+    try {
+      if (!el.getClientRects || !el.getClientRects().length) return false;
+      const style = getComputedStyle(el);
+      if (style.visibility === 'hidden' || style.display === 'none') return false;
+    } catch (e) { return false; }
+    return true;
+  };
+  const selectors = ['#dsbVpKn', 'a[data-dsb="vagtplan"]', '#vagtplanFlise', '#vagtplanNav'];
+  for (const selector of selectors) {
+    const el = document.querySelector(selector);
+    if (el && visible(el)) { el.click(); return true; }
+  }
+  const candidates = document.querySelectorAll('button, a');
+  for (const el of candidates) {
+    if ((el.textContent || '').includes('Åbn din vagtplan') && visible(el)) {
+      el.click();
+      return true;
+    }
+  }
+  return false;
+}"""
 
 
 class BrowserSessions:
@@ -80,8 +118,16 @@ class BrowserSessions:
             elif restore:
                 self._open(service, headless=True)
             self._check(service)
-        except Exception:  # noqa: BLE001 - isolate failures and redact browser diagnostics
+        except BrowserUnavailable as error:
+            self._report(service, error)
+            self._set(
+                service,
+                "unavailable",
+                "Appens egen browser mangler og kunne ikke hentes. Kontrollér internetforbindelsen, og prøv igen.",
+            )
+        except Exception as error:  # noqa: BLE001 - isolate failures and redact browser diagnostics
             # Playwright exceptions can contain URLs, DOM text and credentials.
+            self._report(service, error)
             self._set(
                 service,
                 "unavailable",
@@ -91,10 +137,23 @@ class BrowserSessions:
             with self.lock:
                 self.busy.discard(service)
 
+    @staticmethod
+    def _report(service, error: BaseException) -> None:
+        """Name the failure on stderr for Help diagnostics.
+
+        Only the service and the exception type: Playwright messages can
+        carry capability URLs, DOM text and credentials.
+        """
+        cause = error.__cause__ or error
+        print(f"session error [{service}] {type(cause).__name__}", file=sys.stderr)
+
     def _start(self, service):
         if self.runtime is not None:
             return
-        from playwright.sync_api import sync_playwright
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as error:
+            raise BrowserUnavailable("browser runtime is not installed") from error
 
         self.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         if os.name != "nt":
@@ -122,13 +181,16 @@ class BrowserSessions:
                         "--no-shell",
                     ]
                 )
-                subprocess.run(
-                    command,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    check=True,
-                    timeout=600,
-                )
+                try:
+                    subprocess.run(
+                        command,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=True,
+                        timeout=600,
+                    )
+                except (subprocess.SubprocessError, OSError) as error:
+                    raise BrowserUnavailable("browser download failed") from error
             self.runtime = runtime
         except Exception:
             runtime.stop()
@@ -189,6 +251,64 @@ class BrowserSessions:
         if not headless:
             page.bring_to_front()
 
+    def _mithf_calendar_page(self, service):
+        """Return the context tab already inside /vagtplan/, if any."""
+        expected = urlsplit(SERVICES[service])
+        candidates: list = []
+        context = self.contexts.get(service)
+        if context is not None:
+            with suppress(Exception):
+                candidates.extend(list(context.pages))
+        page = self.pages.get(service)
+        if page is not None and all(item is not page for item in candidates):
+            candidates.insert(0, page)
+        for candidate in candidates:
+            with suppress(Exception):
+                if candidate.is_closed():
+                    continue
+                actual = urlsplit(candidate.url)
+                if (actual.scheme, actual.netloc) != (
+                    expected.scheme,
+                    expected.netloc,
+                ):
+                    continue
+                if actual.path.startswith("/vagtplan/"):
+                    return candidate
+        return None
+
+    def _auto_enter_mithf_calendar(self, page) -> bool:
+        """Click the site's "Åbn din vagtplan" action and wait for entry.
+
+        Returns True when the visible page (or a sibling tab) reached
+        /vagtplan/. Never navigates to the calendar URL directly: that
+        shows the "Gå til BPA-universet" interstitial instead.
+        """
+        try:
+            wait_selector = getattr(page, "wait_for_selector", None)
+            if callable(wait_selector):
+                with suppress(Exception):
+                    wait_selector(
+                        "#dsbVpKn, a[data-dsb=vagtplan]",
+                        timeout=5000,
+                    )
+            clicked = page.evaluate(ENTER_VAGTPLAN_SCRIPT)
+        except Exception:  # noqa: BLE001 - isolate failures and redact browser diagnostics
+            return False
+        if not clicked:
+            return False
+        wait_for_url = getattr(page, "wait_for_url", None)
+        if callable(wait_for_url):
+            with suppress(Exception):
+                wait_for_url("**/vagtplan/*", timeout=15000)
+        try:
+            if urlsplit(page.url).path.startswith("/vagtplan/"):
+                return True
+        except Exception:  # noqa: BLE001 - isolate failures and redact browser diagnostics
+            return False
+        # The site keeps calendar navigation in the same window, but adopt
+        # a sibling tab if it opened one instead.
+        return self._mithf_calendar_page("mithf") is not None
+
     def _check(self, service):
         page = self.pages.get(service)
         if page is None:
@@ -207,6 +327,35 @@ class BrowserSessions:
                 "Gennemfør login og eventuel totrinsbekræftelse i browseren.",
             )
             return
+        if service == "mithf" and not actual.path.startswith("/vagtplan/"):
+            calendar = self._mithf_calendar_page(service)
+            if calendar is not None:
+                self.pages[service] = calendar
+                page = calendar
+            elif self._auto_enter_mithf_calendar(page):
+                calendar = self._mithf_calendar_page(service)
+                if calendar is not None:
+                    self.pages[service] = calendar
+                    page = calendar
+                else:
+                    try:
+                        actual = urlsplit(page.url)
+                    except Exception:  # noqa: BLE001 - isolate failures and redact browser diagnostics
+                        actual = urlsplit("")
+                    if not actual.path.startswith("/vagtplan/"):
+                        self._set(
+                            service,
+                            "sign_in_required",
+                            "Log ind, og vælg “Åbn din vagtplan” på MitHF.",
+                        )
+                        return
+            else:
+                self._set(
+                    service,
+                    "sign_in_required",
+                    "Log ind, og vælg “Åbn din vagtplan” på MitHF.",
+                )
+                return
         # Probe only read endpoints; never return their account data to the GUI.
         result = page.evaluate(
             REQUEST_SCRIPT,
