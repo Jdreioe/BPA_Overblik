@@ -292,7 +292,24 @@ def main() -> int:
             _sessions.close()
 
 
+def _ensure_utf8_stdio() -> None:
+    """Force UTF-8 on stdio regardless of locale or frozen packaging.
+
+    The protocol is UTF-8 JSON and responses carry Danish dashes and
+    arrows. A frozen Windows worker ignores PYTHONUTF8 and falls back to
+    the ANSI code page, which encodes e.g. '–' as 0x96 — invalid UTF-8
+    that the desktop shell must reject. Reconfiguring here is
+    deterministic in every runtime; on an interpreter that already uses
+    UTF-8 it is a no-op. Loud failure (never mojibake): if a stream
+    cannot be reconfigured the worker exits at startup instead of
+    corrupting the protocol stream.
+    """
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        stream.reconfigure(encoding="utf-8")
+
+
 def serve() -> int:
+    _ensure_utf8_stdio()
     for line in sys.stdin:
         if not line.strip():
             continue
