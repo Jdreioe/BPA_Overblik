@@ -20,9 +20,18 @@ use serde_json::Value;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::Duration;
 
 pub const WORKER_MODULE: &str = "teamup_shift_sync.worker";
+
+/// Upper bound for one worker candidate's ping handshake. A healthy local
+/// worker answers in about a second; a candidate that starts but never
+/// answers must fail fast so the next one is tried. Notably, `python3` on
+/// Windows may resolve to the Microsoft Store stub, which waits on an
+/// unseen install prompt instead of exiting — without this bound the
+/// caller blocks in `read_line` forever.
+const SPAWN_PING_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How the GUI finds its worker.
 ///
@@ -132,6 +141,57 @@ impl AppFiles {
     }
 }
 
+/// One ping round-trip on the handshake thread's own pipes. Mirrors the
+/// protocol checks in [`WorkerHandle::request`] without touching shared
+/// state, so the pipes can be handed back to the new handle on success.
+fn ping_once(
+    stdin: &mut ChildStdin,
+    stdout: &mut BufReader<ChildStdout>,
+) -> Result<Value, WorkerError> {
+    let frame = Request::new("1", "ping", EmptyParams {});
+    let mut line = serde_json::to_string(&frame)
+        .map_err(|e| WorkerError::exited(format!("Kunne ikke kode forespørgsel: {e}")))?;
+    line.push('\n');
+    if stdin.write_all(line.as_bytes()).is_err() || stdin.flush().is_err() {
+        return Err(WorkerError::exited(
+            "Baggrundsarbejderen tog ikke imod håndtrykket.",
+        ));
+    }
+    let mut response_line = String::new();
+    match stdout.read_line(&mut response_line) {
+        Ok(0) => Err(WorkerError::exited(
+            "Baggrundsarbejderen lukkede forbindelsen under håndtrykket.",
+        )),
+        Ok(_) => {
+            let response: Response = serde_json::from_str(&response_line).map_err(|e| {
+                WorkerError::exited(format!("Baggrundsarbejderen svarede ulæseligt: {e}"))
+            })?;
+            if response.protocol != crate::protocol::PROTOCOL_VERSION {
+                return Err(WorkerError::exited(format!(
+                    "Protokol v{} blev svaret, men v{} forventes. Opdatér app og arbejder samlet.",
+                    response.protocol,
+                    crate::protocol::PROTOCOL_VERSION
+                )));
+            }
+            if response.event == "result" {
+                Ok(response.payload)
+            } else {
+                Err(WorkerError::from_payload(&response.payload))
+            }
+        }
+        Err(e) => Err(WorkerError::exited(format!(
+            "Håndtrykket med baggrundsarbejderen mislykkedes: {e}"
+        ))),
+    }
+}
+
+/// Best effort: an unusable candidate must not linger as an orphan,
+/// whether it exited on its own or is still waiting silently.
+fn reap(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 struct WorkerInner {
     child: Child,
     stdin: ChildStdin,
@@ -184,21 +244,43 @@ impl WorkerHandle {
             .take()
             .ok_or_else(|| WorkerError::startup("Baggrundsarbejderens stdout kunne ikke åbnes."))?;
         let stderr = child.stderr.take();
-        let handle = Self {
-            inner: Arc::new(Mutex::new(WorkerInner {
-                child,
-                stdin,
-                stdout: BufReader::new(stdout),
-                stderr,
-                next_id: 1,
-                command_display: command.display(),
-            })),
-            files: files.clone(),
-        };
         // The ping doubles as a protocol-version handshake: a worker that
-        // answers with another version fails here, not mid-preview.
-        handle.request("ping", EmptyParams {})?;
-        Ok(handle)
+        // answers with another version fails here, not mid-preview. It runs
+        // on its own thread so a candidate that never answers is killed
+        // after SPAWN_PING_TIMEOUT instead of blocking the caller forever.
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut stdin = stdin;
+            let mut stdout = BufReader::new(stdout);
+            let outcome = ping_once(&mut stdin, &mut stdout);
+            let _ = tx.send((outcome, stdin, stdout));
+        });
+        match rx.recv_timeout(SPAWN_PING_TIMEOUT) {
+            Ok((Ok(_), stdin, stdout)) => Ok(Self {
+                inner: Arc::new(Mutex::new(WorkerInner {
+                    child,
+                    stdin,
+                    stdout,
+                    stderr,
+                    // The handshake thread already used request id "1".
+                    next_id: 2,
+                    command_display: command.display(),
+                })),
+                files: files.clone(),
+            }),
+            Ok((Err(error), _, _)) => {
+                reap(&mut child);
+                Err(error)
+            }
+            Err(_) => {
+                reap(&mut child);
+                Err(WorkerError::startup(format!(
+                    "'{}' svarede ikke inden for {} sekunder. Peg på en anden fortolker med TEAMUP_WORKER_CMD.",
+                    command.display(),
+                    SPAWN_PING_TIMEOUT.as_secs(),
+                )))
+            }
+        }
     }
 
     fn request<P: Serialize>(&self, method: &str, params: P) -> Result<Value, WorkerError> {

@@ -34,9 +34,18 @@ fn worker_commands(root: &Path) -> Vec<String> {
         }
     }
     // CI installs the package into its own interpreter, so a bare
-    // `python3`/`python` on PATH can serve the worker there.
-    commands.push("python3 -m teamup_shift_sync.worker".to_string());
-    commands.push("python -m teamup_shift_sync.worker".to_string());
+    // `python3`/`python` on PATH can serve the worker there. On Windows
+    // `python` goes first: `python3` may resolve to the Microsoft Store
+    // stub, which waits on an unseen install prompt instead of answering
+    // the handshake (a spawn timeout still bounds the damage, but skipping
+    // the stub avoids a 60-second stall per run).
+    if cfg!(windows) {
+        commands.push("python -m teamup_shift_sync.worker".to_string());
+        commands.push("python3 -m teamup_shift_sync.worker".to_string());
+    } else {
+        commands.push("python3 -m teamup_shift_sync.worker".to_string());
+        commands.push("python -m teamup_shift_sync.worker".to_string());
+    }
     commands
 }
 
