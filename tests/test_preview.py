@@ -11,6 +11,7 @@ from teamup_shift_sync.models import (
     DestinationSnapshot,
     DuosRegistration,
     MitHfShift,
+    Outcome,
     TimeInterval,
 )
 from teamup_shift_sync.planner import build_plan
@@ -64,6 +65,105 @@ class PreviewTests(unittest.TestCase):
             "Overfører 2 nye vagter, 2 SPS-tidsrum til MitHF og "
             "2 registreringer til DUOS.",
             week.apply_summary,
+        )
+
+    def test_existing_shift_with_only_category_or_helper_writes_can_be_approved(self):
+        for change, summary in [
+            ("helper", "1 hjælpertildeling"),
+            ("sps", "1 SPS-tidsrum"),
+            ("meeting", "1 vagtmøde"),
+        ]:
+            with self.subTest(change=change):
+                shift = source_shift(comment="uni 8-10" if change == "sps" else None)
+                if change == "meeting":
+                    shift = replace(shift, title="P-MØDE")
+                destination = DestinationSnapshot(
+                    mithf_shifts=(
+                        MitHfShift(
+                            "mithf-1",
+                            shift.starts_at,
+                            shift.ends_at,
+                            1,
+                            None if change == "helper" else "Mit Helper",
+                        ),
+                    ),
+                    duos_registrations=(
+                        DuosRegistration(
+                            "duos-1",
+                            "arrangement",
+                            "123",
+                            "Almindelig",
+                            moment("2026-09-14T08:00:00+02:00"),
+                            moment("2026-09-14T10:00:00+02:00"),
+                        ),
+                    )
+                    if change == "sps"
+                    else (),
+                )
+                week = self.week(shift, destination=destination)
+                self.assertTrue(week.can_apply)
+                self.assertEqual("Ugen er klar til overførsel.", week.headline)
+                self.assertIn(summary, week.apply_summary)
+                self.assertFalse(
+                    any("allerede på plads" in line for line in week.summary)
+                )
+
+    def test_duos_update_shows_old_and_new_values(self):
+        shift = source_shift(comment="uni 8-10")
+        destination = DestinationSnapshot(
+            duos_registrations=(
+                DuosRegistration(
+                    "duos-1",
+                    "arrangement",
+                    "123",
+                    "Almindelig",
+                    moment("2026-09-14T08:00:00+02:00"),
+                    moment("2026-09-14T09:00:00+02:00"),
+                ),
+            )
+        )
+        with SyncState(":memory:") as state:
+            state.record_step(
+                source_key=shift.key,
+                step_key="duos.interval:comment-1:0",
+                status="verified",
+                destination_id="duos-1",
+                source_hash="",
+                synced_payload={
+                    "arrangement_id": "arrangement",
+                    "employee_number": "123",
+                    "registration_type": "Almindelig",
+                    "starts_at": "2026-09-14T08:00:00+02:00",
+                    "ends_at": "2026-09-14T09:00:00+02:00",
+                },
+                updated_at=self.now,
+            )
+            plan = build_plan(
+                config=config(),
+                shifts=(shift,),
+                destination=destination,
+                range_start=self.range_start,
+                range_end=self.range_end,
+                now=self.now,
+                state=state,
+                live=True,
+            )
+        self.assertTrue(
+            any(
+                i.system == "duos" and i.outcome == Outcome.WOULD_UPDATE
+                for i in plan.items
+            )
+        )
+        week = build_week_preview(
+            config=config(),
+            shifts=(shift,),
+            plan=plan,
+            destination=destination,
+            destination_read=True,
+        )
+        self.assertIn(
+            "DUOS: registreringen ændres: 08:00–09:00 (1 time) → 08:00–10:00 (2 timer).",
+            week.days[0].blocks[0].details,
         )
 
     def test_blocks_carry_the_helpers_teamup_colour(self):

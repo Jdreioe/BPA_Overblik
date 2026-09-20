@@ -53,6 +53,14 @@ values, empty and unchanged weeks and an unread destination. Rust tests cover
 approval requiring an unchanged re-read, a changed or newly blocked plan
 returning to review, and revocation on week, setup or retry changes.
 
+The review fixes add checks for approval when only a helper assignment, SPS
+interval or Vagtmøde category changes, and for DUOS updates showing old and new
+hours. Continuations into Monday keep their detailed description on the first
+visible day. Simultaneous Vagtmøde helpers use separate grid lanes with the
+same clock positions. A Linux/Xvfb fixture check verified two helpers at
+08:00–12:00, the next shift at 12:00, and a Sunday-to-Monday shift in the text
+list. No live destination writes were exercised.
+
 Fixture mode can never enable a transfer: it reconciles no destination, so
 `can_apply` stays false and the primary action stays disabled with its reason.
 
@@ -66,6 +74,16 @@ includes Playwright and its installer; users need no Python or terminal command.
 The implementation follows Playwright's [browser installation](https://playwright.dev/python/docs/browsers)
 and [persistent context](https://playwright.dev/python/docs/api/class-browsertype#browser-type-launch-persistent-context)
 APIs.
+
+MitHF login opens `/index.html`, the service home page. The app then clicks the
+site's “Åbn din vagtplan” action itself to enter `/vagtplan/index.php`; opening that URL
+directly can show MitHF's “Gå til BPA-universet” interstitial instead, so the
+calendar URL is never opened directly. The app does not probe MitHF until the
+visible page is inside `/vagtplan/`. The request script reads the calendar
+token only from that visible page. Regression checks cover the entry URL, the
+automatic entry click, the waiting state when the button is missing, and the
+absence of a direct background request. Live login after this fix still needs
+verification.
 
 Each service has a separate persistent profile under `profiles/`. Browser control
 uses Playwright's private pipe, with no TCP debugging listener. Login and MFA

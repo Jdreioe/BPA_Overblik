@@ -22,7 +22,11 @@ class SessionTests(TestCase):
 
     def page(self, service):
         page = Mock()
-        page.url = SERVICES[service]
+        page.url = (
+            "https://mithf.handicapformidlingen.dk/vagtplan/index.php"
+            if service == "mithf"
+            else SERVICES[service]
+        )
         page.is_closed.return_value = False
         page.evaluate.return_value = {"data": []}
         self.sessions.pages[service] = page
@@ -59,6 +63,118 @@ class SessionTests(TestCase):
         self.settle()
         self.sessions._open.assert_not_called()
         self.assertEqual(self.sessions.snapshot()["mithf"]["state"], "sign_in_required")
+
+    def test_mithf_login_opens_the_service_home_page(self):
+        page = Mock()
+        page.url = "about:blank"
+        page.is_closed.return_value = False
+        context = Mock(pages=[page])
+        self.sessions.runtime = Mock()
+        self.sessions.runtime.chromium.launch_persistent_context.return_value = context
+
+        self.sessions._open("mithf")
+
+        page.goto.assert_called_once_with(
+            "https://mithf.handicapformidlingen.dk/index.html",
+            wait_until="domcontentloaded",
+            timeout=30000,
+        )
+
+    def test_mithf_home_page_without_button_keeps_manual_instruction(self):
+        page = Mock()
+        page.url = SERVICES["mithf"]
+        page.is_closed.return_value = False
+        page.evaluate.return_value = False
+        self.sessions.pages["mithf"] = page
+
+        self.sessions._check("mithf")
+
+        # The single evaluate call is the "Åbn din vagtplan" click attempt;
+        # the read-only destination probe must not run from the home page.
+        page.evaluate.assert_called_once()
+        status = self.sessions.snapshot()["mithf"]
+        self.assertEqual(status["state"], "sign_in_required")
+        self.assertIn("Åbn din vagtplan", status["message"])
+
+    def test_mithf_home_page_clicks_site_button_and_probes_calendar(self):
+        page = Mock()
+        page.url = SERVICES["mithf"]
+        page.is_closed.return_value = False
+        calendar_url = "https://mithf.handicapformidlingen.dk/vagtplan/index.php"
+
+        def enter_calendar(*args, **kwargs):
+            page.url = calendar_url
+
+        page.wait_for_url.side_effect = enter_calendar
+        page.evaluate.side_effect = [True, {"data": []}]
+        self.sessions.pages["mithf"] = page
+
+        self.sessions._check("mithf")
+
+        self.assertEqual(page.evaluate.call_count, 2)
+        page.wait_for_url.assert_called_once()
+        self.assertEqual(self.sessions.snapshot()["mithf"]["state"], "connected")
+
+    def test_mithf_failed_entry_never_probes_or_gotos_calendar_directly(self):
+        page = Mock()
+        page.url = SERVICES["mithf"]
+        page.is_closed.return_value = False
+        page.evaluate.return_value = True
+        self.sessions.pages["mithf"] = page
+
+        self.sessions._check("mithf")
+
+        # Click ran but neither the same page nor a sibling tab entered the
+        # calendar, so the probe (a two-argument evaluate) must not run and
+        # no direct goto to /vagtplan/ may happen.
+        for call in page.evaluate.call_args_list:
+            self.assertEqual(len(call.args), 1)
+        page.goto.assert_not_called()
+        status = self.sessions.snapshot()["mithf"]
+        self.assertEqual(status["state"], "sign_in_required")
+        self.assertIn("Åbn din vagtplan", status["message"])
+
+    def test_mithf_calendar_opened_by_the_site_in_a_new_tab_becomes_active(self):
+        home = Mock()
+        home.url = SERVICES["mithf"]
+        home.is_closed.return_value = False
+        calendar = Mock()
+        calendar.url = "https://mithf.handicapformidlingen.dk/vagtplan/index.php"
+        calendar.is_closed.return_value = False
+        calendar.evaluate.return_value = {"data": []}
+        self.sessions.pages["mithf"] = home
+        self.sessions.contexts["mithf"] = Mock(pages=[home, calendar])
+
+        self.sessions._check("mithf")
+
+        home.evaluate.assert_not_called()
+        calendar.evaluate.assert_called_once()
+        self.assertIs(self.sessions.pages["mithf"], calendar)
+        self.assertEqual(self.sessions.snapshot()["mithf"]["state"], "connected")
+
+    def test_mithf_button_opening_a_new_tab_adopts_it(self):
+        home = Mock()
+        home.url = SERVICES["mithf"]
+        home.is_closed.return_value = False
+        home.evaluate.return_value = True
+        calendar = Mock()
+        calendar.url = "https://mithf.handicapformidlingen.dk/vagtplan/index.php"
+        calendar.is_closed.return_value = False
+        calendar.evaluate.return_value = {"data": []}
+        context = Mock(pages=[home])
+        self.sessions.pages["mithf"] = home
+        self.sessions.contexts["mithf"] = context
+
+        def open_tab(*args, **kwargs):
+            context.pages = [home, calendar]
+
+        home.wait_for_url.side_effect = open_tab
+        self.sessions._check("mithf")
+
+        home.evaluate.assert_called_once()
+        calendar.evaluate.assert_called_once()
+        self.assertIs(self.sessions.pages["mithf"], calendar)
+        self.assertEqual(self.sessions.snapshot()["mithf"]["state"], "connected")
 
     def test_probe_reads_only_and_handles_expiry_without_account_data(self):
         page = self.page("duos")

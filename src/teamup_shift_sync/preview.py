@@ -302,7 +302,7 @@ def build_week_preview(
 
     counts = _counts(plan)
     summary = _summary_lines(counts)
-    has_writes = counts["created"] + counts["updated"] + counts["duos"] > 0
+    has_writes = any(item.outcome in WRITES for item in plan.items)
     can_apply = destination_read and not attention and has_writes
     # A blocked source item can be the only thing standing in the way even
     # when no destination step reported it, so gate on the plan as well.
@@ -490,7 +490,22 @@ def _detail_line(
         if item.outcome == Outcome.WOULD_CREATE:
             return f"DUOS: {hours} registreres for {label}."
         if item.outcome == Outcome.WOULD_UPDATE:
-            return f"DUOS: registreringen rettes til {label} ({hours})."
+            existing = next(
+                (
+                    r
+                    for r in destination.duos_registrations
+                    if r.id == item.destination_id
+                ),
+                None,
+            )
+            before = "ukendte timer"
+            if existing is not None:
+                old = {
+                    "starts_at": existing.starts_at.isoformat(),
+                    "ends_at": existing.ends_at.isoformat(),
+                }
+                before = f"{_interval_label(old, timezone)} ({_hours_label(old)})"
+            return f"DUOS: registreringen ændres: {before} → {label} ({hours})."
         if item.outcome == Outcome.EXCLUDED and item.reason == "future_hours":
             return f"DUOS: {label} kan overføres, når timerne er afsluttet."
         if item.outcome == Outcome.ALREADY_MATCHED:
@@ -604,19 +619,49 @@ def _split_by_day(
 
 def _counts(plan: SyncPlan) -> dict[str, int]:
     counts = dict.fromkeys(
-        ("created", "updated", "matched", "sps", "duos", "future", "attention"), 0
+        (
+            "created",
+            "updated",
+            "matched",
+            "sps",
+            "assignments",
+            "meetings",
+            "duos",
+            "future",
+            "attention",
+        ),
+        0,
     )
+    # A shift is only fully matched when none of its MitHF actions need a write.
+    changed = {
+        (item.source_key, step_segment(item.step_key))
+        for item in plan.items
+        if item.system == "mithf" and item.outcome in WRITES
+    }
+    created = {
+        (item.source_key, step_segment(item.step_key))
+        for item in plan.items
+        if step_base(item.step_key) == "mithf.create_shift"
+        and item.outcome == Outcome.WOULD_CREATE
+    }
     for item in plan.items:
         base = step_base(item.step_key)
+        segment = (item.source_key, step_segment(item.step_key))
         if base == "mithf.create_shift":
             if item.outcome == Outcome.WOULD_CREATE:
                 counts["created"] += 1
             elif item.outcome == Outcome.WOULD_UPDATE:
                 counts["updated"] += 1
-            elif item.outcome == Outcome.ALREADY_MATCHED:
+            elif item.outcome == Outcome.ALREADY_MATCHED and segment not in changed:
                 counts["matched"] += 1
         elif base == "mithf.set_sps" and item.outcome in WRITES:
             counts["sps"] += 1
+        elif base == "mithf.assign_helper" and item.outcome in WRITES:
+            # The helper on a new shift is already covered by "ny vagt".
+            if segment not in created:
+                counts["assignments"] += 1
+        elif base == "mithf.set_meeting" and item.outcome in WRITES:
+            counts["meetings"] += 1
         elif item.system == "duos":
             if item.outcome in WRITES:
                 counts["duos"] += 1
@@ -641,6 +686,13 @@ def _summary_lines(counts: dict[str, int]) -> list[str]:
         )
     if counts["sps"]:
         lines.append(_plural(counts["sps"], "SPS-tidsrum", "SPS-tidsrum") + " i MitHF")
+    if counts["assignments"]:
+        lines.append(
+            _plural(counts["assignments"], "hjælpertildeling", "hjælpertildelinger")
+            + " i MitHF"
+        )
+    if counts["meetings"]:
+        lines.append(_plural(counts["meetings"], "vagtmøde", "vagtmøder") + " i MitHF")
     if counts["duos"]:
         lines.append(
             _plural(counts["duos"], "registrering", "registreringer") + " i DUOS"
@@ -665,6 +717,12 @@ def _apply_summary(counts: dict[str, int]) -> str:
         parts.append(_plural(counts["updated"], "ændret vagt", "ændrede vagter"))
     if counts["sps"]:
         parts.append(_plural(counts["sps"], "SPS-tidsrum", "SPS-tidsrum"))
+    if counts["assignments"]:
+        parts.append(
+            _plural(counts["assignments"], "hjælpertildeling", "hjælpertildelinger")
+        )
+    if counts["meetings"]:
+        parts.append(_plural(counts["meetings"], "vagtmøde", "vagtmøder"))
     duos = (
         _plural(counts["duos"], "registrering", "registreringer")
         if counts["duos"]

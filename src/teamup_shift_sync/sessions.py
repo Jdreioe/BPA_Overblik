@@ -23,9 +23,38 @@ class BrowserUnavailable(Exception):
 
 
 SERVICES = {
-    "mithf": "https://mithf.handicapformidlingen.dk/vagtplan/index.php",
+    "mithf": "https://mithf.handicapformidlingen.dk/index.html",
     "duos": "https://mit.duos.dk/usage/timeregistrations",
 }
+
+# Opening /vagtplan/index.php directly shows MitHF's "Gå til BPA-universet"
+# interstitial instead of the calendar: entry requires the site's own
+# "Åbn din vagtplan" action, which POSTs a single-use billet. Never goto()
+# the calendar URL; click the site button so the ticket exchange runs.
+ENTER_VAGTPLAN_SCRIPT = """() => {
+  const visible = (el) => {
+    if (!el || el.disabled) return false;
+    try {
+      if (!el.getClientRects || !el.getClientRects().length) return false;
+      const style = getComputedStyle(el);
+      if (style.visibility === 'hidden' || style.display === 'none') return false;
+    } catch (e) { return false; }
+    return true;
+  };
+  const selectors = ['#dsbVpKn', 'a[data-dsb="vagtplan"]', '#vagtplanFlise', '#vagtplanNav'];
+  for (const selector of selectors) {
+    const el = document.querySelector(selector);
+    if (el && visible(el)) { el.click(); return true; }
+  }
+  const candidates = document.querySelectorAll('button, a');
+  for (const el of candidates) {
+    if ((el.textContent || '').includes('Åbn din vagtplan') && visible(el)) {
+      el.click();
+      return true;
+    }
+  }
+  return false;
+}"""
 
 
 class BrowserSessions:
@@ -222,6 +251,64 @@ class BrowserSessions:
         if not headless:
             page.bring_to_front()
 
+    def _mithf_calendar_page(self, service):
+        """Return the context tab already inside /vagtplan/, if any."""
+        expected = urlsplit(SERVICES[service])
+        candidates: list = []
+        context = self.contexts.get(service)
+        if context is not None:
+            with suppress(Exception):
+                candidates.extend(list(context.pages))
+        page = self.pages.get(service)
+        if page is not None and all(item is not page for item in candidates):
+            candidates.insert(0, page)
+        for candidate in candidates:
+            with suppress(Exception):
+                if candidate.is_closed():
+                    continue
+                actual = urlsplit(candidate.url)
+                if (actual.scheme, actual.netloc) != (
+                    expected.scheme,
+                    expected.netloc,
+                ):
+                    continue
+                if actual.path.startswith("/vagtplan/"):
+                    return candidate
+        return None
+
+    def _auto_enter_mithf_calendar(self, page) -> bool:
+        """Click the site's "Åbn din vagtplan" action and wait for entry.
+
+        Returns True when the visible page (or a sibling tab) reached
+        /vagtplan/. Never navigates to the calendar URL directly: that
+        shows the "Gå til BPA-universet" interstitial instead.
+        """
+        try:
+            wait_selector = getattr(page, "wait_for_selector", None)
+            if callable(wait_selector):
+                with suppress(Exception):
+                    wait_selector(
+                        "#dsbVpKn, a[data-dsb=vagtplan]",
+                        timeout=5000,
+                    )
+            clicked = page.evaluate(ENTER_VAGTPLAN_SCRIPT)
+        except Exception:  # noqa: BLE001 - isolate failures and redact browser diagnostics
+            return False
+        if not clicked:
+            return False
+        wait_for_url = getattr(page, "wait_for_url", None)
+        if callable(wait_for_url):
+            with suppress(Exception):
+                wait_for_url("**/vagtplan/*", timeout=15000)
+        try:
+            if urlsplit(page.url).path.startswith("/vagtplan/"):
+                return True
+        except Exception:  # noqa: BLE001 - isolate failures and redact browser diagnostics
+            return False
+        # The site keeps calendar navigation in the same window, but adopt
+        # a sibling tab if it opened one instead.
+        return self._mithf_calendar_page("mithf") is not None
+
     def _check(self, service):
         page = self.pages.get(service)
         if page is None:
@@ -240,6 +327,35 @@ class BrowserSessions:
                 "Gennemfør login og eventuel totrinsbekræftelse i browseren.",
             )
             return
+        if service == "mithf" and not actual.path.startswith("/vagtplan/"):
+            calendar = self._mithf_calendar_page(service)
+            if calendar is not None:
+                self.pages[service] = calendar
+                page = calendar
+            elif self._auto_enter_mithf_calendar(page):
+                calendar = self._mithf_calendar_page(service)
+                if calendar is not None:
+                    self.pages[service] = calendar
+                    page = calendar
+                else:
+                    try:
+                        actual = urlsplit(page.url)
+                    except Exception:  # noqa: BLE001 - isolate failures and redact browser diagnostics
+                        actual = urlsplit("")
+                    if not actual.path.startswith("/vagtplan/"):
+                        self._set(
+                            service,
+                            "sign_in_required",
+                            "Log ind, og vælg “Åbn din vagtplan” på MitHF.",
+                        )
+                        return
+            else:
+                self._set(
+                    service,
+                    "sign_in_required",
+                    "Log ind, og vælg “Åbn din vagtplan” på MitHF.",
+                )
+                return
         # Probe only read endpoints; never return their account data to the GUI.
         result = page.evaluate(
             REQUEST_SCRIPT,

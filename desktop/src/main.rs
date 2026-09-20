@@ -753,13 +753,39 @@ impl App {
 
 const GRID_HEIGHT: f32 = 520.0;
 
+/// Vagtmøde participants share clock times, so overlapping blocks need
+/// separate lanes. Later shifts reuse the first available lane.
+fn grid_lanes(blocks: &[Block]) -> Vec<Vec<&Block>> {
+    let mut sorted: Vec<_> = blocks.iter().collect();
+    sorted.sort_by_key(|block| block.minutes_from);
+    let mut lanes: Vec<Vec<&Block>> = vec![Vec::new()];
+    for block in sorted {
+        if let Some(lane) = lanes.iter_mut().find(|lane| {
+            lane.last()
+                .is_none_or(|previous| previous.minutes_to <= block.minutes_from)
+        }) {
+            lane.push(block);
+        } else {
+            lanes.push(vec![block]);
+        }
+    }
+    lanes
+}
+
+fn detail_blocks(blocks: &[Block], first_day: bool) -> impl Iterator<Item = &Block> {
+    // A shift starting before Monday has no earlier visible piece.
+    blocks
+        .iter()
+        .filter(move |block| first_day || !block.continues_before)
+}
+
 /// Seven day columns with each shift drawn over the hours it covers.
 fn week_grid(week: &Week) -> Element<'_, Message> {
     let mut hours = column![].width(Length::Fixed(28.0));
     for hour in 0..24 {
         hours = hours.push(
             container(text(format!("{hour:02}")).size(9))
-                .height(Length::FillPortion(60))
+                .height(Length::Fixed(GRID_HEIGHT / 24.0))
                 .width(Length::Fill),
         );
     }
@@ -770,31 +796,41 @@ fn week_grid(week: &Week) -> Element<'_, Message> {
     .spacing(4)]
     .spacing(4);
     for day in &week.days {
-        let mut lane = column![].width(Length::Fill);
-        let mut cursor = 0u32;
-        for block in &day.blocks {
-            let from = block.minutes_from.min(1440);
-            let to = block.minutes_to.clamp(from + 1, 1440);
-            if from > cursor {
-                lane = lane
-                    .push(space::vertical().height(Length::FillPortion((from - cursor) as u16)));
+        let mut lanes = row![].spacing(2).width(Length::Fill);
+        for blocks in grid_lanes(&day.blocks) {
+            let mut lane = column![].width(Length::Fill);
+            let mut cursor = 0;
+            for block in blocks {
+                let from = block.minutes_from.min(1439);
+                let to = block.minutes_to.clamp(from + 1, 1440);
+                if from > cursor {
+                    lane = lane.push(
+                        space::vertical()
+                            .height(Length::Fixed(GRID_HEIGHT * (from - cursor) as f32 / 1440.0)),
+                    );
+                }
+                lane = lane.push(
+                    container(block_body(block))
+                        .height(Length::Fixed(GRID_HEIGHT * (to - from) as f32 / 1440.0))
+                        .width(Length::Fill)
+                        .padding(3)
+                        .clip(true)
+                        .style(block_style(&block.status, &block.helper_color)),
+                );
+                cursor = to;
             }
-            lane = lane.push(
-                container(block_body(block))
-                    .height(Length::FillPortion((to - from) as u16))
-                    .width(Length::Fill)
-                    .padding(3)
-                    .style(block_style(&block.status, &block.helper_color)),
-            );
-            cursor = to;
-        }
-        if cursor < 1440 {
-            lane = lane.push(space::vertical().height(Length::FillPortion((1440 - cursor) as u16)));
+            if cursor < 1440 {
+                lane = lane.push(
+                    space::vertical()
+                        .height(Length::Fixed(GRID_HEIGHT * (1440 - cursor) as f32 / 1440.0)),
+                );
+            }
+            lanes = lanes.push(lane);
         }
         columns = columns.push(
             column![
                 text(&day.label).size(11),
-                container(lane)
+                container(lanes)
                     .height(Length::Fixed(GRID_HEIGHT))
                     .width(Length::Fill),
             ]
@@ -829,17 +865,13 @@ fn block_body(block: &Block) -> Element<'_, Message> {
 /// The same week as text, with the values the grid has no room for.
 fn day_details(week: &Week) -> Element<'_, Message> {
     let mut list = column![text("Dag for dag").size(16)].spacing(8);
-    for day in &week.days {
-        // A shift is described once, on the day it starts, so a day holding
-        // only the tail of an overnight shift adds nothing here.
-        if day.blocks.iter().all(|block| block.continues_before) {
+    for (index, day) in week.days.iter().enumerate() {
+        let mut blocks = detail_blocks(&day.blocks, index == 0).peekable();
+        if blocks.peek().is_none() {
             continue;
         }
         let mut entry = column![text(&day.label).size(14)].spacing(2);
-        for block in &day.blocks {
-            if block.continues_before {
-                continue;
-            }
+        for block in blocks {
             let mut heading = format!(
                 "{} {} · {} · {}",
                 status_marker(&block.status),
@@ -1383,6 +1415,43 @@ mod tests {
             let _ = block_style(status, "#4770d8")(&iced::Theme::Light);
             let _ = block_style(status, "")(&iced::Theme::Dark);
         }
+    }
+
+    #[test]
+    fn meeting_helpers_share_times_but_not_lanes() {
+        let template = ready_preview().week.days[0].blocks[0].clone();
+        let mut first = template.clone();
+        first.minutes_from = 480;
+        first.minutes_to = 720;
+        first.details = vec!["Vagtmøde sættes på hele vagten.".into()];
+        let mut second = first.clone();
+        second.helper = "Anden hjælper".into();
+        let mut later = template;
+        later.minutes_from = 720;
+        later.minutes_to = 900;
+        let blocks = vec![first, second, later];
+        let lanes = grid_lanes(&blocks);
+        assert_eq!(lanes.len(), 2);
+        assert_eq!(lanes[0][0].minutes_from, lanes[1][0].minutes_from);
+        assert_eq!(lanes[0][0].minutes_to, lanes[1][0].minutes_to);
+        assert_eq!(lanes[0][1].minutes_from, 720);
+        for lane in lanes {
+            assert!(lane
+                .windows(2)
+                .all(|pair| pair[0].minutes_to <= pair[1].minutes_from));
+        }
+    }
+
+    #[test]
+    fn monday_continuation_keeps_details_without_repeating_them_on_tuesday() {
+        let mut block = ready_preview().week.days[0].blocks[0].clone();
+        block.continues_before = true;
+        block.details = vec!["DUOS: registreringen ændres: 22:00–23:00 → 22:00–24:00.".into()];
+        let blocks = vec![block];
+        let visible: Vec<_> = detail_blocks(&blocks, true).collect();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].details, blocks[0].details);
+        assert_eq!(detail_blocks(&blocks, false).count(), 0);
     }
 
     #[test]
