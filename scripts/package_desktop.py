@@ -52,7 +52,7 @@ def main() -> int:
         "scripts/worker_entry.py",
     )
     run("cargo", "build", "--release", "--manifest-path", "desktop/Cargo.toml")
-    gui = ROOT / "desktop" / "target" / "release" / f"teamup-shift-sync-gui{EXE}"
+    gui = ROOT / "target" / "release" / f"teamup-shift-sync-gui{EXE}"
     shutil.copy2(gui, BUNDLE / gui.name)
     shutil.copytree(ROOT / "fixtures", BUNDLE / "fixtures")
     shutil.copy2(ROOT / "config.example.toml", BUNDLE / "config.example.toml")

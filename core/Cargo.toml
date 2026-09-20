@@ -1,0 +1,14 @@
+[package]
+name = "teamup-shift-sync-core"
+version = "0.1.0"
+edition = "2021"
+description = "Shared domain and synchronization core for TeamUp shift sync"
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"
