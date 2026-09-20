@@ -87,6 +87,12 @@ def _parse_datetime(value: Any) -> datetime | None:
     return parsed
 
 
+def _stage(name: str) -> None:
+    """Mark progress on stderr. Static names only: stderr may surface in
+    diagnostics, so it never carries paths, tokens, or shift text."""
+    print(f"worker stage: {name}", file=sys.stderr, flush=True)
+
+
 def handle_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
     """Execute one request; raises ValueError/ConfigError/FixtureError."""
     global _sessions
@@ -153,6 +159,7 @@ def handle_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
             "state_path": str(operations.default_state_path(data_dir)),
         }
     if method == "home_status":
+        _stage("home_status start")
         status = operations.home_status(
             config_path=Path(params["config_path"]),
             state_path=Path(
@@ -160,6 +167,7 @@ def handle_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
             ),
             now=_parse_datetime(params.get("now")),
         )
+        _stage("home_status done")
         return {
             "timezone": status.timezone,
             "week_start": status.week_start.isoformat(),
@@ -171,6 +179,7 @@ def handle_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
             "login_detail": status.login_detail,
         }
     if method == "preview_fixture":
+        _stage("preview_fixture start")
         preview = operations.fixture_preview_from_paths(
             config_path=Path(params["config_path"]),
             fixture_path=Path(params["fixture_path"]),
@@ -181,6 +190,7 @@ def handle_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
             to_date=_parse_date(params.get("to")),
             now=_parse_datetime(params.get("now")),
         )
+        _stage("preview_fixture done")
         payload = plan_to_dict(preview.plan)
         payload["digest"] = preview.digest
         payload["has_conflicts"] = preview.has_conflicts

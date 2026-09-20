@@ -17,6 +17,7 @@ use crate::protocol::{
 };
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -192,11 +193,36 @@ fn reap(child: &mut Child) {
     let _ = child.wait();
 }
 
+/// Lines of worker stderr kept for diagnostics.
+const STDERR_TAIL_LINES: usize = 100;
+
+/// Drain worker stderr on its own thread into a bounded tail buffer.
+/// Besides surfacing the worker's own stage markers in failure detail,
+/// this closes a real deadlock: stderr is piped but was only read after
+/// a failure, so a chatty worker could fill the pipe and block forever
+/// while the parent waited on stdout.
+fn drain_stderr(stderr: std::process::ChildStderr) -> Arc<Mutex<VecDeque<String>>> {
+    let tail = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_TAIL_LINES)));
+    let kept = tail.clone();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines() {
+            let Ok(line) = line else { break };
+            if let Ok(mut tail) = kept.lock() {
+                tail.push_back(line);
+                while tail.len() > STDERR_TAIL_LINES {
+                    tail.pop_front();
+                }
+            }
+        }
+    });
+    tail
+}
+
 struct WorkerInner {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
-    stderr: Option<std::process::ChildStderr>,
+    stderr_tail: Arc<Mutex<VecDeque<String>>>,
     next_id: u64,
     command_display: String,
 }
@@ -248,7 +274,11 @@ impl WorkerHandle {
             .stdout
             .take()
             .ok_or_else(|| WorkerError::startup("Baggrundsarbejderens stdout kunne ikke åbnes."))?;
-        let stderr = child.stderr.take();
+        let stderr_tail = child
+            .stderr
+            .take()
+            .map(drain_stderr)
+            .unwrap_or_else(|| Arc::new(Mutex::new(VecDeque::new())));
         // The ping doubles as a protocol-version handshake: a worker that
         // answers with another version fails here, not mid-preview. It runs
         // on its own thread so a candidate that never answers is killed
@@ -266,7 +296,7 @@ impl WorkerHandle {
                     child,
                     stdin,
                     stdout,
-                    stderr,
+                    stderr_tail,
                     // The handshake thread already used request id "1".
                     next_id: 2,
                     command_display: command.display(),
@@ -328,24 +358,23 @@ impl WorkerHandle {
 
     /// Build an "unexpected exit" error, attaching the stderr tail as
     /// technical detail. Stderr never contains tokens or shift text by
-    /// worker construction — only exception summaries and paths.
+    /// worker construction — only exception summaries, stage markers and
+    /// paths. The tail is drained continuously, so reading it never blocks
+    /// and a chatty worker can never fill the pipe.
     fn describe_exit(&self, inner: &mut WorkerInner, phase: &str) -> WorkerError {
-        use std::io::Read as _;
         let mut detail = format!(
             "Kommunikationen med '{}' brød sammen under {}.",
             inner.command_display, phase
         );
-        if let Some(stderr) = inner.stderr.as_mut() {
-            let mut tail = String::new();
-            // Best effort: the child has exited or is exiting; do not block.
-            let _ = stderr.read_to_string(&mut tail);
+        if let Ok(tail) = inner.stderr_tail.lock() {
             let trimmed: String = tail
-                .lines()
+                .iter()
                 .rev()
                 .take(8)
                 .collect::<Vec<_>>()
                 .into_iter()
                 .rev()
+                .map(String::as_str)
                 .collect::<Vec<_>>()
                 .join("\n");
             if !trimmed.trim().is_empty() {

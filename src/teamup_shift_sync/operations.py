@@ -10,6 +10,7 @@ worker in ``worker.py`` exposes them to the Rust shell.
 from __future__ import annotations
 
 import sqlite3
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
@@ -127,8 +128,13 @@ def preview_fixture(
         from_date=from_date,
         to_date=to_date,
     )
+    # Static stderr markers only (no paths or shift text): the desktop
+    # shell surfaces the tail in diagnostics, and markers localize a
+    # silent hang to one step.
+    print("worker stage: fixture load", file=sys.stderr, flush=True)
     shifts, destination = load_fixture(fixture_path)
     with SyncState(state_path) as state:
+        print("worker stage: plan build", file=sys.stderr, flush=True)
         plan = build_plan(
             config=config,
             shifts=shifts,
@@ -138,6 +144,7 @@ def preview_fixture(
             now=resolved_now,
             state=state,
         )
+    print("worker stage: week build", file=sys.stderr, flush=True)
     return FixturePreview(
         plan=plan,
         digest=plan_digest(plan),
