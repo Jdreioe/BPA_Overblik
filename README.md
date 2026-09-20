@@ -150,8 +150,14 @@ reported as `pending_mithf_bug`; they are never merged into one interval.
 
 ## Tests
 
-The offline suite uses unittest and the installed `tzdata` dependency, which
-supplies timezone rules on systems without an IANA timezone database:
+Run the Rust core and desktop tests from the repository root:
+
+```bash
+cargo test --workspace --all-targets
+```
+
+The existing Python suite uses unittest and the installed `tzdata` dependency,
+which supplies timezone rules on systems without an IANA timezone database:
 
 ```bash
 .venv/bin/python -m unittest discover -s tests -v
