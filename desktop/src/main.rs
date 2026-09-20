@@ -30,12 +30,39 @@ const DANISH_MONTHS: [&str; 12] = [
     "december",
 ];
 
+/// Run one self-check stage with a bound, so a silent bundled worker
+/// fails the packaging step naming the stage instead of hanging it for
+/// hours with no output.
+fn checked<T: Send + 'static>(
+    stage: &'static str,
+    f: impl FnOnce() -> Result<T, WorkerError> + Send + 'static,
+) -> Result<T, WorkerError> {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    match rx.recv_timeout(Duration::from_secs(120)) {
+        Ok(result) => result,
+        Err(_) => Err(WorkerError::exited(format!(
+            "Selvtesten fik ikke svar i trinnet '{stage}'."
+        ))),
+    }
+}
+
 fn main() -> iced::Result {
     if std::env::args().any(|argument| argument == "--self-check") {
         let files = AppFiles::resolve();
         match WorkerHandle::spawn(&files).and_then(|worker| {
-            worker.home_status(Some("2026-09-19T12:00:00+02:00"))?;
-            worker.preview_fixture("2026-09-14", "2026-09-20")?;
+            checked("home_status", {
+                let worker = worker.clone();
+                move || worker.home_status(Some("2026-09-19T12:00:00+02:00"))
+            })?;
+            checked("preview_fixture", {
+                let worker = worker.clone();
+                move || worker.preview_fixture("2026-09-14", "2026-09-20")
+            })?;
             Ok(())
         }) {
             Ok(()) => {
