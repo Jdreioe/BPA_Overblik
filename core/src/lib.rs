@@ -6,6 +6,7 @@
 mod models;
 mod parser;
 mod source_rules;
+mod state;
 
 pub use models::{
     ParseIssue, ParseIssueCode, SourceComment, SourceShift, SpsInterval, SpsParseResult,
@@ -13,3 +14,4 @@ pub use models::{
 };
 pub use parser::{parse_sps_instructions, NOTES_SOURCE_ID};
 pub use source_rules::{classify_source_title, MeetingCategory, SourceTitle};
+pub use state::{ApplyGuard, StateError, StepRecord, SyncState};
