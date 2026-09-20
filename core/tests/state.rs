@@ -152,6 +152,8 @@ fn upgrades_legacy_schema_without_losing_history_and_keeps_accounts_separate() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("sync-account-a.sqlite3");
     let schema = include_str!("../src/state_schema.sql")
+        // Git may check out the schema with CRLF on Windows.
+        .replace("\r\n", "\n")
         .replace("    recurrence_start TEXT,\n", "")
         .replace("    source_version TEXT,\n", "");
     let connection = Connection::open(&path).unwrap();
