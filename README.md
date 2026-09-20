@@ -150,6 +150,11 @@ reported as `pending_mithf_bug`; they are never merged into one interval.
 
 ## Tests
 
+The Rust migration in [#15](https://github.com/Jdreioe/teamup_sync/issues/15)
+currently includes SPS parsing, source title rules, and compatible SQLite
+storage. The desktop and CLI still use Python until the remaining planning and
+integration slices are ported. See [migration progress](docs/rust-migration.md).
+
 Run the Rust core and desktop tests from the repository root:
 
 ```bash
