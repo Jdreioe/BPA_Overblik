@@ -225,6 +225,11 @@ impl WorkerHandle {
         let command = WorkerCommand::resolve();
         let mut child = Command::new(&command.program)
             .args(&command.args)
+            // The protocol is UTF-8 JSON, and responses carry Danish
+            // dashes and arrows (`–`, `→`). Windows pipes default to the
+            // ANSI code page, which cannot encode those — the worker would
+            // crash on its first preview response. Force UTF-8 instead.
+            .env("PYTHONUTF8", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

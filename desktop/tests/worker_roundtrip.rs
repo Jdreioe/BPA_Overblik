@@ -8,6 +8,8 @@
 //! Rust-only checkout); the unit tests in `protocol` still run.
 
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::time::Duration;
 use teamup_shift_sync_gui::worker::{AppFiles, WorkerHandle};
 
 fn repo_root() -> PathBuf {
@@ -66,6 +68,23 @@ fn dev_files() -> AppFiles {
     AppFiles::resolve()
 }
 
+/// Run one worker stage with a bound, so a silent worker fails naming
+/// the stuck stage instead of hanging the suite until the job times out.
+fn guarded<T: Send + 'static>(
+    stage: &'static str,
+    f: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> T {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    match rx.recv_timeout(Duration::from_secs(120)) {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) => panic!("worker_roundtrip stage '{stage}' failed: {error}"),
+        Err(_) => panic!("worker_roundtrip stalled with no response in stage '{stage}'"),
+    }
+}
+
 #[test]
 fn worker_roundtrip_home_and_fixture_preview() {
     let root = repo_root();
@@ -90,24 +109,39 @@ fn worker_roundtrip_home_and_fixture_preview() {
         return;
     };
 
-    let status = worker
-        .home_status(Some("2026-09-19T12:00:00+02:00"))
-        .expect("home_status must succeed");
+    let status = guarded("home_status", {
+        let worker = worker.clone();
+        move || {
+            worker
+                .home_status(Some("2026-09-19T12:00:00+02:00"))
+                .map_err(|e| e.to_string())
+        }
+    });
     assert!(status.config_issues.is_empty());
     assert_eq!(status.week_start, "2026-09-14");
     assert_eq!(status.login_state, "unknown");
     assert_eq!(status.last_verified_at, None);
 
-    let setup = worker
-        .setup("status", serde_json::json!({}))
-        .expect("first-run status must succeed without a keychain");
+    let setup = guarded("setup_status", {
+        let worker = worker.clone();
+        move || {
+            worker
+                .setup("status", serde_json::json!({}))
+                .map_err(|e| e.to_string())
+        }
+    });
     assert_eq!(setup["stage"], "source");
     assert_eq!(setup["has_credentials"], false);
     assert!(setup.get("credential").is_none());
 
-    let preview = worker
-        .preview_fixture("2026-09-14", "2026-09-20")
-        .expect("fixture preview must succeed");
+    let preview = guarded("preview_fixture", {
+        let worker = worker.clone();
+        move || {
+            worker
+                .preview_fixture("2026-09-14", "2026-09-20")
+                .map_err(|e| e.to_string())
+        }
+    });
     assert!(!preview.items.is_empty());
     assert!(!preview.digest.is_empty());
     assert_eq!(
