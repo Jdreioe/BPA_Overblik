@@ -5,6 +5,7 @@ use chrono::{
     DateTime, Datelike, Days, Duration, LocalResult, NaiveDate, NaiveDateTime, NaiveTime, TimeZone,
 };
 use chrono_tz::Tz;
+use dec_from_char::DecimalExtended;
 use regex::Regex;
 
 use crate::{ParseIssue, ParseIssueCode, SourceShift, SpsInterval, SpsParseResult, TimeInterval};
@@ -16,7 +17,7 @@ static UNI_IN_LINE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\buni\b").expect("valid uni search regex"));
 static UNI_LINE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?ix)^\s*uni(?:\s+(?P<day>\d{4}-\d{2}-\d{2}))?\s+(?P<body>.+?)(?:\s+(?P<weekday>mandag|tirsdag|tirs|tir|onsdag|ons|torsdag|tors|tor|fredag|fre|lørdag|lordag|lør|lor|søndag|sondag|søn|son)\.?)?\s*$",
+        r"(?ix)^\s*uni(?:\s+(?P<day>\d{4}-\d{2}-\d{2}))?\s+(?P<body>.+?)(?:\s+(?P<weekday>mandag|man|tirsdag|tirs|tir|onsdag|ons|torsdag|tors|tor|fredag|fre|lørdag|lordag|lør|lor|søndag|sondag|søn|son)\.?)?\s*$",
     )
     .expect("valid uni instruction regex")
 });
@@ -261,8 +262,8 @@ enum LocalTimeProblem {
 
 fn parse_interval(token: &str, day: NaiveDate, timezone: Tz) -> Option<LocalizedInterval> {
     let captures = INTERVAL.captures(token)?;
-    let start_clock = clock(&captures, "start_hour", "start_minute");
-    let end_clock = clock(&captures, "end_hour", "end_minute");
+    let start_clock = clock(&captures, "start_hour", "start_minute")?;
+    let end_clock = clock(&captures, "end_hour", "end_minute")?;
     let end_day = if end_clock <= start_clock {
         day.checked_add_days(Days::new(1))?
     } else {
@@ -280,14 +281,20 @@ fn parse_interval(token: &str, day: NaiveDate, timezone: Tz) -> Option<Localized
     Some(LocalizedInterval::Valid(start, end))
 }
 
-fn clock(captures: &regex::Captures<'_>, hour: &str, minute: &str) -> NaiveTime {
-    let hour = captures[hour]
-        .parse()
-        .expect("hour regex only accepts numbers");
-    let minute = captures
-        .name(minute)
-        .map_or(0, |value| value.as_str().parse().expect("valid minute"));
-    NaiveTime::from_hms_opt(hour, minute, 0).expect("time regex only accepts valid clocks")
+fn clock(captures: &regex::Captures<'_>, hour: &str, minute: &str) -> Option<NaiveTime> {
+    // Python's int() accepts the Unicode decimal digits matched by \d.
+    // Convert only after matching so the existing clock grammar stays unchanged.
+    let decimal = |value: &str| {
+        value.chars().try_fold(0_u32, |number, digit| {
+            Some(number * 10 + u32::from(digit.to_decimal_utf8()?))
+        })
+    };
+    let hour = decimal(&captures[hour])?;
+    let minute = match captures.name(minute) {
+        Some(value) => decimal(value.as_str())?,
+        None => 0,
+    };
+    NaiveTime::from_hms_opt(hour, minute, 0)
 }
 
 fn localize(

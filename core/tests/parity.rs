@@ -58,6 +58,33 @@ fn parses_description_and_comment_while_preserving_split_intervals() {
 }
 
 #[test]
+fn monday_abbreviations_are_accepted() {
+    for spelling in ["man", "man.", "MAN", "mandag"] {
+        let result = parse_sps_instructions(
+            &ordinary_shift(&format!("uni 8-10 {spelling}"), None),
+            Copenhagen,
+        );
+        assert!(result.issues.is_empty(), "spelling: {spelling}");
+        assert_eq!(result.intervals.len(), 1);
+        assert_eq!(result.intervals[0].interval.hours(), 2.0);
+    }
+}
+
+#[test]
+fn unicode_clock_digits_match_ascii_intervals() {
+    for (instruction, ascii) in [
+        ("uni ٨-10", "uni 8-10"),
+        ("uni ٨:3٠-1٠:4٥", "uni 8:30-10:45"),
+        ("uni ８:3０-1０:4５", "uni 8:30-10:45"),
+        ("uni 𝟠:3𝟘-1𝟘:4𝟝", "uni 8:30-10:45"),
+    ] {
+        let expected = parse_sps_instructions(&ordinary_shift(ascii, None), Copenhagen);
+        let result = parse_sps_instructions(&ordinary_shift(instruction, None), Copenhagen);
+        assert_eq!(result, expected, "instruction: {instruction}");
+    }
+}
+
+#[test]
 fn weekday_spellings_resolve_the_second_day_of_a_shift() {
     for spelling in ["fre", "fre.", "FRE", "fredag"] {
         let result = parse_sps_instructions(
