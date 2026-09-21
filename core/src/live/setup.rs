@@ -365,7 +365,7 @@ mod tests {
 
         fn oracle() -> Value {
             // Frozen at the Python removal cutover: 5 recorded scenarios.
-            serde_json::from_str(include_str!("../../tests/goldens/setup.json"))
+            serde_json::from_str(include_str!("../../tests/goldens/setup-scenarios.json"))
                 .expect("setup golden")
         }
 
