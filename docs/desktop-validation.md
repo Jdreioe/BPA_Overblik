@@ -6,6 +6,10 @@ runs `teamup-shift-sync-gui --self-check`. The check builds the representative
 fixture preview through the core and prints its approval digest. The resulting
 portable directory is uploaded as an artifact.
 
+Dated releases wrap the same binaries in real installers, and CI installs and
+uninstalls each one before publishing; see [packaging](packaging.md) for what
+that covers and what stays a manual check.
+
 Run the same check locally with:
 
 ```bash
