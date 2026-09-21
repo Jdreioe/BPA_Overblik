@@ -224,9 +224,10 @@ Live transfers need real-service verification behind each of these:
    A real `uni` instruction in an event description is now covered.
 2. Validate TeamUp helper identities against the configured MitHF and DUOS
    identities. Screenshot candidates are not treated as confirmed mappings.
-3. Inspect authenticated MitHF and DUOS forms to obtain stable selectors and
-   read-back behavior. In particular, MitHF SPS editing and DUOS save versus
-   approval are still unknown.
+3. Complete live write and read-back verification for MitHF SPS editing and a
+   separately authorized DUOS batch. A DUOS transfer only saves the citizen's
+   registration. The helper accepts it later, and the app exposes no acceptance
+   action.
 4. Get authorization for the concrete live batch. Merely running a dry-run is
    never authorization to submit it.
 

@@ -51,8 +51,9 @@ is possible. Stopping or closing during a transfer requests a stop between
 operations; an in-flight operation completes its read-back first. A process
 termination can still leave its durable uncertain marker for reconciliation.
 
-Live DUOS writes remain blocked until save-versus-approval semantics have been
-verified against the current service. The app does not approve registrations.
+A DUOS transfer saves the citizen's registration. It remains `Afventer` until
+the helper accepts it. The app has no DUOS acceptance action and cannot accept a
+registration for the helper.
 
 The packaged bundle is checked headlessly: `teamup-shift-sync-gui --self-check`
 builds the representative fixture preview through the core and prints its

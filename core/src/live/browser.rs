@@ -9,6 +9,15 @@ use super::{rows, text, LiveError, INVALID};
 
 const REQUEST: &str = include_str!("browser_request.js");
 
+fn write_allowed(service: Service, action: &str) -> bool {
+    match service {
+        Service::Mithf => matches!(action, "opret" | "rettid" | "book" | "tilfoejreg" | "retreg"),
+        // The citizen saves a pending registration. Only the helper can accept it,
+        // and this transport exposes no DUOS acceptance action.
+        Service::Duos => action == "register",
+    }
+}
+
 /// Opening `/vagtplan/index.php` directly shows MitHF's "Gå til BPA-universet"
 /// interstitial instead of the calendar: entry requires the site's own
 /// "Åbn din vagtplan" action, which POSTs a single-use ticket. Never navigate
@@ -155,11 +164,7 @@ impl BrowserSessions {
     /// The one path that changes a destination. Crate-private on purpose: only
     /// the transfer adapter reaches it, and only for an approved plan item.
     pub(crate) async fn submit(&self, service: Service, action: &str, payload: Value) -> Result<Value, LiveError> {
-        let allowed = match service {
-            Service::Mithf => matches!(action, "opret" | "rettid" | "book" | "tilfoejreg" | "retreg"),
-            Service::Duos => action == "register",
-        };
-        if !allowed { return Err(LiveError("Handlingen er ikke en understøttet overførsel.")); }
+        if !write_allowed(service, action) { return Err(LiveError("Handlingen er ikke en understøttet overførsel.")); }
         self.call(service, action, payload).await
     }
 
@@ -241,4 +246,16 @@ fn browser_executable(data_dir: &Path) -> Result<PathBuf, LiveError> {
         if Path::new(path).is_file() { return Ok(path.into()); }
     }
     Err(LiveError("Chromium mangler. Installér Chromium, eller angiv browserfilen i TEAMUP_BROWSER_PATH, og prøv igen."))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{write_allowed, Service};
+
+    #[test]
+    fn duos_transport_can_save_but_cannot_accept_registrations() {
+        assert!(write_allowed(Service::Duos, "register"));
+        assert!(!write_allowed(Service::Duos, "accept"));
+        assert!(!write_allowed(Service::Duos, "approve"));
+    }
 }
