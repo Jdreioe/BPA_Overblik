@@ -475,34 +475,8 @@ fn step_record(value: &Value) -> StepRecord {
 
 #[test]
 fn complete_rust_runs_match_python_writes_destinations_and_recovery_records() {
-    use std::process::Command;
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    let executable = std::env::var_os("TEAMUP_TEST_PYTHON")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            [
-                root.join(".venv/bin/python"),
-                root.join(".venv/Scripts/python.exe"),
-            ]
-            .into_iter()
-            .find(|p| p.is_file())
-            .unwrap_or_else(|| PathBuf::from(if cfg!(windows) { "python" } else { "python3" }))
-        });
-    let output = Command::new(executable)
-        .env("PYTHONPATH", root.join("src"))
-        .env("PYTHONIOENCODING", "utf-8")
-        .arg(root.join("core/tests/python_approval.py"))
-        .output()
-        .expect("Python is required for migration parity tests");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let oracle: Oracle = serde_json::from_slice(&output.stdout).unwrap();
+    // Frozen at the Python removal cutover: 10 recorded apply traces.
+    let oracle: Oracle = serde_json::from_str(include_str!("goldens/approval.json")).unwrap();
     assert!(oracle.traces.len() >= 6);
     let temp = tempfile::tempdir().unwrap();
     let runtime = runtime();

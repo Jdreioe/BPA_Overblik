@@ -51,48 +51,10 @@ fn representative_cli_preview_matches_python_and_preserves_state() {
     let actual: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(actual["mode"], "fixture");
     assert_eq!(actual["has_blockers"], true);
-    let python = std::env::var_os("TEAMUP_TEST_PYTHON")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            [
-                root().join(".venv/bin/python"),
-                root().join(".venv/Scripts/python.exe"),
-            ]
-            .into_iter()
-            .find(|p| p.is_file())
-            .unwrap_or_else(|| {
-                if cfg!(windows) {
-                    "python".into()
-                } else {
-                    "python3".into()
-                }
-            })
-        });
-    let expected = Command::new(python)
-        .current_dir(root())
-        .env("PYTHONPATH", root().join("src"))
-        .env("PYTHONIOENCODING", "utf-8")
-        .args([
-            "-c",
-            r#"
-import json
-from pathlib import Path
-from datetime import datetime
-from teamup_shift_sync.operations import fixture_preview_from_paths
-p = fixture_preview_from_paths(config_path=Path('fixtures/offline-config.toml'),
-    fixture_path=Path('fixtures/representative-week.json'), state_path=Path(':memory:'),
-    from_date=None, to_date=None, now=datetime.fromisoformat('2026-09-20T20:00:00+02:00'))
-print(json.dumps({'digest': p.digest, 'outcomes': [i.outcome.value for i in p.plan.items]}))
-"#,
-        ])
-        .output()
-        .expect("Python is required for migration parity checks");
-    assert!(
-        expected.status.success(),
-        "{}",
-        String::from_utf8_lossy(&expected.stderr)
-    );
-    let expected: Value = serde_json::from_slice(&expected.stdout).unwrap();
+    // Frozen at the Python removal cutover: same digest and outcomes as the
+    // Python planner on the representative week.
+    let expected: Value =
+        serde_json::from_str(include_str!("goldens/representative-preview.json")).unwrap();
     assert_eq!(actual["digest"], expected["digest"]);
     let items = actual["plan"]["items"].as_array().unwrap();
     assert_eq!(

@@ -433,18 +433,10 @@ mod tests {
 
     #[test]
     fn write_requests_match_python() {
-        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
-        let executable = std::env::var_os("TEAMUP_TEST_PYTHON").map(std::path::PathBuf::from).unwrap_or_else(|| {
-            [root.join(".venv/bin/python"), root.join(".venv/Scripts/python.exe")].into_iter()
-                .find(|path| path.is_file())
-                .unwrap_or_else(|| std::path::PathBuf::from(if cfg!(windows) { "python" } else { "python3" }))
-        });
-        let output = std::process::Command::new(executable)
-            .env("PYTHONPATH", root.join("src")).env("PYTHONIOENCODING", "utf-8")
-            .arg(root.join("core/tests/python_destinations.py")).output()
-            .expect("Python is required for migration parity tests");
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        let cases: Vec<Case> = serde_json::from_slice(&output.stdout).unwrap();
+        // Frozen at the Python removal cutover: 12 supported operations.
+        let cases: Vec<Case> =
+            serde_json::from_str(include_str!("../../tests/goldens/destinations.json"))
+                .unwrap();
         assert_eq!(cases.len(), 12, "the oracle must cover every supported operation");
         for case in cases {
             let request = build(&case.item, &case.snapshot, case.now).unwrap_or_else(|error| panic!("{}: {error}", case.name));

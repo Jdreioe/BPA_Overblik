@@ -362,23 +362,11 @@ mod tests {
     /// refresh, what is proposed, and what resets.
     mod parity {
         use super::*;
-        use std::{path::PathBuf, process::Command};
 
         fn oracle() -> Value {
-            let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
-            let executable = std::env::var_os("TEAMUP_TEST_PYTHON").map(PathBuf::from).unwrap_or_else(|| {
-                [root.join(".venv/bin/python"), root.join(".venv/Scripts/python.exe")]
-                    .into_iter().find(|path| path.is_file())
-                    .unwrap_or_else(|| PathBuf::from(if cfg!(windows) { "python" } else { "python3" }))
-            });
-            let output = Command::new(executable)
-                .env("PYTHONPATH", root.join("src"))
-                .env("PYTHONIOENCODING", "utf-8")
-                .arg(root.join("core/tests/python_setup.py"))
-                .output()
-                .expect("Python is required for migration parity tests");
-            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-            serde_json::from_slice(&output.stdout).expect("oracle output")
+            // Frozen at the Python removal cutover: 5 recorded scenarios.
+            serde_json::from_str(include_str!("../../tests/goldens/setup.json"))
+                .expect("setup golden")
         }
 
         fn replay(scenario: &Value, setup: &mut Setup) {

@@ -1,5 +1,3 @@
-use std::{path::PathBuf, process::Command};
-
 use chrono::{DateTime, FixedOffset};
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -35,33 +33,10 @@ struct StoredStep {
 
 #[test]
 fn plans_match_python_safety_scenarios_and_representative_week() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    let executable = std::env::var_os("TEAMUP_TEST_PYTHON")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            [
-                root.join(".venv/bin/python"),
-                root.join(".venv/Scripts/python.exe"),
-            ]
-            .into_iter()
-            .find(|p| p.is_file())
-            .unwrap_or_else(|| PathBuf::from(if cfg!(windows) { "python" } else { "python3" }))
-        });
-    let output = Command::new(executable)
-        .env("PYTHONPATH", root.join("src"))
-        .env("PYTHONIOENCODING", "utf-8")
-        .arg(root.join("core/tests/python_planner.py"))
-        .output()
-        .expect("Python is required for migration parity tests");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let cases: Vec<Case> = serde_json::from_slice(&output.stdout).unwrap();
+    // Frozen at the Python removal cutover: the oracle compared 263 safety
+    // combinations and the representative week, all passing.
+    let cases: Vec<Case> =
+        serde_json::from_str(include_str!("goldens/planner.json")).unwrap();
     assert!(cases.len() > 200, "oracle must run all safety combinations");
     for (index, case) in cases.into_iter().enumerate() {
         let state = SyncState::open(":memory:").unwrap();
