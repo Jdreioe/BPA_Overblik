@@ -43,6 +43,11 @@ class CredentialStore:
                 self.backend = Keyring()
             if self.backend.priority <= 0:
                 raise RuntimeError
+        except ImportError:
+            raise SetupError(
+                "Appens adgang til nøgleringen er ikke installeret korrekt. "
+                "Geninstallér appen eller dens Python-afhængigheder."
+            ) from None
         except Exception:  # noqa: BLE001 - redact credential and browser exceptions
             raise SetupError(
                 "Lås computerens nøglering op, og prøv igen. På Linux kræves Secret Service."

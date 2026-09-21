@@ -346,3 +346,27 @@ duos_employee_number = "50"
         with self.assertRaisesRegex(TeamUpError, "hidden"):
             setup.connect("https://teamup.com/ksTestSecret", "private")
         self.assertEqual("source", self.restart().data["stage"])
+
+
+class CredentialStoreTests(unittest.TestCase):
+    def test_missing_keyring_dependency_is_not_reported_as_locked_wallet(self):
+        import builtins
+
+        from teamup_shift_sync.setup import CredentialStore
+
+        original_import = builtins.__import__
+
+        def missing_backend(name, *args, **kwargs):
+            if name == "keyring.backends.SecretService":
+                raise ModuleNotFoundError("private diagnostic", name="keyring")
+            return original_import(name, *args, **kwargs)
+
+        with (
+            patch("teamup_shift_sync.setup.sys.platform", "linux"),
+            patch("builtins.__import__", side_effect=missing_backend),
+            self.assertRaises(SetupError) as caught,
+        ):
+            CredentialStore()
+        self.assertIn("ikke installeret korrekt", str(caught.exception))
+        self.assertNotIn("Lås", str(caught.exception))
+        self.assertNotIn("private diagnostic", str(caught.exception))

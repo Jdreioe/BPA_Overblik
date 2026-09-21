@@ -5,6 +5,7 @@
 //! in the app-owned Python worker on blocking threads — never on the UI
 //! thread — and every worker failure lands in a readable recovery state.
 
+mod native;
 mod setup;
 
 use chrono::{Datelike, Local, NaiveDate};
@@ -52,6 +53,9 @@ fn checked<T: Send + 'static>(
 }
 
 fn main() -> iced::Result {
+    if std::env::args().any(|argument| argument == "--native") {
+        return native::run();
+    }
     if std::env::args().any(|argument| argument == "--self-check") {
         let files = AppFiles::resolve();
         match WorkerHandle::spawn(&files).and_then(|worker| {
@@ -807,7 +811,7 @@ fn detail_blocks(blocks: &[Block], first_day: bool) -> impl Iterator<Item = &Blo
 }
 
 /// Seven day columns with each shift drawn over the hours it covers.
-fn week_grid(week: &Week) -> Element<'_, Message> {
+fn week_grid<'a, M: 'a>(week: &'a Week) -> Element<'a, M> {
     let mut hours = column![].width(Length::Fixed(28.0));
     for hour in 0..24 {
         hours = hours.push(
@@ -868,7 +872,7 @@ fn week_grid(week: &Week) -> Element<'_, Message> {
     columns.into()
 }
 
-fn block_body(block: &Block) -> Element<'_, Message> {
+fn block_body<'a, M: 'a>(block: &'a Block) -> Element<'a, M> {
     let mut body = column![
         text(format!("{} {}", status_marker(&block.status), block.helper)).size(11),
         text(&block.time_label).size(10),
@@ -890,7 +894,7 @@ fn block_body(block: &Block) -> Element<'_, Message> {
 }
 
 /// The same week as text, with the values the grid has no room for.
-fn day_details(week: &Week) -> Element<'_, Message> {
+fn day_details<'a, M: 'a>(week: &'a Week) -> Element<'a, M> {
     let mut list = column![text("Dag for dag").size(16)].spacing(8);
     for (index, day) in week.days.iter().enumerate() {
         let mut blocks = detail_blocks(&day.blocks, index == 0).peekable();

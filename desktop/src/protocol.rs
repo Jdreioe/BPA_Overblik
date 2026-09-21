@@ -167,7 +167,7 @@ pub struct PlanItem {
 
 /// One MitHF shift as drawn in a single day column of the week grid.
 /// Everything here is already Danish and safe to display as-is.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Block {
     pub helper: String,
     /// The helper's Teamup calendar colour as `#rrggbb`, or empty when
@@ -188,7 +188,7 @@ pub struct Block {
     pub details: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Day {
     pub date: String,
     pub label: String,
@@ -197,7 +197,7 @@ pub struct Day {
 }
 
 /// An item the user must resolve, with its cause and next action.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Attention {
     pub when: String,
     pub who: String,
@@ -206,7 +206,7 @@ pub struct Attention {
 }
 
 /// The readable week: grid, attention items and the exact approval summary.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Week {
     #[serde(default)]
     pub days: Vec<Day>,

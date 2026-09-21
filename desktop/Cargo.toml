@@ -13,12 +13,14 @@ name = "teamup_shift_sync_gui"
 path = "src/lib.rs"
 
 [dependencies]
+teamup-shift-sync-core = { path = "../core" }
+chrono-tz = "0.10"
 iced = { version = "0.14", default-features = false, features = ["tiny-skia", "tokio", "crisp", "web-colors", "thread-pool", "linux-theme-detection", "x11"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["clock"] }
 directories = "6"
-tokio = { version = "1", features = ["rt"] }
+tokio = { version = "1", features = ["rt", "sync"] }
 
 # Rendering/windowing backends. Default is GPU (wgpu) with Wayland+X11 for
 # real desktops; the `--no-default-features` build is pure software

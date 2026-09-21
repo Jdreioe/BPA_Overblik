@@ -1,6 +1,7 @@
-//! Shared library for the Iced desktop shell: the typed v1 worker protocol
-//! and the worker supervisor. Kept as a library so integration tests can
-//! exercise the real Python worker round-trip.
+//! Desktop presentation and the legacy worker connection during migration.
+//! Native week views use the core models directly; the default desktop still
+//! uses the Python worker for setup and its existing workflow.
 
+pub mod preview;
 pub mod protocol;
 pub mod worker;

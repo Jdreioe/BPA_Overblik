@@ -159,9 +159,11 @@ SPS step is reported for review instead.
 ## Tests
 
 The Rust migration in [#15](https://github.com/Jdreioe/teamup_sync/issues/15)
-currently includes SPS parsing, source title rules, and compatible SQLite
-storage. The desktop and CLI still use Python until the remaining planning and
-integration slices are ported. See [migration progress](docs/rust-migration.md).
+includes parsing, planning, approval checks, recoverable transfers, compatible
+SQLite storage and live adapters. A separate [native Rust CLI](docs/rust-cli.md)
+can preview fixtures and use saved desktop setup for live workflows. The desktop
+also has an opt-in [native mode](docs/rust-desktop.md) for saved setups; its default
+workflow still uses Python. See [migration progress](docs/rust-migration.md).
 
 Run the Rust core and desktop tests from the repository root:
 
