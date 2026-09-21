@@ -138,7 +138,14 @@ jobs:
 
           sudo installer -pkg "$pkg" -target /
 
-          app="/Applications/Vagtplanlægning.app"
+          echo "Installed by the package:"
+          pkgutil --files io.github.jdreioe.teamup-shift-sync | head -20 || true
+          ls -la /Applications
+
+          # Resolved rather than spelled out, because the bundle name is not
+          # ASCII and the installer decides how it stores it.
+          app="$(ls -d /Applications/*.app | grep -i vagtplan | head -1)"
+          echo "Installed app: $app"
           test -x "$app/Contents/MacOS/teamup-shift-sync-gui"
           lipo -archs "$app/Contents/MacOS/teamup-shift-sync-gui" | tee /dev/stderr | grep -q "x86_64 arm64"
           TEAMUP_SHIFT_SYNC_CONFIG="$app/Contents/Resources/fixtures/offline-config.toml" \
