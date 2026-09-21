@@ -222,7 +222,7 @@ fn split_transfers_verify_changed_ids_and_repeat_without_writes() {
             request.clone(),
             adapter.state_path.clone(),
             &mut adapter,
-            |step| progress.push(step.to_owned()),
+            |item| progress.push(item.step_key.clone()),
         ))
         .unwrap();
     assert!(final_plan

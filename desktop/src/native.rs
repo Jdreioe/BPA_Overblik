@@ -2,10 +2,11 @@
 //! Setup editing remains in the existing application during migration.
 use crate::setup;
 use chrono::{Datelike, DateTime, Duration, FixedOffset, NaiveDate, TimeZone, Timelike, Utc};
-use iced::widget::{button, column, container, row, scrollable, text};
+use iced::widget::{button, column, container, progress_bar, row, scrollable, text};
 use iced::{Element, Length, Subscription, Task};
 use serde_json::Value;
 use std::{
+    collections::BTreeMap,
     path::PathBuf,
     sync::{Arc, Mutex as StdMutex},
 };
@@ -15,7 +16,7 @@ use teamup_shift_sync_core::{
         load_saved_setup, read_destinations, read_shapes, read_teamup, BrowserSessions, LiveConfig,
         LiveDestinations, Service, Setup, Visibility,
     },
-    plan_digest, reconciliation_range, ApplyRequest, PlanRequest, SyncState,
+    plan_digest, reconciliation_range, ApplyRequest, Outcome, PlanItem, PlanRequest, SyncState,
 };
 use teamup_shift_sync_gui::{files::app_data_dir, preview::build_week, protocol::Week};
 use tokio::sync::{Mutex, MutexGuard};
@@ -27,11 +28,17 @@ fn view(document: &Setup) -> Result<setup::SetupState> {
     serde_json::from_value(document.view()).map_err(|_| "Opsætningen kunne ikke vises.".to_owned())
 }
 
-/// One verified write, grouped for the progress line. Only destination and
-/// kind, never names, times or payloads.
+/// One verified write: its destination and a plain display line naming the
+/// helper and date. No payloads, ids, or times beyond the day.
 #[derive(Clone, Debug, Default)]
 struct TransferProgress {
-    verified: Vec<(String, String)>,
+    verified: Vec<VerifiedStep>,
+}
+
+#[derive(Clone, Debug)]
+struct VerifiedStep {
+    service: String,
+    label: String,
 }
 
 /// The verified result of one approved run.
@@ -42,22 +49,36 @@ struct ApplyDone {
     verified_label: String,
 }
 
-fn describe_step(step_key: &str) -> (String, String) {
+fn service_of(step_key: &str) -> String {
     let base = step_key.split('#').next().unwrap_or("");
     match base {
-        "mithf.create_shift" => ("MitHF".into(), "vagt".into()),
-        "mithf.assign_helper" => ("MitHF".into(), "hjælper".into()),
-        "mithf.set_sps" => ("MitHF".into(), "SPS timer".into()),
-        "mithf.set_meeting" => ("MitHF".into(), "vagtmøde".into()),
-        _ if base.starts_with("duos") => ("DUOS".into(), "timer".into()),
-        _ => ("".into(), "".into()),
+        "mithf.create_shift" | "mithf.assign_helper" | "mithf.set_sps" | "mithf.set_meeting" => {
+            "MitHF".into()
+        }
+        _ if base.starts_with("duos") => "DUOS".into(),
+        _ => String::new(),
     }
 }
 
-fn counted(steps: &[(String, String)], destination: &str) -> usize {
+fn verb_of(outcome: Outcome) -> &'static str {
+    match outcome {
+        Outcome::WouldCreate => "Tilføjer",
+        Outcome::WouldUpdate => "Opdaterer",
+        _ => "Verificerede",
+    }
+}
+
+fn short_date_da(day: u32, month0: u32) -> String {
+    const MONTHS: [&str; 12] = [
+        "jan", "feb", "mar", "apr", "maj", "jun", "jul", "aug", "sep", "okt", "nov", "dec",
+    ];
+    format!("{day}. {}", MONTHS[month0 as usize % 12])
+}
+
+fn counted(steps: &[VerifiedStep], destination: &str) -> usize {
     steps
         .iter()
-        .filter(|(service, _)| service == destination)
+        .filter(|step| step.service == destination)
         .count()
 }
 
@@ -78,9 +99,9 @@ fn format_verified_da(moment: DateTime<FixedOffset>) -> String {
 
 fn progress_line(verified: usize, total: usize) -> String {
     if total == 0 {
-        format!("{verified} trin verificeret.")
+        "Verificerer.".into()
     } else {
-        format!("{verified} af {total} trin verificeret.")
+        format!("{verified} af {total} verificeret.")
     }
 }
 
@@ -327,6 +348,7 @@ impl Engine {
                 from,
                 state_path: account.state_path.clone(),
                 total_writes,
+                items: plan.items.clone(),
             })
         })
         .await
@@ -367,9 +389,64 @@ impl Engine {
         let mut destination = LiveDestinations::connect(browser, &account, now)
             .await
             .map_err(|e| e.to_string())?;
-        apply_plan(ApplyRequest {config:account.planning.clone(),shifts,range_start:start,range_end:end,now,expected_digest:approved.digest},account.state_path.clone(),&mut destination, |step|{
+        // Display lines for each approved write, keyed by source and step.
+        // The progress callback only names the verified item, so resolve
+        // helper and date here while shifts and names are at hand.
+        let mut context = BTreeMap::new();
+        for shift in &shifts {
+            let helper = account
+                .helper_names
+                .get(&shift.helper_key)
+                .cloned()
+                .or_else(|| {
+                    account
+                        .planning
+                        .helpers
+                        .get(&shift.helper_key)
+                        .map(|mapping| mapping.mithf_name.clone())
+                })
+                .unwrap_or_else(|| "Ukendt hjælper".into());
+            let at = shift.starts_at.with_timezone(&account.planning.timezone);
+            context.insert(
+                shift.key(),
+                (
+                    helper,
+                    short_date_da(at.day(), at.month0()),
+                ),
+            );
+        }
+        let mut labels = BTreeMap::new();
+        for item in &approved.items {
+            let service = service_of(&item.step_key);
+            if service.is_empty() {
+                continue;
+            }
+            if let Some((helper, date)) = context.get(&item.source_key) {
+                labels.insert(
+                    (item.source_key.clone(), item.step_key.clone()),
+                    (
+                        service.clone(),
+                        format!(
+                            "{} {helper} {date} i {service}",
+                            verb_of(item.outcome)
+                        ),
+                    ),
+                );
+            }
+        }
+        apply_plan(ApplyRequest {config:account.planning.clone(),shifts,range_start:start,range_end:end,now,expected_digest:approved.digest},account.state_path.clone(),&mut destination, |item: &PlanItem|{
             if let Ok(mut state) = progress.lock() {
-                state.verified.push(describe_step(step));
+                let key = (item.source_key.clone(), item.step_key.clone());
+                match labels.get(&key) {
+                    Some((service, label)) => state.verified.push(VerifiedStep {
+                        service: service.clone(),
+                        label: label.clone(),
+                    }),
+                    None => state.verified.push(VerifiedStep {
+                        service: service_of(&item.step_key),
+                        label: String::new(),
+                    }),
+                }
             }
         }).await
             .map_err(|e| match e {
@@ -420,6 +497,7 @@ struct Preview {
     from: NaiveDate,
     state_path: PathBuf,
     total_writes: usize,
+    items: Vec<PlanItem>,
 }
 
 #[derive(Clone)]
@@ -788,11 +866,15 @@ impl NativeApp {
         self.apply_current = state
             .verified
             .last()
-            .map(|(service, kind)| {
-                if kind.is_empty() {
-                    service.clone()
+            .map(|step| {
+                if step.label.is_empty() {
+                    if step.service.is_empty() {
+                        "Verificeret".into()
+                    } else {
+                        format!("Verificeret i {}", step.service)
+                    }
                 } else {
-                    format!("{service} {kind}")
+                    step.label.clone()
                 }
             })
             .unwrap_or_default();
@@ -914,13 +996,24 @@ impl NativeApp {
             if !self.apply_summary.is_empty() {
                 content = content.push(text(&self.apply_summary));
             }
-            content = content.push(text(progress_line(self.apply_verified, self.apply_total)).size(18));
+            let total = self.apply_total.max(1);
+            content = content.push(
+                row![
+                    progress_bar(0.0..=total as f32, self.apply_verified as f32).girth(16),
+                    text(progress_line(self.apply_verified, self.apply_total))
+                ]
+                .spacing(8),
+            );
             if self.apply_current.is_empty() {
-                content = content.push(text("Overfører til MitHF og DUOS. Hvert trin læses tilbage før næste trin."));
+                content = content.push(text(
+                    "Begynder. Hver ændring læses tilbage, før den næste begynder.",
+                ));
             } else {
                 content = content.push(text(format!("Sidst verificeret {}.", self.apply_current)));
             }
-            content = content.push(text("Lad appen være åben, til alle trin er verificeret. Allerede verificerede trin gemmes."));
+            content = content.push(text(
+                "Lad appen være åben, til alt er verificeret. Det, der allerede er verificeret, gemmes.",
+            ));
         } else {
             let busy = match self.activity {
                 Activity::Idle => "",
@@ -1042,6 +1135,7 @@ mod tests {
             from: app.monday,
             state_path: "synthetic-account.sqlite3".into(),
             total_writes: 2,
+            items: vec![],
         }
     }
     fn done() -> ApplyDone {
@@ -1118,20 +1212,18 @@ mod tests {
         let _ = app.update(Message::Apply);
         assert_eq!(app.activity, Activity::Apply);
         let shared = app.apply_progress.clone().expect("progress state");
-        shared
-            .lock()
-            .unwrap()
-            .verified
-            .push(("MitHF".into(), "vagt".into()));
+        shared.lock().unwrap().verified.push(VerifiedStep {
+            service: "MitHF".into(),
+            label: "Tilføjer Anna Hansen 28. sep i MitHF".into(),
+        });
         let _ = app.update(Message::ApplyTick);
         assert_eq!(app.apply_verified, 1);
-        assert_eq!(app.apply_current, "MitHF vagt");
+        assert_eq!(app.apply_current, "Tilføjer Anna Hansen 28. sep i MitHF");
         let _ = app.view();
-        shared
-            .lock()
-            .unwrap()
-            .verified
-            .push(("DUOS".into(), "timer".into()));
+        shared.lock().unwrap().verified.push(VerifiedStep {
+            service: "DUOS".into(),
+            label: "Tilføjer Anna Hansen 28. sep i DUOS".into(),
+        });
         let _ = app.update(Message::ApplyTick);
         assert_eq!(app.apply_verified, 2);
         let _ = app.update(Message::Applied(Ok(done())));
@@ -1143,21 +1235,24 @@ mod tests {
     }
     #[test]
     fn step_labels_stay_plain_and_count_by_destination() {
-        assert_eq!(
-            describe_step("mithf.create_shift"),
-            ("MitHF".into(), "vagt".into())
-        );
-        assert_eq!(
-            describe_step("duos.interval:3"),
-            ("DUOS".into(), "timer".into())
-        );
+        assert_eq!(service_of("mithf.create_shift"), "MitHF");
+        assert_eq!(service_of("duos.interval:3"), "DUOS");
+        assert_eq!(verb_of(Outcome::WouldCreate), "Tilføjer");
+        assert_eq!(verb_of(Outcome::WouldUpdate), "Opdaterer");
+        assert_eq!(short_date_da(28, 8), "28. sep");
         let steps = vec![
-            ("MitHF".to_owned(), "vagt".to_owned()),
-            ("DUOS".to_owned(), "timer".to_owned()),
+            VerifiedStep {
+                service: "MitHF".into(),
+                label: "Tilføjer Anna 28. sep i MitHF".into(),
+            },
+            VerifiedStep {
+                service: "DUOS".into(),
+                label: "Tilføjer Anna 28. sep i DUOS".into(),
+            },
         ];
         assert_eq!(counted(&steps, "MitHF"), 1);
         assert_eq!(counted(&steps, "DUOS"), 1);
-        assert_eq!(progress_line(1, 2), "1 af 2 trin verificeret.");
+        assert_eq!(progress_line(1, 2), "1 af 2 verificeret.");
         assert!(completion_summary(&done()).contains("Sidst verificeret 20. sep kl. 20.00."));
     }
     #[test]

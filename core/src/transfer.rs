@@ -72,13 +72,14 @@ type SharedState = Arc<Mutex<LockedState>>;
 /// Requires a Tokio runtime. Owns the account-state connection and apply lock.
 /// Dropping this future releases the lock and leaves any committed uncertain
 /// marker intact. Adapters must not spawn detached writes after cancellation.
-/// Progress reports only a verified step key, never source text or payloads.
+/// Progress receives each verified item after its read-back. Keep the
+/// callback fast; it runs on the async executor. Do not log the item.
 /// The progress callback must return promptly; it runs on the async executor.
 pub async fn apply_plan(
     request: ApplyRequest,
     state_path: PathBuf,
     destinations: &mut (impl Destinations + Send),
-    mut progress: impl FnMut(&str) + Send,
+    mut progress: impl FnMut(&PlanItem) + Send,
 ) -> Result<SyncPlan, TransferError> {
     let state = tokio::task::spawn_blocking(move || -> Result<_, StateError> {
         let state = SyncState::open(state_path)?;
@@ -168,7 +169,7 @@ pub async fn apply_plan(
             verified.destination_id.clone(),
         )
         .await?;
-        progress(&item.step_key);
+        progress(item);
     }
     let snapshot = destinations
         .read(read_start, read_end)
