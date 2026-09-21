@@ -37,9 +37,12 @@ be found; this mode does not download a browser.
 
 Operations run asynchronously. Controls are disabled while an operation is
 running, so the selected account and week cannot change during a transfer.
-The approval is consumed when transfer starts. Success is shown only after
-the core verifies the entire batch. Failure keeps recovery records and requires
-a new preview before another transfer.
+The approval is consumed when transfer starts. During a transfer the app shows
+the approved scope, how many steps are verified, and the last verified
+destination. Success is shown only after the core verifies the entire batch,
+with per-destination counts and the verification time. The home screen keeps
+showing that time until the account changes. Failure keeps recovery records
+and requires a new preview before another transfer.
 
 The packaged bundle is checked headlessly: `teamup-shift-sync-gui --self-check`
 builds the representative fixture preview through the core and prints its
