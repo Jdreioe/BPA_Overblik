@@ -59,14 +59,19 @@ preview. Nothing is deleted in a destination, no other shift is affected, and
 the next preview still runs the full overlap and conflict checks before anything
 can be approved.
 
-**Hjælp** holds short Danish guidance and two exports. **Gem diagnostik** writes
-`diagnostik.json`: app and system versions, how far setup reached, per-account
-step counts by status, the last verification time, and whether the browser and
-its profiles are present. It is counts and yes/no answers only, with no
-credential, cookie, calendar link, service identifier, name, shift text or raw
-service response, and it needs no service or confirmed account, so it also works
-while setup is stuck. **Gem tjenestediagnostik** records the field types MitHF
-and DUOS return, without any values.
+**Hjælp** holds short Danish guidance and two exports. Neither is called a
+diagnostic on screen: the person asked to produce one is not a developer.
+
+**Gem en fejlrapport om appen** writes `fejlrapport.json`: app and system
+versions, how far setup reached, per-account step counts by status, the last
+verification time, and whether the browser and its profiles are present. It is
+counts and yes/no answers only, with no credential, cookie, calendar link,
+service identifier, name, shift text or raw service response, and it needs no
+service or confirmed account, so it also works while setup is stuck.
+
+**Gem en fejlrapport om MitHF og DUOS** writes `fejlrapport-tjenester.json`,
+which records the field types the two services return, without any values. It is
+the same capture the CLI writes.
 
 The native workflow uses the same separate browser profiles as the Rust CLI.
 Only one native browser owner can run at a time. Browsers belong to that

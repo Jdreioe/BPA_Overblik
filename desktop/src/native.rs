@@ -412,18 +412,18 @@ impl Engine {
         let recorded = read_shapes(browser, &account, from, to, today)
             .await
             .map_err(|e| e.to_string())?;
-        let path = self.data_dir.join("service-shapes.json");
+        let path = self.data_dir.join("fejlrapport-tjenester.json");
         let target = path.clone();
         tokio::task::spawn_blocking(move || {
             serde_json::to_string_pretty(&recorded)
-                .map_err(|_| "Diagnostikken kunne ikke skrives.".to_owned())
+                .map_err(|_| "Fejlrapporten kunne ikke skrives.".to_owned())
                 .and_then(|document| {
                     std::fs::write(&target, document + "\n")
-                        .map_err(|_| "Diagnostikken kunne ikke gemmes.".to_owned())
+                        .map_err(|_| "Fejlrapporten kunne ikke gemmes.".to_owned())
                 })
         })
         .await
-        .map_err(|_| "Diagnostikken kunne ikke gemmes.".to_owned())??;
+        .map_err(|_| "Fejlrapporten kunne ikke gemmes.".to_owned())??;
         Ok(path)
     }
     /// Write the redacted diagnostics the maintainer may ask for. It needs no
@@ -433,15 +433,15 @@ impl Engine {
         tokio::task::spawn_blocking(move || {
             let now = Utc::now().fixed_offset();
             let report = redacted_report(&dir, now).map_err(|e| e.to_string())?;
-            let path = dir.join("diagnostik.json");
+            let path = dir.join("fejlrapport.json");
             let document = serde_json::to_string_pretty(&report)
-                .map_err(|_| "Diagnostikken kunne ikke skrives.".to_owned())?;
+                .map_err(|_| "Fejlrapporten kunne ikke skrives.".to_owned())?;
             std::fs::write(&path, document + "\n")
-                .map_err(|_| "Diagnostikken kunne ikke gemmes.".to_owned())?;
+                .map_err(|_| "Fejlrapporten kunne ikke gemmes.".to_owned())?;
             Ok(path)
         })
         .await
-        .map_err(|_| "Diagnostikken kunne ikke gemmes.".to_owned())?
+        .map_err(|_| "Fejlrapporten kunne ikke gemmes.".to_owned())?
     }
     async fn preview(&self, account: Arc<LiveConfig>, from: NaiveDate) -> Result<Preview> {
         let guard = self.sessions().await?;
@@ -791,7 +791,7 @@ const HELP: [&str; 6] = [
     "3. Løs først punkterne under Kræver opmærksomhed. Rettelser laves i TeamUp eller i tjenesten, ikke i appen.",
     "4. Vælg Overfør ændringer. Hver ændring læses tilbage og bekræftes, før den næste begynder.",
     "Appen sletter aldrig noget i MitHF eller DUOS, og den godkender ikke registreringer for hjælperen.",
-    "Går noget galt, så gem diagnostikken herunder, og send filen til den, der vedligeholder appen. Filen indeholder hverken navne, vagttekst, adgangskoder eller cookies.",
+    "Går noget galt, så gem en fejlrapport herunder, og send filen til den, der vedligeholder appen. Filen indeholder hverken navne, vagttekst, adgangskoder eller cookies.",
 ];
 
 /// The screen in view. Everything technical lives away from the week.
@@ -1138,7 +1138,7 @@ impl NativeApp {
                 match result {
                     Ok(path) => {
                         self.notice = format!(
-                            "Tjenestediagnostik gemt i {}. Den beskriver kun felttyper og indeholder ingen navne, vagter eller kontooplysninger.",
+                            "Fejlrapporten om MitHF og DUOS er gemt i {}. Den beskriver kun, hvilke felter tjenesterne sender, og indeholder ingen navne, vagter eller kontooplysninger.",
                             path.display()
                         )
                     }
@@ -1163,7 +1163,7 @@ impl NativeApp {
                 match result {
                     Ok(path) => {
                         self.notice = format!(
-                            "Diagnostik gemt i {}. Filen indeholder kun tal og ja/nej-svar: hverken navne, vagttekst, adgangskoder, cookies eller kalenderlink.",
+                            "Fejlrapporten er gemt i {}. Den indeholder kun tal og ja/nej-svar: hverken navne, vagttekst, adgangskoder, cookies eller kalenderlink.",
                             path.display()
                         )
                     }
@@ -1423,7 +1423,7 @@ impl NativeApp {
                 Activity::Idle => "",
                 Activity::Setup => "Indlæser opsætning …",
                 Activity::Login => "Kontakter browseren …",
-                Activity::Capture => "Skriver diagnostik …",
+                Activity::Capture => "Skriver fejlrapporten …",
                 Activity::Preview => "Henter ugens ændringer …",
                 Activity::Recover => "Glemmer lokale registreringer …",
                 Activity::Apply => "",
@@ -1578,10 +1578,11 @@ impl NativeApp {
         for line in HELP {
             content = content.push(text(line));
         }
-        content = content.push(self.action("Gem diagnostik", Message::SaveDiagnostics));
+        content =
+            content.push(self.action("Gem en fejlrapport om appen", Message::SaveDiagnostics));
         if self.account.is_some() {
             content = content
-                .push(self.action("Gem tjenestediagnostik", Message::Capture))
+                .push(self.action("Gem en fejlrapport om MitHF og DUOS", Message::Capture))
                 .push(self.action("Tilbage til ugen", Message::Open(Screen::Home)))
         } else {
             content = content
@@ -1908,7 +1909,7 @@ mod tests {
 
         let _ = app.update(Message::SaveDiagnostics);
         assert_eq!(app.activity, Activity::Capture);
-        let _ = app.update(Message::DiagnosticsSaved(Ok("diagnostik.json".into())));
+        let _ = app.update(Message::DiagnosticsSaved(Ok("fejlrapport.json".into())));
         assert_eq!(app.activity, Activity::Idle);
         assert!(app.notice.contains("hverken navne"));
     }
