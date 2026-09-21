@@ -3,11 +3,13 @@ mod browser;
 mod capture;
 mod config;
 mod destinations;
+mod diagnostics;
 mod setup;
 mod teamup;
 
 pub use browser::{BrowserSessions, Service, Visibility};
 pub use capture::read_shapes;
+pub use diagnostics::redacted_report;
 pub use setup::Setup;
 pub use config::{load_saved_setup, LiveConfig};
 pub use destinations::{read_destinations, LiveDestinations};

@@ -226,7 +226,7 @@ fn private_dir(path: &Path) -> Result<(), LiveError> {
     }
     Ok(())
 }
-fn browser_executable(data_dir: &Path) -> Result<PathBuf, LiveError> {
+pub(super) fn browser_executable(data_dir: &Path) -> Result<PathBuf, LiveError> {
     if let Some(path) = std::env::var_os("TEAMUP_BROWSER_PATH") {
         let path = PathBuf::from(path);
         if path.is_file() { return Ok(path); }

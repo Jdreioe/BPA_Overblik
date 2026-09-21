@@ -16,8 +16,8 @@ use std::{
 use teamup_shift_sync_core::{
     apply_plan_controlled, build_plan,
     live::{
-        load_saved_setup, read_destinations, read_shapes, read_teamup, BrowserSessions, LiveConfig,
-        LiveDestinations, Service, Setup, Visibility,
+        load_saved_setup, read_destinations, read_shapes, read_teamup, redacted_report,
+        BrowserSessions, LiveConfig, LiveDestinations, Service, Setup, Visibility,
     },
     plan_digest, reconciliation_range, ApplyOutcome, ApplyRequest, Outcome, PlanItem, PlanRequest,
     PlanSystem, SyncState, TransferEvent, TransferOperation,
@@ -413,6 +413,23 @@ impl Engine {
         .map_err(|_| "Diagnostikken kunne ikke gemmes.".to_owned())??;
         Ok(path)
     }
+    /// Write the redacted diagnostics the maintainer may ask for. It needs no
+    /// service and no confirmed account, so it also works when setup is stuck.
+    async fn diagnostics(&self) -> Result<PathBuf> {
+        let dir = self.data_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            let now = Utc::now().fixed_offset();
+            let report = redacted_report(&dir, now).map_err(|e| e.to_string())?;
+            let path = dir.join("diagnostik.json");
+            let document = serde_json::to_string_pretty(&report)
+                .map_err(|_| "Diagnostikken kunne ikke skrives.".to_owned())?;
+            std::fs::write(&path, document + "\n")
+                .map_err(|_| "Diagnostikken kunne ikke gemmes.".to_owned())?;
+            Ok(path)
+        })
+        .await
+        .map_err(|_| "Diagnostikken kunne ikke gemmes.".to_owned())?
+    }
     async fn preview(&self, account: Arc<LiveConfig>, from: NaiveDate) -> Result<Preview> {
         let guard = self.sessions().await?;
         let browser = guard.as_ref().ok_or("Log ind i MitHF og DUOS først.")?;
@@ -732,6 +749,8 @@ enum Message {
     LoginChecked(Result<()>),
     Capture,
     Captured(Result<PathBuf>),
+    SaveDiagnostics,
+    DiagnosticsSaved(Result<PathBuf>),
     Preview,
     PreviewLoaded(Result<Box<Preview>>),
     AllowRetransfer(String),
@@ -855,6 +874,7 @@ impl NativeApp {
                 | Message::LoginOpened(_)
                 | Message::LoginChecked(_)
                 | Message::Captured(_)
+                | Message::DiagnosticsSaved(_)
                 | Message::PreviewLoaded(_)
                 | Message::Forgotten(_)
                 | Message::Applied(_)
@@ -1081,6 +1101,31 @@ impl NativeApp {
                     Ok(path) => {
                         self.notice = format!(
                             "Tjenestediagnostik gemt i {}. Den beskriver kun felttyper og indeholder ingen navne, vagter eller kontooplysninger.",
+                            path.display()
+                        )
+                    }
+                    Err(e) => self.error = Some(e),
+                }
+            }
+            Message::SaveDiagnostics => {
+                self.error = None;
+                self.notice.clear();
+                self.activity = Activity::Capture;
+                let engine = self.engine.clone();
+                return Task::perform(
+                    async move { engine.diagnostics().await },
+                    Message::DiagnosticsSaved,
+                );
+            }
+            Message::DiagnosticsSaved(result) => {
+                if self.activity != Activity::Capture {
+                    return Task::none();
+                }
+                self.activity = Activity::Idle;
+                match result {
+                    Ok(path) => {
+                        self.notice = format!(
+                            "Diagnostik gemt i {}. Filen indeholder kun tal og ja/nej-svar: hverken navne, vagttekst, adgangskoder, cookies eller kalenderlink.",
                             path.display()
                         )
                     }
@@ -1340,7 +1385,7 @@ impl NativeApp {
                 Activity::Idle => "",
                 Activity::Setup => "Indlæser opsætning …",
                 Activity::Login => "Kontakter browseren …",
-                Activity::Capture => "Læser tjenesternes svar …",
+                Activity::Capture => "Skriver diagnostik …",
                 Activity::Preview => "Henter ugens ændringer …",
                 Activity::Recover => "Glemmer lokale registreringer …",
                 Activity::Apply => "",
@@ -1355,12 +1400,12 @@ impl NativeApp {
             .into()
     }
 
-    /// Settings is the only screen that exists before an account is confirmed.
+    /// There is no week to show before an account is confirmed, but help and
+    /// its diagnostics stay reachable: that is when they are needed most.
     fn visible_screen(&self) -> Screen {
-        if self.account.is_none() {
-            Screen::Settings
-        } else {
-            self.screen
+        match self.screen {
+            Screen::Home if self.account.is_none() => Screen::Settings,
+            screen => screen,
         }
     }
 
@@ -1478,6 +1523,7 @@ impl NativeApp {
             )
             .push(self.setup.view().map(Message::Setup))
             .push(self.action("Genindlæs opsætning", Message::Reload));
+        content = content.push(self.action("Hjælp", Message::Open(Screen::Help)));
         if self.account.is_some() {
             content = content.push(self.action("Tilbage til ugen", Message::Open(Screen::Home)));
         }
@@ -1490,10 +1536,14 @@ impl NativeApp {
         for line in HELP {
             content = content.push(text(line));
         }
+        content = content.push(self.action("Gem diagnostik", Message::SaveDiagnostics));
         if self.account.is_some() {
             content = content
                 .push(self.action("Gem tjenestediagnostik", Message::Capture))
-                .push(self.action("Tilbage til ugen", Message::Open(Screen::Home)));
+                .push(self.action("Tilbage til ugen", Message::Open(Screen::Home)))
+        } else {
+            content = content
+                .push(self.action("Tilbage til Indstillinger", Message::Open(Screen::Settings)))
         }
         content
     }
@@ -1790,6 +1840,20 @@ mod tests {
         let _ = app.view();
         let _ = app.update(Message::Open(Screen::Home));
         assert_eq!(app.screen, Screen::Home);
+    }
+    #[test]
+    fn help_and_its_diagnostics_stay_reachable_before_setup_is_finished() {
+        let mut app = app();
+        app.account = None;
+        let _ = app.update(Message::Open(Screen::Help));
+        assert_eq!(app.visible_screen(), Screen::Help);
+        let _ = app.view();
+
+        let _ = app.update(Message::SaveDiagnostics);
+        assert_eq!(app.activity, Activity::Capture);
+        let _ = app.update(Message::DiagnosticsSaved(Ok("diagnostik.json".into())));
+        assert_eq!(app.activity, Activity::Idle);
+        assert!(app.notice.contains("hverken navne"));
     }
     #[test]
     fn a_confirmed_setup_returns_to_the_week() {
