@@ -2,7 +2,7 @@
 //! Setup editing remains in the existing application during migration.
 use crate::setup;
 use chrono::{DateTime, Datelike, Duration, FixedOffset, NaiveDate, TimeZone, Timelike, Utc};
-use iced::widget::{button, column, container, progress_bar, row, scrollable, text};
+use iced::widget::{button, column, container, progress_bar, row, scrollable, text, Column};
 use iced::{Element, Length, Subscription, Task};
 use serde_json::Value;
 use std::{
@@ -723,6 +723,7 @@ enum Message {
     VerifiedLoaded(PathBuf, Option<String>),
     Setup(setup::Message),
     SetupUpdated(Result<setup::SetupState>),
+    Open(Screen),
     Navigate(i64),
     Current,
     Login(Service),
@@ -749,6 +750,24 @@ impl std::fmt::Debug for Message {
         f.write_str("NativeMessage")
     }
 }
+/// Short Danish guidance for the Hjælp screen.
+const HELP: [&str; 6] = [
+    "1. Log ind i MitHF og DUOS under Indstillinger. Login holder, indtil tjenesten selv logger dig ud.",
+    "2. Vælg ugen på forsiden, og vælg Se ændringer. Appen læser TeamUp, MitHF og DUOS og viser, hvad der mangler.",
+    "3. Løs først punkterne under Kræver opmærksomhed. Rettelser laves i TeamUp eller i tjenesten, ikke i appen.",
+    "4. Vælg Overfør ændringer. Hver ændring læses tilbage og bekræftes, før den næste begynder.",
+    "Appen sletter aldrig noget i MitHF eller DUOS, og den godkender ikke registreringer for hjælperen.",
+    "Går noget galt, så gem diagnostikken herunder, og send filen til den, der vedligeholder appen. Filen indeholder hverken navne, vagttekst, adgangskoder eller cookies.",
+];
+
+/// The screen in view. Everything technical lives away from the week.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Screen {
+    Home,
+    Settings,
+    Help,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Activity {
     Idle,
@@ -762,6 +781,7 @@ enum Activity {
 
 struct NativeApp {
     engine: Engine,
+    screen: Screen,
     account: Option<Arc<LiveConfig>>,
     setup: setup::SetupUi,
     monday: NaiveDate,
@@ -790,6 +810,7 @@ impl NativeApp {
     fn new() -> (Self, Task<Message>) {
         let mut app = Self {
             engine: Engine::new(app_data_dir()),
+            screen: Screen::Home,
             account: None,
             setup: setup::SetupUi::default(),
             monday: Utc::now().date_naive(),
@@ -967,11 +988,22 @@ impl NativeApp {
                         self.setup.state = Some(state);
                         self.setup.error = None;
                         if confirmed {
+                            // confirm() revalidated both services before this.
+                            self.screen = Screen::Home;
                             return self.update(Message::Reload);
                         }
                     }
                     Err(error) => self.setup.error = Some(error),
                 }
+            }
+            Message::Open(screen) => {
+                // Settings may change the account, so no approval survives the
+                // trip. Any message that sent the user here is kept.
+                if screen == Screen::Settings {
+                    self.preview = None;
+                    self.forget_source = None;
+                }
+                self.screen = screen;
             }
             Message::Navigate(days) => {
                 if let Some(date) = self
@@ -1265,122 +1297,11 @@ impl NativeApp {
         if !self.notice.is_empty() {
             content = content.push(text(&self.notice));
         }
-        if self.account.is_none() {
-            // Both services have to be reachable before the catalog can be
-            // read, so login stays available throughout setup.
-            content = content
-                .push(
-                    row![
-                        self.action("Log ind i MitHF", Message::Login(Service::Mithf)),
-                        self.action("Log ind i DUOS", Message::Login(Service::Duos)),
-                        self.action("Kontrollér login", Message::CheckLogin)
-                    ]
-                    .spacing(8),
-                )
-                .push(self.setup.view().map(Message::Setup))
-                .push(self.action("Genindlæs opsætning", Message::Reload));
-        } else {
-            content = content
-                .push(
-                    text(super::widgets::format_week_da(
-                        self.monday,
-                        self.monday + Duration::days(6),
-                    ))
-                    .size(20),
-                )
-                .push(
-                    row![
-                        self.action("‹ Forrige", Message::Navigate(-7)),
-                        self.action("Denne uge", Message::Current),
-                        self.action("Næste ›", Message::Navigate(7))
-                    ]
-                    .spacing(8),
-                )
-                .push(
-                    row![
-                        self.action("Log ind i MitHF", Message::Login(Service::Mithf)),
-                        self.action("Log ind i DUOS", Message::Login(Service::Duos)),
-                        self.action("Kontrollér login", Message::CheckLogin)
-                    ]
-                    .spacing(8),
-                )
-                .push(
-                    row![
-                        self.action("Genindlæs opsætning", Message::Reload),
-                        self.action("Gem tjenestediagnostik", Message::Capture)
-                    ]
-                    .spacing(8),
-                );
-            if self.activity != Activity::Apply {
-                if let Some(stamp) = &self.last_verified {
-                    content = content.push(text(format!("Sidst verificeret {stamp}.")));
-                }
-            }
-            if let Some(preview) = &self.preview {
-                let week = &preview.week;
-                content = content.push(text(&week.headline).size(18));
-                if !week.notice.is_empty() {
-                    content = content.push(text(&week.notice));
-                }
-                if !week.attention.is_empty() {
-                    content = content.push(text("Kræver opmærksomhed").size(18));
-                }
-                for item in &week.attention {
-                    let mut entry = column![
-                        text(format!("{} · {}", item.when, item.who)),
-                        text(&item.explanation),
-                        text(format!("Gør sådan: {}", item.action))
-                    ]
-                    .spacing(4);
-                    if item.can_allow_retransfer {
-                        entry = if self.forget_source.as_deref() == Some(item.source_key.as_str()) {
-                            entry
-                                .push(text(
-                                    "Appen glemmer kun sine egne registreringer for denne vagt. Intet slettes i MitHF eller DUOS. Bagefter skal du hente ugen igen og godkende den på ny.",
-                                ))
-                                .push(
-                                    row![
-                                        self.action(
-                                            "Ja, tillad overførsel igen",
-                                            Message::ConfirmRetransfer
-                                        ),
-                                        self.action("Fortryd", Message::CancelRetransfer)
-                                    ]
-                                    .spacing(8),
-                                )
-                        } else {
-                            entry.push(self.action(
-                                "Tillad overførsel igen",
-                                Message::AllowRetransfer(item.source_key.clone()),
-                            ))
-                        };
-                    }
-                    content = content.push(entry);
-                }
-                if week.days.iter().any(|d| !d.blocks.is_empty()) {
-                    content = content
-                        .push(super::widgets::week_grid(week))
-                        .push(super::widgets::day_details(week));
-                }
-                for line in &week.summary {
-                    content = content.push(text(line));
-                }
-                if week.can_apply {
-                    content = content
-                        .push(text(&week.apply_summary))
-                        .push(self.action("Overfør ændringer", Message::Apply));
-                } else {
-                    content = content
-                        .push(text(&week.blocked_reason))
-                        .push(button("Overfør ændringer").padding(12));
-                }
-            }
-            content = if self.needs_recheck {
-                content.push(self.action("Kontrollér igen", Message::Preview))
-            } else {
-                content.push(self.action("Se ændringer", Message::Preview))
-            };
-        }
+        content = match self.visible_screen() {
+            Screen::Home => self.home(content),
+            Screen::Settings => self.settings(content),
+            Screen::Help => self.help(content),
+        };
         if self.activity == Activity::Apply {
             if !self.apply_summary.is_empty() {
                 content = content.push(text(&self.apply_summary));
@@ -1432,6 +1353,149 @@ impl NativeApp {
             .center_x(Length::Fill)
             .height(Length::Fill)
             .into()
+    }
+
+    /// Settings is the only screen that exists before an account is confirmed.
+    fn visible_screen(&self) -> Screen {
+        if self.account.is_none() {
+            Screen::Settings
+        } else {
+            self.screen
+        }
+    }
+
+    /// The week, its changes and the two primary actions. Service connections,
+    /// mappings and diagnostics belong on the secondary screens.
+    fn home<'a>(&'a self, mut content: Column<'a, Message>) -> Column<'a, Message> {
+        content = content
+            .push(
+                text(super::widgets::format_week_da(
+                    self.monday,
+                    self.monday + Duration::days(6),
+                ))
+                .size(20),
+            )
+            .push(
+                row![
+                    self.action("‹ Forrige", Message::Navigate(-7)),
+                    self.action("Denne uge", Message::Current),
+                    self.action("Næste ›", Message::Navigate(7))
+                ]
+                .spacing(8),
+            );
+        if self.activity != Activity::Apply {
+            if let Some(stamp) = &self.last_verified {
+                content = content.push(text(format!("Sidst verificeret {stamp}.")));
+            }
+        }
+        if let Some(preview) = &self.preview {
+            let week = &preview.week;
+            content = content.push(text(&week.headline).size(18));
+            if !week.notice.is_empty() {
+                content = content.push(text(&week.notice));
+            }
+            if !week.attention.is_empty() {
+                content = content.push(text("Kræver opmærksomhed").size(18));
+            }
+            for item in &week.attention {
+                let mut entry = column![
+                    text(format!("{} · {}", item.when, item.who)),
+                    text(&item.explanation),
+                    text(format!("Gør sådan: {}", item.action))
+                ]
+                .spacing(4);
+                if item.can_allow_retransfer {
+                    entry = if self.forget_source.as_deref() == Some(item.source_key.as_str()) {
+                        entry
+                            .push(text(
+                                "Appen glemmer kun sine egne registreringer for denne vagt. Intet slettes i MitHF eller DUOS. Bagefter skal du hente ugen igen og godkende den på ny.",
+                            ))
+                            .push(
+                                row![
+                                    self.action(
+                                        "Ja, tillad overførsel igen",
+                                        Message::ConfirmRetransfer
+                                    ),
+                                    self.action("Fortryd", Message::CancelRetransfer)
+                                ]
+                                .spacing(8),
+                            )
+                    } else {
+                        entry.push(self.action(
+                            "Tillad overførsel igen",
+                            Message::AllowRetransfer(item.source_key.clone()),
+                        ))
+                    };
+                }
+                content = content.push(entry);
+            }
+            if week.days.iter().any(|d| !d.blocks.is_empty()) {
+                content = content
+                    .push(super::widgets::week_grid(week))
+                    .push(super::widgets::day_details(week));
+            }
+            for line in &week.summary {
+                content = content.push(text(line));
+            }
+            if week.can_apply {
+                content = content
+                    .push(text(&week.apply_summary))
+                    .push(self.action("Overfør ændringer", Message::Apply));
+            } else {
+                content = content
+                    .push(text(&week.blocked_reason))
+                    .push(button("Overfør ændringer").padding(12));
+            }
+        }
+        content = if self.needs_recheck {
+            content.push(self.action("Kontrollér igen", Message::Preview))
+        } else {
+            content.push(self.action("Se ændringer", Message::Preview))
+        };
+        content.push(
+            row![
+                self.action("Indstillinger", Message::Open(Screen::Settings)),
+                self.action("Hjælp", Message::Open(Screen::Help))
+            ]
+            .spacing(8),
+        )
+    }
+
+    /// Service connections, the calendar and the confirmed choices.
+    fn settings<'a>(&'a self, mut content: Column<'a, Message>) -> Column<'a, Message> {
+        content = content
+            .push(text("Indstillinger").size(22))
+            .push(text("Tjenester"))
+            // Both services have to be reachable before the catalog can be
+            // read, so login stays available throughout setup.
+            .push(
+                row![
+                    self.action("Log ind i MitHF", Message::Login(Service::Mithf)),
+                    self.action("Log ind i DUOS", Message::Login(Service::Duos)),
+                    self.action("Kontrollér login", Message::CheckLogin)
+                ]
+                .spacing(8),
+            )
+            .push(self.setup.view().map(Message::Setup))
+            .push(self.action("Genindlæs opsætning", Message::Reload));
+        if self.account.is_some() {
+            content = content.push(self.action("Tilbage til ugen", Message::Open(Screen::Home)));
+        }
+        content
+    }
+
+    /// Short guidance and the diagnostics the maintainer may ask for.
+    fn help<'a>(&'a self, mut content: Column<'a, Message>) -> Column<'a, Message> {
+        content = content.push(text("Hjælp").size(22));
+        for line in HELP {
+            content = content.push(text(line));
+        }
+        if self.account.is_some() {
+            content = content
+                .push(self.action("Gem tjenestediagnostik", Message::Capture))
+                .push(self.action("Tilbage til ugen", Message::Open(Screen::Home)));
+        }
+        content
     }
 }
 
@@ -1511,6 +1575,7 @@ mod tests {
     fn app() -> NativeApp {
         NativeApp {
             engine: Engine::new("unused-test-directory".into()),
+            screen: Screen::Home,
             account: None,
             setup: setup::SetupUi::default(),
             monday: NaiveDate::from_ymd_opt(2026, 9, 14).unwrap(),
@@ -1706,6 +1771,34 @@ mod tests {
         assert!(app.preview.is_some());
         assert!(app.forget_source.is_none());
         assert!(app.error.is_some());
+    }
+    #[test]
+    fn settings_are_reachable_from_the_week_and_revoke_a_shown_approval() {
+        let mut app = app();
+        app.account = None;
+        // Without a confirmed account there is nowhere else to be.
+        assert_eq!(app.visible_screen(), Screen::Settings);
+        let _ = app.view();
+
+        app.preview = Some(preview(&app, true));
+        let _ = app.update(Message::Open(Screen::Settings));
+        assert_eq!(app.screen, Screen::Settings);
+        assert!(app.preview.is_none());
+
+        let _ = app.update(Message::Open(Screen::Help));
+        assert_eq!(app.screen, Screen::Help);
+        let _ = app.view();
+        let _ = app.update(Message::Open(Screen::Home));
+        assert_eq!(app.screen, Screen::Home);
+    }
+    #[test]
+    fn a_confirmed_setup_returns_to_the_week() {
+        let mut app = app();
+        app.screen = Screen::Settings;
+        app.activity = Activity::Setup;
+        app.setup.busy = true;
+        let _ = app.update(Message::SetupUpdated(Ok(setup_state("ready"))));
+        assert_eq!(app.screen, Screen::Home);
     }
     #[test]
     fn blocked_and_wrong_week_previews_cannot_start_apply() {
