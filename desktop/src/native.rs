@@ -32,6 +32,7 @@ fn view(document: &Setup) -> Result<setup::SetupState> {
 /// helper and date. No payloads, ids, or times beyond the day.
 #[derive(Clone, Debug, Default)]
 struct TransferProgress {
+    expected: BTreeMap<String, usize>,
     verified: Vec<VerifiedStep>,
 }
 
@@ -39,6 +40,20 @@ struct TransferProgress {
 struct VerifiedStep {
     service: String,
     label: String,
+    source: String,
+}
+
+fn write_counts(items: &[PlanItem]) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for item in items.iter().filter(|item| {
+        matches!(
+            item.outcome,
+            Outcome::WouldCreate | Outcome::WouldUpdate
+        )
+    }) {
+        *counts.entry(item.source_key.clone()).or_insert(0) += 1;
+    }
+    counts
 }
 
 /// The verified result of one approved run.
@@ -99,9 +114,9 @@ fn format_verified_da(moment: DateTime<FixedOffset>) -> String {
 
 fn progress_line(verified: usize, total: usize) -> String {
     if total == 0 {
-        "Verificerer.".into()
+        "Overfører.".into()
     } else {
-        format!("{verified} af {total} verificeret.")
+        format!("{verified} af {total} vagter overført.")
     }
 }
 
@@ -331,23 +346,11 @@ impl Engine {
             .map_err(str::to_owned)?;
             let digest = plan_digest(&plan)
                 .map_err(|_| "Ugens godkendelse kunne ikke beregnes.".to_owned())?;
-            let total_writes = plan
-                .items
-                .iter()
-                .filter(|item| {
-                    matches!(
-                        item.outcome,
-                        teamup_shift_sync_core::Outcome::WouldCreate
-                            | teamup_shift_sync_core::Outcome::WouldUpdate
-                    )
-                })
-                .count();
             Ok(Preview {
                 week,
                 digest,
                 from,
                 state_path: account.state_path.clone(),
-                total_writes,
                 items: plan.items.clone(),
             })
         })
@@ -462,10 +465,12 @@ impl Engine {
                     Some((service, label)) => state.verified.push(VerifiedStep {
                         service: service.clone(),
                         label: label.clone(),
+                        source: item.source_key.clone(),
                     }),
                     None => state.verified.push(VerifiedStep {
                         service: service_of(&item.step_key),
                         label: String::new(),
+                        source: item.source_key.clone(),
                     }),
                 }
             }
@@ -517,7 +522,6 @@ struct Preview {
     digest: String,
     from: NaiveDate,
     state_path: PathBuf,
-    total_writes: usize,
     items: Vec<PlanItem>,
 }
 
@@ -882,10 +886,14 @@ impl NativeApp {
                     return Task::none();
                 };
                 self.apply_summary = preview.week.apply_summary.clone();
-                self.apply_total = preview.total_writes;
+                let expected = write_counts(&preview.items);
+                self.apply_total = expected.len();
                 self.apply_verified = 0;
                 self.apply_current.clear();
-                let progress = Arc::new(StdMutex::new(TransferProgress::default()));
+                let progress = Arc::new(StdMutex::new(TransferProgress {
+                    expected,
+                    verified: Vec::new(),
+                }));
                 self.apply_progress = Some(progress.clone());
                 self.preview = None;
                 self.error = None;
@@ -931,7 +939,18 @@ impl NativeApp {
         let Ok(state) = shared.lock() else {
             return;
         };
-        self.apply_verified = state.verified.len();
+        self.apply_verified = state
+            .expected
+            .iter()
+            .filter(|(source, total)| {
+                state
+                    .verified
+                    .iter()
+                    .filter(|step| &step.source == *source)
+                    .count()
+                    >= **total
+            })
+            .count();
         self.apply_current = state
             .verified
             .last()
@@ -1209,6 +1228,18 @@ mod tests {
             apply_summary: String::new(),
         }
     }
+    fn write_item(source: &str, step: &str) -> PlanItem {
+        PlanItem {
+            source_key: source.into(),
+            system: teamup_shift_sync_core::PlanSystem::Mithf,
+            step_key: step.into(),
+            outcome: Outcome::WouldCreate,
+            summary: String::new(),
+            payload: Default::default(),
+            destination_id: None,
+            reason: String::new(),
+        }
+    }
     fn preview(app: &NativeApp, can_apply: bool) -> Preview {
         Preview {
             week: Week {
@@ -1219,8 +1250,10 @@ mod tests {
             digest: "reviewed-digest".into(),
             from: app.monday,
             state_path: "synthetic-account.sqlite3".into(),
-            total_writes: 2,
-            items: vec![],
+            items: vec![
+                write_item("s", "mithf.create_shift"),
+                write_item("s", "mithf.assign_helper"),
+            ],
         }
     }
     fn done() -> ApplyDone {
@@ -1237,7 +1270,7 @@ mod tests {
         let _ = app.update(Message::Apply);
         assert_eq!(app.activity, Activity::Apply);
         assert!(app.preview.is_none());
-        assert_eq!(app.apply_total, 2);
+        assert_eq!(app.apply_total, 1);
         assert!(!app.apply_summary.is_empty());
         let monday = app.monday;
         for message in [
@@ -1341,17 +1374,20 @@ mod tests {
         shared.lock().unwrap().verified.push(VerifiedStep {
             service: "MitHF".into(),
             label: "Tilføjer Anna Hansen 28. sep i MitHF".into(),
+            source: "s".into(),
         });
         let _ = app.update(Message::ApplyTick);
-        assert_eq!(app.apply_verified, 1);
+        // One of two writes is verified, so no shift is done yet.
+        assert_eq!(app.apply_verified, 0);
         assert_eq!(app.apply_current, "Tilføjer Anna Hansen 28. sep i MitHF");
         let _ = app.view();
         shared.lock().unwrap().verified.push(VerifiedStep {
-            service: "DUOS".into(),
-            label: "Tilføjer Anna Hansen 28. sep i DUOS".into(),
+            service: "MitHF".into(),
+            label: "Tilføjer Anna Hansen 28. sep i MitHF".into(),
+            source: "s".into(),
         });
         let _ = app.update(Message::ApplyTick);
-        assert_eq!(app.apply_verified, 2);
+        assert_eq!(app.apply_verified, 1);
         let _ = app.update(Message::Applied(Ok(done())));
         assert_eq!(app.activity, Activity::Idle);
         assert!(app.apply_progress.is_none());
@@ -1370,15 +1406,17 @@ mod tests {
             VerifiedStep {
                 service: "MitHF".into(),
                 label: "Tilføjer Anna 28. sep i MitHF".into(),
+                source: "s".into(),
             },
             VerifiedStep {
                 service: "DUOS".into(),
                 label: "Tilføjer Anna 28. sep i DUOS".into(),
+                source: "s".into(),
             },
         ];
         assert_eq!(counted(&steps, "MitHF"), 1);
         assert_eq!(counted(&steps, "DUOS"), 1);
-        assert_eq!(progress_line(1, 2), "1 af 2 verificeret.");
+        assert_eq!(progress_line(1, 2), "1 af 2 vagter overført.");
         assert!(completion_summary(&done()).contains("Sidst verificeret 20. sep kl. 20.00."));
     }
     #[test]
