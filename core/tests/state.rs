@@ -54,11 +54,7 @@ fn legacy_python_database_copy_preserves_recovery_and_snapshot_hashes() {
     // at the cutover along with the shifts it stored.
     let directory = tempdir().unwrap();
     let original = directory.path().join("python.sqlite3");
-    std::fs::write(
-        &original,
-        include_bytes!("goldens/python-created.sqlite3"),
-    )
-    .unwrap();
+    std::fs::write(&original, include_bytes!("goldens/python-created.sqlite3")).unwrap();
     let shifts: Vec<SourceShift> =
         serde_json::from_str(include_str!("goldens/python-created-shifts.json")).unwrap();
     let copy = directory.path().join("copy.sqlite3");
@@ -230,6 +226,20 @@ fn apply_lock_excludes_concurrent_holders_and_releases_on_unwind() {
     }));
     assert!(result.is_err());
     let _guard = state.exclusive_apply().unwrap();
+}
+
+#[test]
+fn last_snapshot_returns_the_latest_source_observation() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("state.sqlite3");
+    let state = SyncState::open(&path).unwrap();
+    assert!(state.last_source_snapshot_at().unwrap().is_none());
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../../fixtures/representative-week.json")).unwrap();
+    let shift: SourceShift = serde_json::from_value(fixture["source_shifts"][0].clone()).unwrap();
+    let mut state = SyncState::open(&path).unwrap();
+    state.record_source_snapshot(&shift, now()).unwrap();
+    assert_eq!(state.last_source_snapshot_at().unwrap(), Some(now()));
 }
 
 #[test]

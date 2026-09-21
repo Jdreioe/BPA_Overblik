@@ -37,9 +37,22 @@ be found; this mode does not download a browser.
 
 Operations run asynchronously. Controls are disabled while an operation is
 running, so the selected account and week cannot change during a transfer.
-The approval is consumed when transfer starts. Success is shown only after
-the core verifies the entire batch. Failure keeps recovery records and requires
-a new preview before another transfer.
+The approval is consumed when transfer starts. During a transfer the app shows
+the approved scope, current destination and a progress bar that advances for
+each verified shift or registration. MitHF's internal writes count as one
+shift. Each DUOS interval counts as one registration. Success is shown only
+after the core verifies the entire batch, with per-destination counts and the
+verification time in the configured local timezone. The home screen keeps
+showing that account's time until the account changes.
+
+On failure, the app distinguishes verified, uncertain and not-started work.
+"Kontrollér igen" re-reads TeamUp and both destinations before another approval
+is possible. Stopping or closing during a transfer requests a stop between
+operations; an in-flight operation completes its read-back first. A process
+termination can still leave its durable uncertain marker for reconciliation.
+
+Live DUOS writes remain blocked until save-versus-approval semantics have been
+verified against the current service. The app does not approve registrations.
 
 The packaged bundle is checked headlessly: `teamup-shift-sync-gui --self-check`
 builds the representative fixture preview through the core and prints its
