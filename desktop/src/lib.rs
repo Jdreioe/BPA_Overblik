@@ -1,6 +1,6 @@
-//! Shared library for the Iced desktop shell: the typed v1 worker protocol
-//! and the worker supervisor. Kept as a library so integration tests can
-//! exercise the real Python worker round-trip.
+//! Desktop presentation on top of the Rust core: the week preview builder,
+//! its view models, and the application data directory.
 
+pub mod files;
+pub mod preview;
 pub mod protocol;
-pub mod worker;

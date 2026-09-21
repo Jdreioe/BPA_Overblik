@@ -1,0 +1,22 @@
+[package]
+name = "teamup-shift-sync-cli"
+version = "0.1.0"
+edition = "2021"
+description = "Native command-line preview and approved transfer for TeamUp shift sync"
+
+[[bin]]
+name = "teamup-shift-sync-rust"
+path = "src/main.rs"
+
+[dependencies]
+teamup-shift-sync-core = { path = "../core" }
+chrono = "0.4"
+chrono-tz = "0.10"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1.1.6"
+tokio = { version = "1", features = ["rt", "net", "time"] }
+
+[dev-dependencies]
+tempfile = "3"

@@ -245,7 +245,7 @@ fn read_step(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<StepRecord, Sta
     Ok(Ok(record))
 }
 
-fn isoformat(value: DateTime<FixedOffset>) -> String {
+pub(crate) fn isoformat(value: DateTime<FixedOffset>) -> String {
     let precision = if value.timestamp_subsec_micros() == 0 {
         SecondsFormat::Secs
     } else {

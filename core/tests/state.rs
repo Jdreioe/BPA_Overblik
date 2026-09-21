@@ -1,8 +1,4 @@
-use std::{
-    io::{BufRead, BufReader, Write},
-    path::{Path, PathBuf},
-    process::{Command, Stdio},
-};
+use std::{path::Path, sync::mpsc};
 
 use chrono::{DateTime, FixedOffset};
 use rusqlite::Connection;
@@ -29,31 +25,6 @@ fn record() -> StepRecord {
     }
 }
 
-fn python(mode: &str, path: &Path) -> Command {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    let executable = std::env::var_os("TEAMUP_TEST_PYTHON")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            [
-                root.join(".venv/bin/python"),
-                root.join(".venv/Scripts/python.exe"),
-            ]
-            .into_iter()
-            .find(|p| p.is_file())
-            .unwrap_or_else(|| PathBuf::from(if cfg!(windows) { "python" } else { "python3" }))
-        });
-    let mut command = Command::new(executable);
-    command
-        .env("PYTHONPATH", root.join("src"))
-        .arg(root.join("core/tests/python_state.py"))
-        .arg(mode)
-        .arg(path);
-    command
-}
-
 // Compare all persisted values, including hashes, timestamps, and retained comments.
 fn snapshot_rows(path: &Path) -> Vec<Vec<String>> {
     let connection = Connection::open(path).unwrap();
@@ -78,16 +49,18 @@ fn snapshot_rows(path: &Path) -> Vec<Vec<String>> {
 }
 
 #[test]
-fn python_database_copy_preserves_recovery_and_snapshot_hashes_in_both_directions() {
+fn legacy_python_database_copy_preserves_recovery_and_snapshot_hashes() {
+    // Database file written by the Python engine before its removal, frozen
+    // at the cutover along with the shifts it stored.
     let directory = tempdir().unwrap();
     let original = directory.path().join("python.sqlite3");
-    let output = python("create", &original).output().unwrap();
-    assert!(
-        output.status.success(),
-        "Python migration oracle failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let shifts: Vec<SourceShift> = serde_json::from_slice(&output.stdout).unwrap();
+    std::fs::write(
+        &original,
+        include_bytes!("goldens/python-created.sqlite3"),
+    )
+    .unwrap();
+    let shifts: Vec<SourceShift> =
+        serde_json::from_str(include_str!("goldens/python-created-shifts.json")).unwrap();
     let copy = directory.path().join("copy.sqlite3");
     std::fs::copy(&original, &copy).unwrap();
     let before = snapshot_rows(&copy);
@@ -134,12 +107,14 @@ fn python_database_copy_preserves_recovery_and_snapshot_hashes_in_both_direction
         "Rust must preserve Python's snapshot values exactly"
     );
     state.record_step(&record(), now()).unwrap();
-    let output = python("check", &copy).output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    // The removed Python check read this record back field by field. The
+    // same values are asserted in Rust now.
+    let stored = SyncState::open(&copy)
+        .unwrap()
+        .get_step("rust-source", "duos.register")
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored, record());
     assert!(SyncState::open(&original)
         .unwrap()
         .get_step("rust-source", "duos.register")
@@ -217,7 +192,7 @@ fn corrupt_payloads_fail_closed_instead_of_looking_unsynchronized() {
 }
 
 #[test]
-fn apply_lock_excludes_python_and_rust_and_releases_on_unwind() {
+fn apply_lock_excludes_concurrent_holders_and_releases_on_unwind() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("state.sqlite3");
     let state = SyncState::open(&path).unwrap();
@@ -228,25 +203,32 @@ fn apply_lock_excludes_python_and_rust_and_releases_on_unwind() {
             other.exclusive_apply(),
             Err(StateError::ApplyInProgress)
         ));
-        assert_eq!(python("try-lock", &path).status().unwrap().code(), Some(23));
+        // A second holder on its own handle blocks as well. It runs on a
+        // thread so the lock file stays held while this side waits.
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let holder = std::thread::spawn({
+            let path = path.clone();
+            move || {
+                let held = SyncState::open(&path).unwrap();
+                let _guard = held.exclusive_apply().unwrap();
+                ready_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            }
+        });
+        drop(_guard);
+        ready_rx.recv().unwrap();
+        assert!(matches!(
+            state.exclusive_apply(),
+            Err(StateError::ApplyInProgress)
+        ));
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        // Panic while holding the lock: unwinding must release it.
+        let _guard = state.exclusive_apply().unwrap();
         panic!("simulated apply interruption");
     }));
     assert!(result.is_err());
-    assert!(python("try-lock", &path).status().unwrap().success());
-    let mut child = python("hold-lock", &path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut ready = String::new();
-    BufReader::new(child.stdout.take().unwrap())
-        .read_line(&mut ready)
-        .unwrap();
-    assert_eq!(ready.trim(), "locked");
-    let blocked = state.exclusive_apply();
-    child.stdin.take().unwrap().write_all(b"release\n").unwrap();
-    assert!(child.wait().unwrap().success());
-    assert!(matches!(blocked, Err(StateError::ApplyInProgress)));
     let _guard = state.exclusive_apply().unwrap();
 }
 

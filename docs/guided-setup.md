@@ -1,7 +1,7 @@
 # Guided desktop setup
 
-Issue #4 adds Danish setup to the Iced app. Normal launches use live services;
-example data requires an explicit `TEAMUP_FIXTURE` environment variable.
+Issue #4 adds Danish setup to the Iced app. Normal launches use live services.
+Fixture previews are CLI-only; the desktop app never opens example data.
 
 ## First run
 
@@ -27,10 +27,7 @@ example data requires an explicit `TEAMUP_FIXTURE` environment variable.
    live preview. This flow does not create or approve registrations.
 
 Closing the app preserves submitted credentials, discovery and each dropdown
-or exclusion edit. Failed discovery can be retried. Existing local TOML files
-are offered for import using the desktop's existing config-path resolution.
-Imports become proposals for review; the original file is not changed. Legacy
-configurations using fields other than helper subcalendars need fresh setup.
+or exclusion edit. Failed discovery can be retried.
 
 ## Teamup API key provisioning
 
@@ -50,34 +47,34 @@ This is the precise exception to calendar-link-only setup.
 
 ## Local storage and revalidation
 
-The key, capability link and any imported bearer token go into Windows
-Credential Locker, macOS Keychain or Linux Secret Service through
-[keyring](https://keyring.readthedocs.io/en/latest/). The app explicitly selects
-these OS backends; it never substitutes a plaintext or null backend. Linux
-requires an unlocked Secret Service in the user's desktop session. A missing
-or locked store produces a retryable setup error.
+The key, capability link and any imported bearer token go into the OS
+credential store: Windows Credential Locker, macOS Keychain or Linux Secret
+Service. The app explicitly selects these OS backends; it never substitutes a
+plaintext or null backend. Linux requires an unlocked Secret Service in the
+user's desktop session. A missing or locked store produces a retryable setup
+error.
 
 The app data directory contains an atomically replaced `setup.json` with names,
 stable IDs, exclusions, arrangement choices and an opaque credential reference.
 On Unix, its directory is mode 0700 and the file is 0600. Windows uses the
 current user's application-data directory and inherited user ACLs. Browser
 profiles remain inside that protected directory. Setup values never go into
-the repository. The original imported TOML can still contain old secrets;
-the import notice makes that explicit without deleting user data.
+the repository.
 
 Before confirmation and every live preview, the app checks calendars, helper
 IDs and names, active employment, the selected arrangement and type, and the
 MitHF customer/grant. Changes require renewed confirmation. Each confirmed
 account/mapping combination uses a separate SQLite state filename. Credentials,
-response bodies, names and URLs are omitted from worker error diagnostics.
+response bodies, names and URLs are omitted from error diagnostics.
 
 ## Validation
 
-`tests/test_setup.py` covers resume, restricted comments, invalid links,
-ambiguous helpers, inactive employment, absent SPS arrangements, multiple
-accounts and arrangements, import, changed identities and secret redaction.
-Rust tests cover rendering and recovery transitions. The live preview reuses
-the existing planner and read-only destination adapters.
+Recorded setup scenarios pin the state machine: refreshes that preserve or
+reset mappings, renamed calendars, a changed destination catalog, automatic
+selection of a single arrangement, ambiguous MitHF names and half-reviewed
+confirmations, with the exact Danish error text after each step. Rust UI tests
+cover rendering and recovery transitions. The live preview reuses the existing
+planner and read-only destination adapters.
 
 DUOS field names and employment eligibility were also checked against its
 [public frontend bundle](https://mit.duos.dk/assets/Roster-BZBvn4Xb.js) on

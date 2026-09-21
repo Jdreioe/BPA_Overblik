@@ -25,7 +25,6 @@ pub struct Mapping {
 #[derive(Debug, Clone, Deserialize)]
 pub struct SetupState {
     pub stage: String,
-    pub week_start: String,
     pub calendars: Vec<Choice>,
     pub arrangements: Vec<Choice>,
     pub types: Vec<Choice>,
@@ -63,10 +62,6 @@ pub struct SetupUi {
     pub error: Option<String>,
 }
 impl SetupUi {
-    pub fn ready(&self) -> bool {
-        self.state.as_ref().is_some_and(|s| s.stage == "ready")
-    }
-
     pub fn view(&self) -> Element<'_, Message> {
         let mut content = column![text("Opsætning").size(24)].spacing(12);
         if let Some(error) = &self.error {
