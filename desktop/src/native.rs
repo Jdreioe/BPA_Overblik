@@ -6,7 +6,7 @@ use iced::widget::{button, column, container, progress_bar, row, scrollable, tex
 use iced::{Element, Length, Subscription, Task};
 use serde_json::Value;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     sync::{Arc, Mutex as StdMutex},
 };
@@ -354,11 +354,32 @@ impl Engine {
         .await
         .map_err(|_| "Ugens plan kunne ikke indlæses.".to_owned())?
     }
+    /// Forget local step records for explicitly named sources, so deleted
+    /// destination entries can be transferred again after a fresh preview.
+    /// Only local history is forgotten. Nothing is deleted in any service.
+    async fn forget_sources(&self, state_path: PathBuf, sources: Vec<String>) -> Result<usize> {
+        tokio::task::spawn_blocking(move || {
+            let mut state = SyncState::open(&state_path)
+                .map_err(|_| "Den lokale overførselshistorik kunne ikke læses.".to_owned())?;
+            let _guard = state.exclusive_apply().map_err(|_| {
+                "En anden overførsel bruger denne konto. Vent, og prøv igen.".to_owned()
+            })?;
+            let mut count = 0;
+            for source in sources {
+                count += state
+                    .forget_steps(&source)
+                    .map_err(|_| "Historikken kunne ikke glemmes. Prøv igen.".to_owned())?
+                    .len();
+            }
+            Ok(count)
+        })
+        .await
+        .map_err(|_| "Historikken kunne ikke glemmes. Prøv igen.".to_owned())?
+    }
     /// The last fully verified transfer, if any. Snapshots are only stored
     /// after the final read-back, so this never reports a partial attempt.
     /// Failures return None. The home screen then simply shows no timestamp.
-    async fn last_verified(&self, state_path: PathBuf) -> Option<String> {
-        tokio::task::spawn_blocking(move || {
+    async fn last_verified(&self, state_path: PathBuf) -> Option<String> {        tokio::task::spawn_blocking(move || {
             let state = SyncState::open(&state_path).ok()?;
             let moment = state.last_source_snapshot_at().ok()??;
             Some(format_verified_da(moment))
@@ -517,6 +538,8 @@ enum Message {
     Captured(Result<PathBuf>),
     Preview,
     PreviewLoaded(Result<Box<Preview>>),
+    Forget,
+    Forgotten(Result<usize>),
     Apply,
     ApplyTick,
     Applied(Result<ApplyDone>),
@@ -534,6 +557,7 @@ enum Activity {
     Login,
     Capture,
     Preview,
+    Forget,
     Apply,
 }
 
@@ -594,6 +618,7 @@ impl NativeApp {
                 | Message::LoginChecked(_)
                 | Message::Captured(_)
                 | Message::PreviewLoaded(_)
+                | Message::Forgotten(_)
                 | Message::Applied(_)
         );
         // Progress ticks only run during a transfer. They never start work.
@@ -803,6 +828,50 @@ impl NativeApp {
                     Err(e) => self.error = Some(e),
                 }
             }
+            Message::Forget => {
+                let (state_path, sources) = match self.preview.as_ref() {
+                    Some(preview) => {
+                        let sources: BTreeSet<String> = preview
+                            .items
+                            .iter()
+                            .filter(|item| item.reason == "destination_missing")
+                            .map(|item| item.source_key.clone())
+                            .collect();
+                        (preview.state_path.clone(), sources)
+                    }
+                    None => return Task::none(),
+                };
+                if sources.is_empty() {
+                    return Task::none();
+                }
+                self.preview = None;
+                self.error = None;
+                self.notice.clear();
+                self.activity = Activity::Forget;
+                let engine = self.engine.clone();
+                let sources: Vec<String> = sources.into_iter().collect();
+                return Task::perform(
+                    async move { engine.forget_sources(state_path, sources).await },
+                    Message::Forgotten,
+                );
+            }
+            Message::Forgotten(result) => {
+                if self.activity != Activity::Forget {
+                    return Task::none();
+                }
+                self.activity = Activity::Idle;
+                // A fresh preview re-reads destinations, so anything recreated
+                // elsewhere reconciles before another approval can happen.
+                self.preview = None;
+                match result {
+                    Ok(count) => {
+                        self.notice = format!(
+                            "Tillader overførsel igen for {count} gemte trin. Hent ugen igen, og gennemgå den før overførsel."
+                        )
+                    }
+                    Err(error) => self.error = Some(error),
+                }
+            }
             Message::Apply => {
                 let Some(preview) = self
                     .preview
@@ -980,6 +1049,21 @@ impl NativeApp {
                 for line in &week.summary {
                     content = content.push(text(line));
                 }
+                let missing: BTreeSet<&str> = preview
+                    .items
+                    .iter()
+                    .filter(|item| item.reason == "destination_missing")
+                    .map(|item| item.source_key.as_str())
+                    .collect();
+                if !missing.is_empty() {
+                    content = content.push(text(
+                        "Nogle tidligere overførte vagter mangler i destinationen. Appen genskaber dem ikke af sig selv.",
+                    ));
+                    content = content.push(text(
+                        "Tillad overførsel igen glemmer kun den lokale historik. Intet slettes i destinationerne.",
+                    ));
+                    content = content.push(self.action("Tillad overførsel igen", Message::Forget));
+                }
                 if week.can_apply {
                     content = content
                         .push(text(&week.apply_summary))
@@ -1021,6 +1105,7 @@ impl NativeApp {
                 Activity::Login => "Kontakter browseren …",
                 Activity::Capture => "Læser tjenesternes svar …",
                 Activity::Preview => "Henter ugens ændringer …",
+                Activity::Forget => "Glemmer lokal historik …",
                 Activity::Apply => "",
             };
             if !busy.is_empty() {
@@ -1189,6 +1274,47 @@ mod tests {
         app.preview = Some(preview(&app, true));
         let _ = app.update(Message::Navigate(7));
         assert!(app.preview.is_none());
+    }
+    #[test]
+    fn forget_without_deleted_sources_does_nothing() {
+        let mut pending = app();
+        pending.preview = Some(preview(&pending, true));
+        let _ = pending.update(Message::Forget);
+        assert_eq!(pending.activity, Activity::Idle);
+        assert!(pending.preview.is_some());
+        let mut fresh = app();
+        let _ = fresh.update(Message::Forgotten(Ok(1)));
+        assert!(fresh.notice.is_empty());
+    }
+    fn missing_preview(app: &NativeApp) -> Preview {
+        let mut preview = preview(app, false);
+        preview.items.push(PlanItem {
+            source_key: "cal:ev:oc".into(),
+            system: teamup_shift_sync_core::PlanSystem::Mithf,
+            step_key: "mithf.create_shift".into(),
+            outcome: Outcome::Conflicted,
+            summary: String::new(),
+            payload: Default::default(),
+            destination_id: Some("gone".into()),
+            reason: "destination_missing".into(),
+        });
+        preview
+    }
+    #[test]
+    fn retransfer_forgets_only_deleted_sources_and_needs_a_fresh_preview() {
+        let mut app = app();
+        app.preview = Some(missing_preview(&app));
+        let _ = app.view();
+        let _ = app.update(Message::Forget);
+        assert_eq!(app.activity, Activity::Forget);
+        assert!(app.preview.is_none());
+        let _ = app.update(Message::Applied(Ok(done())));
+        assert_eq!(app.activity, Activity::Forget);
+        let _ = app.update(Message::Forgotten(Ok(2)));
+        assert_eq!(app.activity, Activity::Idle);
+        assert!(app.preview.is_none());
+        assert!(app.notice.contains("Hent ugen igen"));
+        let _ = app.view();
     }
     #[test]
     fn late_results_cannot_restore_consumed_approval() {
