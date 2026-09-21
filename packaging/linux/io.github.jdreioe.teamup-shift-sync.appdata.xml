@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.jdreioe.teamup-shift-sync</id>
+  <name>Vagtplanlægning</name>
+  <summary>Gennemse ugens vagter og overfør dem til MitHF og DUOS</summary>
+  <summary xml:lang="en">Review a week of shifts and transfer them to MitHF and DUOS</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <!-- The repository carries no license file, so no open license is claimed. -->
+  <project_license>LicenseRef-proprietary</project_license>
+  <developer id="io.github.jdreioe">
+    <name>Jonas Dreiøe</name>
+  </developer>
+  <description>
+    <p>
+      Vagtplanlægning henter en uges vagter fra TeamUp, viser hvad der vil
+      blive ændret, og overfører først noget når ugen er godkendt. Hver
+      overførsel læses tilbage og kontrolleres. Intet sker automatisk eller i
+      baggrunden.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.jdreioe.teamup-shift-sync.desktop</launchable>
+  <url type="homepage">https://github.com/Jdreioe/teamup_sync</url>
+  <url type="bugtracker">https://github.com/Jdreioe/teamup_sync/issues</url>
+  <categories>
+    <category>Office</category>
+    <category>Calendar</category>
+  </categories>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="{{VERSION}}" date="{{DATE}}"/>
+  </releases>
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+</component>

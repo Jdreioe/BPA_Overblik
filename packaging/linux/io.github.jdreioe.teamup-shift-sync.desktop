@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Vagtplanlægning
+GenericName=Vagtoverførsel
+Comment=Gennemse ugens vagter og overfør dem til MitHF og DUOS
+Exec=teamup-shift-sync-gui
+Icon=io.github.jdreioe.teamup-shift-sync
+Terminal=false
+Categories=Office;Calendar;
+Keywords=vagt;vagtplan;TeamUp;MitHF;DUOS;SPS;
+StartupWMClass=teamup-shift-sync-gui

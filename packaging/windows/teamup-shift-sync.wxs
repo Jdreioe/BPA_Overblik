@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Per-machine Windows installer for Vagtplanlægning.
+
+  It installs the desktop app, the CLI and the fixtures, and adds a Start menu
+  shortcut. It never touches the per-user application data directory, so an
+  upgrade and an uninstall both leave credentials, mappings and sync history
+  alone.
+
+  There is no installer wizard on purpose: the repository carries no license
+  text to show, and a double click should just install. Windows asks for
+  administrator rights and shows its own progress bar.
+
+  PackageVersion is passed in as the MSI version YY.M.D, because Windows
+  Installer only allows 0-255 in the first field. The dated release version
+  YYYY.MM.DD is the installer file name and the version shown in the app.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Vagtplanlægning"
+           Manufacturer="Jonas Dreiøe"
+           Version="$(var.PackageVersion)"
+           UpgradeCode="fcce06fa-d2ac-4e5b-b7b8-e754726c2a3b"
+           Scope="perMachine"
+           Compressed="yes">
+    <SummaryInformation Description="Vagtplanlægning $(var.DisplayVersion)" />
+
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="En nyere udgave af Vagtplanlægning er allerede installeret." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="AppIcon" SourceFile="packaging/windows/teamup-shift-sync.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/Jdreioe/teamup_sync" />
+    <Property Id="ARPNOREPAIR" Value="1" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Vagtplanlægning">
+        <Directory Id="FIXTURESFOLDER" Name="fixtures" />
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+
+    <Feature Id="Main" Title="Vagtplanlægning" Level="1">
+      <ComponentGroupRef Id="ApplicationFiles" />
+    </Feature>
+  </Package>
+
+  <Fragment>
+    <ComponentGroup Id="ApplicationFiles">
+      <Component Directory="INSTALLFOLDER" Guid="*">
+        <File Id="DesktopApp"
+              Source="target/x86_64-pc-windows-msvc/release/teamup-shift-sync-gui.exe"
+              KeyPath="yes" />
+        <Shortcut Id="StartMenuShortcut"
+                  Directory="ProgramMenuFolder"
+                  Name="Vagtplanlægning"
+                  Description="Gennemse ugens vagter og overfør dem til MitHF og DUOS"
+                  Icon="AppIcon"
+                  Advertise="yes" />
+      </Component>
+      <Component Directory="INSTALLFOLDER" Guid="*">
+        <File Id="CommandLine"
+              Source="target/x86_64-pc-windows-msvc/release/teamup-shift-sync-rust.exe"
+              KeyPath="yes" />
+      </Component>
+      <Component Directory="FIXTURESFOLDER" Guid="*">
+        <File Id="FixtureConfig" Source="fixtures/offline-config.toml" KeyPath="yes" />
+      </Component>
+      <Component Directory="FIXTURESFOLDER" Guid="*">
+        <File Id="FixtureWeek" Source="fixtures/representative-week.json" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+</Wix>
