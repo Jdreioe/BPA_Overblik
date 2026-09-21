@@ -1093,7 +1093,7 @@ impl NativeApp {
                     "Begynder. Hver ændring læses tilbage, før den næste begynder.",
                 ));
             } else {
-                content = content.push(text(format!("Sidst verificeret {}.", self.apply_current)));
+                content = content.push(text(format!("{}.", self.apply_current)));
             }
             content = content.push(text(
                 "Lad appen være åben, til alt er verificeret. Det, der allerede er verificeret, gemmes.",
