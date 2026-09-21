@@ -476,6 +476,31 @@ impl Engine {
         .await
         .ok()?
     }
+    /// Forget this app's own local sync records for one shift, so a fresh
+    /// preview may propose the transfer again. Nothing is deleted in MitHF or
+    /// DUOS, and the apply lock keeps this out of a running transfer.
+    async fn allow_retransfer(
+        &self,
+        account: Arc<LiveConfig>,
+        source_key: String,
+    ) -> Result<usize> {
+        tokio::task::spawn_blocking(move || {
+            let mut state = SyncState::open(&account.state_path)
+                .map_err(|_| "Den lokale overførselshistorik kunne ikke åbnes.".to_owned())?;
+            let _guard = state.exclusive_apply().map_err(|error| match error {
+                teamup_shift_sync_core::StateError::ApplyInProgress => {
+                    "En overførsel bruger denne konto. Vent, til den er færdig.".to_owned()
+                }
+                _ => "Den lokale overførselshistorik kunne ikke låses.".to_owned(),
+            })?;
+            state
+                .forget_steps(&source_key)
+                .map(|keys| keys.len())
+                .map_err(|_| "De lokale registreringer kunne ikke glemmes.".to_owned())
+        })
+        .await
+        .map_err(|_| "De lokale registreringer kunne ikke glemmes.".to_owned())?
+    }
     async fn apply(
         &self,
         approved: Preview,
@@ -708,6 +733,10 @@ enum Message {
     Captured(Result<PathBuf>),
     Preview,
     PreviewLoaded(Result<Box<Preview>>),
+    AllowRetransfer(String),
+    CancelRetransfer,
+    ConfirmRetransfer,
+    Forgotten(Result<usize>),
     Apply,
     StopApply,
     ApplyTick,
@@ -727,6 +756,7 @@ enum Activity {
     Login,
     Capture,
     Preview,
+    Recover,
     Apply,
 }
 
@@ -751,6 +781,9 @@ struct NativeApp {
     apply_summary: String,
     apply_stopping: bool,
     needs_recheck: bool,
+    /// The shift whose local records the user has been asked to confirm
+    /// forgetting. Set only from that shift's own conflict.
+    forget_source: Option<String>,
     close_after_apply: Option<iced::window::Id>,
 }
 impl NativeApp {
@@ -776,6 +809,7 @@ impl NativeApp {
             apply_summary: String::new(),
             apply_stopping: false,
             needs_recheck: false,
+            forget_source: None,
             close_after_apply: None,
         };
         let task = app.update(Message::Reload);
@@ -801,6 +835,7 @@ impl NativeApp {
                 | Message::LoginChecked(_)
                 | Message::Captured(_)
                 | Message::PreviewLoaded(_)
+                | Message::Forgotten(_)
                 | Message::Applied(_)
         );
         // Progress ticks only run during a transfer. They never start work.
@@ -851,6 +886,7 @@ impl NativeApp {
                 self.apply_summary.clear();
                 self.apply_stopping = false;
                 self.needs_recheck = false;
+                self.forget_source = None;
                 self.close_after_apply = None;
                 self.activity = Activity::Setup;
                 let engine = self.engine.clone();
@@ -1043,6 +1079,57 @@ impl NativeApp {
                     Err(e) => self.error = Some(e),
                 }
             }
+            Message::AllowRetransfer(source_key) => {
+                // Only the conflict this shift produced may offer recovery.
+                let offered = self.preview.as_ref().is_some_and(|preview| {
+                    preview
+                        .week
+                        .attention
+                        .iter()
+                        .any(|item| item.can_allow_retransfer && item.source_key == source_key)
+                });
+                if offered {
+                    self.error = None;
+                    self.notice.clear();
+                    self.forget_source = Some(source_key);
+                }
+            }
+            Message::CancelRetransfer => self.forget_source = None,
+            Message::ConfirmRetransfer => {
+                let (Some(account), Some(source_key)) =
+                    (self.account.clone(), self.forget_source.clone())
+                else {
+                    return Task::none();
+                };
+                self.error = None;
+                self.notice.clear();
+                self.activity = Activity::Recover;
+                let engine = self.engine.clone();
+                return Task::perform(
+                    async move { engine.allow_retransfer(account, source_key).await },
+                    Message::Forgotten,
+                );
+            }
+            Message::Forgotten(result) => {
+                if self.activity != Activity::Recover {
+                    return Task::none();
+                }
+                self.activity = Activity::Idle;
+                self.forget_source = None;
+                match result {
+                    Ok(count) => {
+                        // The approval is gone with the records it was built on.
+                        self.preview = None;
+                        self.needs_recheck = true;
+                        self.notice = if count == 0 {
+                            "Der var ingen lokale registreringer for vagten. Hent ugen igen, og gennemgå den.".into()
+                        } else {
+                            "Appen har glemt sine egne registreringer for vagten. Intet er slettet i MitHF eller DUOS. Hent ugen igen, og godkend den på ny.".into()
+                        };
+                    }
+                    Err(error) => self.error = Some(error),
+                }
+            }
             Message::Apply => {
                 let Some(preview) = self
                     .preview
@@ -1125,6 +1212,7 @@ impl NativeApp {
         self.error = None;
         self.notice.clear();
         self.needs_recheck = false;
+        self.forget_source = None;
     }
     fn refresh_progress(&mut self) {
         let Some(shared) = self.apply_progress.clone() else {
@@ -1238,14 +1326,36 @@ impl NativeApp {
                     content = content.push(text("Kræver opmærksomhed").size(18));
                 }
                 for item in &week.attention {
-                    content = content.push(
-                        column![
-                            text(format!("{} · {}", item.when, item.who)),
-                            text(&item.explanation),
-                            text(format!("Gør sådan: {}", item.action))
-                        ]
-                        .spacing(4),
-                    );
+                    let mut entry = column![
+                        text(format!("{} · {}", item.when, item.who)),
+                        text(&item.explanation),
+                        text(format!("Gør sådan: {}", item.action))
+                    ]
+                    .spacing(4);
+                    if item.can_allow_retransfer {
+                        entry = if self.forget_source.as_deref() == Some(item.source_key.as_str()) {
+                            entry
+                                .push(text(
+                                    "Appen glemmer kun sine egne registreringer for denne vagt. Intet slettes i MitHF eller DUOS. Bagefter skal du hente ugen igen og godkende den på ny.",
+                                ))
+                                .push(
+                                    row![
+                                        self.action(
+                                            "Ja, tillad overførsel igen",
+                                            Message::ConfirmRetransfer
+                                        ),
+                                        self.action("Fortryd", Message::CancelRetransfer)
+                                    ]
+                                    .spacing(8),
+                                )
+                        } else {
+                            entry.push(self.action(
+                                "Tillad overførsel igen",
+                                Message::AllowRetransfer(item.source_key.clone()),
+                            ))
+                        };
+                    }
+                    content = content.push(entry);
                 }
                 if week.days.iter().any(|d| !d.blocks.is_empty()) {
                     content = content
@@ -1311,6 +1421,7 @@ impl NativeApp {
                 Activity::Login => "Kontakter browseren …",
                 Activity::Capture => "Læser tjenesternes svar …",
                 Activity::Preview => "Henter ugens ændringer …",
+                Activity::Recover => "Glemmer lokale registreringer …",
                 Activity::Apply => "",
             };
             if !busy.is_empty() {
@@ -1419,6 +1530,7 @@ mod tests {
             apply_summary: String::new(),
             apply_stopping: false,
             needs_recheck: false,
+            forget_source: None,
             close_after_apply: None,
         }
     }
@@ -1533,6 +1645,67 @@ mod tests {
         assert!(app.needs_recheck);
         assert!(app.notice.contains("stoppet sikkert"));
         assert!(app.last_verified.is_none());
+    }
+    fn conflicted(app: &NativeApp, source_key: &str) -> Preview {
+        let mut blocked = preview(app, false);
+        blocked.week.attention = vec![teamup_shift_sync_gui::protocol::Attention {
+            when: "man 14. sep 07:30".into(),
+            who: "Ida".into(),
+            explanation: "…".into(),
+            action: "…".into(),
+            source_key: source_key.into(),
+            can_allow_retransfer: true,
+        }];
+        blocked
+    }
+    #[test]
+    fn allowing_a_transfer_again_needs_its_own_conflict_and_a_confirmation() {
+        let mut app = app();
+        app.preview = Some(conflicted(&app, "shift-a"));
+
+        // A shift without an offered conflict can never reach the confirmation.
+        let _ = app.update(Message::AllowRetransfer("shift-b".into()));
+        assert!(app.forget_source.is_none());
+        let _ = app.update(Message::ConfirmRetransfer);
+        assert_eq!(app.activity, Activity::Idle);
+
+        let _ = app.update(Message::AllowRetransfer("shift-a".into()));
+        assert_eq!(app.forget_source.as_deref(), Some("shift-a"));
+        let _ = app.view();
+        let _ = app.update(Message::CancelRetransfer);
+        assert!(app.forget_source.is_none());
+    }
+    #[test]
+    fn forgetting_local_records_revokes_the_preview_and_requires_a_fresh_one() {
+        let mut app = app();
+        app.preview = Some(conflicted(&app, "shift-a"));
+        app.forget_source = Some("shift-a".into());
+        app.activity = Activity::Recover;
+
+        let _ = app.update(Message::Forgotten(Ok(2)));
+
+        assert_eq!(app.activity, Activity::Idle);
+        assert!(app.preview.is_none());
+        assert!(app.forget_source.is_none());
+        assert!(app.needs_recheck);
+        assert!(app.notice.contains("Intet er slettet i MitHF eller DUOS"));
+        let _ = app.view();
+    }
+    #[test]
+    fn a_blocked_forget_reports_and_keeps_the_conflict_visible() {
+        let mut app = app();
+        app.preview = Some(conflicted(&app, "shift-a"));
+        app.forget_source = Some("shift-a".into());
+        app.activity = Activity::Recover;
+
+        let _ = app.update(Message::Forgotten(Err(
+            "En overførsel bruger denne konto.".into()
+        )));
+
+        assert_eq!(app.activity, Activity::Idle);
+        assert!(app.preview.is_some());
+        assert!(app.forget_source.is_none());
+        assert!(app.error.is_some());
     }
     #[test]
     fn blocked_and_wrong_week_previews_cannot_start_apply() {

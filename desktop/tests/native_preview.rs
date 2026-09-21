@@ -32,11 +32,15 @@ fn native_week_matches_recorded_presentation_scenarios() {
             case.destination_read,
         )
         .unwrap();
-        assert_eq!(
-            serde_json::to_value(&week).unwrap(),
-            case.expected,
-            "case {index}"
-        );
+        // The recorded oracle predates targeted recovery, so compare the
+        // presentation it describes. The routing fields have their own test.
+        let mut presented = serde_json::to_value(&week).unwrap();
+        for item in presented["attention"].as_array_mut().into_iter().flatten() {
+            let item = item.as_object_mut().unwrap();
+            item.remove("source_key");
+            item.remove("can_allow_retransfer");
+        }
+        assert_eq!(presented, case.expected, "case {index}");
         let mut broken = case.plan.clone();
         if let Some(item) = broken
             .items
@@ -57,4 +61,45 @@ fn native_week_matches_recorded_presentation_scenarios() {
             .is_err());
         }
     }
+}
+
+/// Recovery must be offered from the one conflict it can resolve, and must
+/// name the exact shift it came from.
+#[test]
+fn only_a_missing_destination_entry_offers_allowing_a_transfer_again() {
+    let cases: Vec<Case> = serde_json::from_str(include_str!("goldens/preview.json")).unwrap();
+    let mut case = cases
+        .into_iter()
+        .find(|case| {
+            case.plan
+                .items
+                .iter()
+                .any(|item| item.reason == "ambiguous_uni_date")
+        })
+        .expect("a blocked scenario");
+    let week = |case: &Case| {
+        build_week(
+            &case.config,
+            &case.names,
+            &case.colors,
+            &case.shifts,
+            &case.plan,
+            &case.destination,
+            case.destination_read,
+        )
+        .unwrap()
+    };
+    let blocked = week(&case);
+    assert_eq!(blocked.attention.len(), 1);
+    assert!(!blocked.attention[0].can_allow_retransfer);
+
+    for item in &mut case.plan.items {
+        if item.reason == "ambiguous_uni_date" {
+            item.reason = "destination_missing".into();
+        }
+    }
+    let missing = week(&case);
+    assert_eq!(missing.attention.len(), 1);
+    assert!(missing.attention[0].can_allow_retransfer);
+    assert_eq!(missing.attention[0].source_key, case.shifts[0].key());
 }
