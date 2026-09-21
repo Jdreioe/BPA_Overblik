@@ -12,23 +12,74 @@ It uses the per-user application data directory, or `TEAMUP_SHIFT_SYNC_DATA_DIR`
 when set, for `setup.json`, browser profiles and sync history. TeamUp
 credentials are read from and written to the OS vault.
 
-Setup runs in this window too. Until a setup is confirmed, the app shows the
-connection, arrangement and helper steps instead of the week view. Confirming
-moves straight to the week view. Importing a legacy TOML configuration is the
-one setup feature not carried over from the old engine.
+The home screen shows only the week, its changes and the two primary actions.
+Everything technical lives on **Indstillinger** and **Hjælp**. Setup runs on
+Indstillinger: until a setup is confirmed that is the screen the app opens, and
+confirming revalidates both services and returns to the week. Importing a legacy
+TOML configuration is the one setup feature not carried over from the old engine.
 
-1. Choose **Log ind i MitHF** and **Log ind i DUOS**. Complete authentication
-   in each browser. These two buttons are the only thing that opens a browser
-   window; reads reuse the saved profile headless, and MitHF's shift calendar
-   is entered through the site's own "Åbn din vagtplan" action. Login is
-   available during setup as well, because reading the catalog needs both
+1. On **Indstillinger**, choose **Log ind i MitHF** and **Log ind i DUOS**.
+   Complete authentication in each browser. These two buttons are the only thing
+   that opens a browser window; reads reuse the saved profile headless, and
+   MitHF's shift calendar is entered through the site's own "Åbn din vagtplan"
+   action. Login lives beside setup because reading the catalog needs both
    services.
-2. Choose **Kontrollér login**, then select a week and **Se ændringer**.
+2. Choose **Kontrollér login**, then return to the week and **Se ændringer**.
 3. Review the split shifts, times, helper assignments, SPS and DUOS values.
    Resolve any points under **Kræver opmærksomhed** before proceeding.
 4. **Overfør ændringer** approves exactly the displayed plan and submits it.
    The app reloads saved setup and TeamUp, checks the account database scope,
    and invokes the core's locked destination revalidation and verified transfer.
+
+Opening Indstillinger revokes a shown approval, because editing settings can
+change the account behind it.
+
+## Switching accounts
+
+Synchronization history is stored per account in `sync-<scope>.sqlite3`, where
+the scope covers the calendar, the MitHF customer and grant, the DUOS
+arrangement and registration type, and the confirmed helper mappings. Every
+preview and every transfer rereads both destinations and refuses to continue
+unless the fresh catalog still matches the confirmed one, so one account can
+never plan against another's history. A transfer additionally refuses an
+approval whose account database is no longer the current one.
+
+**Log ud af MitHF og DUOS** on Indstillinger closes the app's browsers and
+removes only its own profiles, so a different account starts from a clean
+session. It keeps the synchronization history and changes nothing in either
+service.
+
+## Recovery and diagnostics
+
+When a previously transferred MitHF shift or DUOS registration has been deleted
+by hand, that shift's item under **Kræver opmærksomhed** offers **Tillad
+overførsel igen**. Confirming forgets this app's own records for that one shift,
+through the same `forget_steps` path and apply lock as the CLI, and revokes the
+preview. Nothing is deleted in a destination, no other shift is affected, and
+the next preview still runs the full overlap and conflict checks before anything
+can be approved.
+
+**Hjælp** holds short Danish guidance and two exports. Neither is called a
+diagnostic on screen: the person asked to produce one is not a developer.
+
+**Del hvad der gik galt** writes `fejlrapport.json` and opens a prefilled issue
+on this repository in the person's own browser. The report holds app and system
+versions, how far setup reached, per-account step counts by status, the last
+verification time, and whether the browser and its profiles are present. It is
+counts and yes/no answers only, with no credential, cookie, calendar link,
+service identifier, name, shift text or raw service response, and it needs no
+service or confirmed account, so it also works while setup is stuck.
+
+Nothing is published by the app: there is no token and no API call, only a
+`…/issues/new?title=&body=` address that the browser opens. The person reads the
+filled form and presses Submit themselves, and the screen says beforehand that
+the issue is public and needs a GitHub account. A report too long for an address
+is left out of it, and the form then asks for the saved file instead. If no
+browser can be opened, the file is still written and the app says to send it.
+
+**Gem en fejlrapport om MitHF og DUOS** writes `fejlrapport-tjenester.json`,
+which records the field types the two services return, without any values. It is
+the same capture the CLI writes.
 
 The native workflow uses the same separate browser profiles as the Rust CLI.
 Only one native browser owner can run at a time. Browsers belong to that
@@ -71,7 +122,11 @@ presentation scenarios. They cover split shifts, colours, overnight
 continuations, old/new values, helper/category-only writes, blocked instructions,
 future DUOS hours, and empty, unchanged and unread weeks. Invalid display times
 fail the preview. UI state tests check approval consumption, blocked and stale
-previews, setup reload and changes attempted during apply.
+previews, setup reload and changes attempted during apply. Further tests cover
+screen navigation, that only a missing destination entry offers allowing a
+transfer again and only from its own conflict, that forgetting local records
+revokes the preview, and that the diagnostics report contains no account
+content.
 
 On Linux, an Xvfb check rendered the missing-setup screen with a temporary empty
 data directory. This verifies startup and its setup error screen, not

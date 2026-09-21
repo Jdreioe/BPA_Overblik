@@ -41,6 +41,14 @@ pub struct Attention {
     pub who: String,
     pub explanation: String,
     pub action: String,
+    /// The TeamUp shift this item belongs to. Opaque, and never displayed; it
+    /// only lets recovery act on exactly the shift the conflict came from.
+    #[serde(default)]
+    pub source_key: String,
+    /// True only when a previously transferred destination entry is gone,
+    /// which is the single conflict forgetting local records can resolve.
+    #[serde(default)]
+    pub can_allow_retransfer: bool,
 }
 
 /// The readable week: grid, attention items and the exact approval summary.
@@ -82,7 +90,9 @@ mod tests {
                 "details": ["Vagten oprettes i MitHF."]
             }]}],
             "attention": [{"when": "man 14. sep 07:30", "who": "Zain Alnemr",
-                           "explanation": "…", "action": "…"}],
+                           "explanation": "…", "action": "…",
+                           "source_key": "cal:event:2026-09-14T07:30:00+02:00",
+                           "can_allow_retransfer": true}],
             "headline": "Ugen er klar til overførsel.", "notice": "",
             "summary": ["1 ny vagt i MitHF"], "apply_summary": "Overfører …",
             "can_apply": true, "blocked_reason": "", "destination_read": true,
@@ -92,5 +102,6 @@ mod tests {
         assert_eq!(week.days[0].blocks[0].part_label, "Del 1 af 2");
         assert_eq!(week.days[0].blocks[0].helper_color, "#4770d8");
         assert_eq!(week.attention.len(), 1);
+        assert!(week.attention[0].can_allow_retransfer);
     }
 }

@@ -127,6 +127,18 @@ impl SyncState {
             .collect()
     }
 
+    /// How many step records exist per status. Counts only: the statuses are
+    /// this app's own vocabulary and carry no service or shift content.
+    pub fn step_status_counts(&self) -> Result<BTreeMap<String, usize>, StateError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT status, count(*) FROM sync_steps GROUP BY status")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
+        })?;
+        rows.collect::<Result<_, _>>().map_err(StateError::from)
+    }
+
     /// Clear local progress only. Future reconciliation must still check duplicates.
     pub fn forget_steps(&mut self, source_key: &str) -> Result<Vec<String>, StateError> {
         let transaction = self

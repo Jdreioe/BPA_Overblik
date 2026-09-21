@@ -386,12 +386,16 @@ pub fn build_week(
                 date_label(start.date_naive()),
                 start.format("%H:%M")
             );
-            if seen.insert((when.clone(), helper.to_string(), explanation, action)) {
+            if seen.insert((key.clone(), when.clone(), explanation, action)) {
                 attention.push(Attention {
                     when,
                     who: helper.into(),
                     explanation: explanation.into(),
                     action: action.into(),
+                    source_key: key.clone(),
+                    // Only a destination entry deleted by hand can be recovered
+                    // by forgetting this app's own records for the shift.
+                    can_allow_retransfer: item.reason == "destination_missing",
                 });
             }
         }

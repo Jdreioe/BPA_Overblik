@@ -2,7 +2,7 @@
 //! Setup editing remains in the existing application during migration.
 use crate::setup;
 use chrono::{DateTime, Datelike, Duration, FixedOffset, NaiveDate, TimeZone, Timelike, Utc};
-use iced::widget::{button, column, container, progress_bar, row, scrollable, text};
+use iced::widget::{button, column, container, progress_bar, row, scrollable, text, Column};
 use iced::{Element, Length, Subscription, Task};
 use serde_json::Value;
 use std::{
@@ -16,8 +16,8 @@ use std::{
 use teamup_shift_sync_core::{
     apply_plan_controlled, build_plan,
     live::{
-        load_saved_setup, read_destinations, read_shapes, read_teamup, BrowserSessions, LiveConfig,
-        LiveDestinations, Service, Setup, Visibility,
+        forget_logins, load_saved_setup, read_destinations, read_shapes, read_teamup,
+        redacted_report, BrowserSessions, LiveConfig, LiveDestinations, Service, Setup, Visibility,
     },
     plan_digest, reconciliation_range, ApplyOutcome, ApplyRequest, Outcome, PlanItem, PlanRequest,
     PlanSystem, SyncState, TransferEvent, TransferOperation,
@@ -243,6 +243,80 @@ fn completion_summary(done: &ApplyDone) -> String {
     }
 }
 
+/// Where a report can be shared. The repository is public, which the Hjælp
+/// screen says before anything is opened.
+const ISSUE_FORM: &str = "https://github.com/Jdreioe/teamup_sync/issues/new";
+
+/// The saved report, and whether a browser accepted the prefilled issue.
+#[derive(Clone, Debug)]
+struct Shared {
+    path: PathBuf,
+    opened: bool,
+}
+
+/// Percent-encode one query value. Only the unreserved set survives, which is
+/// always safe inside a query string.
+fn query_encoded(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                encoded.push(*byte as char)
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+
+/// A prefilled issue the person can read and send themselves. A long report is
+/// left out of the address, which browsers and GitHub both limit; the saved
+/// file can be attached in the form instead.
+fn issue_url(report: &Value, path: &std::path::Path) -> String {
+    const BUDGET: usize = 6000;
+    const INTRO: &str = "Skriv kort, hvad du gjorde, og hvad der skete:\n\n\n";
+    let details = serde_json::to_string_pretty(report).unwrap_or_default();
+    let mut body = format!("{INTRO}Oplysninger fra appen:\n\n```json\n{details}\n```\n");
+    let title = query_encoded("Der gik noget galt i Vagtplanlægning");
+    if ISSUE_FORM.len() + title.len() + query_encoded(&body).len() > BUDGET {
+        body = format!(
+            "{INTRO}Vedhæft filen {} fra din computer.\n",
+            path.display()
+        );
+    }
+    format!("{ISSUE_FORM}?title={title}&body={}", query_encoded(&body))
+}
+
+/// Open an address in the person's own browser. The app's own browser profiles
+/// belong to MitHF and DUOS and are never used for anything else.
+fn open_in_browser(url: &str) -> bool {
+    #[cfg(target_os = "linux")]
+    let mut command = {
+        let mut command = std::process::Command::new("xdg-open");
+        command.arg(url);
+        command
+    };
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = std::process::Command::new("open");
+        command.arg(url);
+        command
+    };
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = std::process::Command::new("cmd");
+        // The empty argument is the window title `start` expects first.
+        command.args(["/C", "start", "", url]);
+        command
+    };
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .is_ok()
+}
+
 #[derive(Clone)]
 struct Engine {
     data_dir: PathBuf,
@@ -359,6 +433,19 @@ impl Engine {
             .await
             .map_err(|e| e.to_string())
     }
+    /// Forget the saved MitHF and DUOS logins, so a different account cannot
+    /// inherit another one's session. Sync history is keyed by account and
+    /// stays; nothing is changed in either service.
+    async fn forget_logins(&self) -> Result<()> {
+        let mut guard = self.browsers.lock().await;
+        // Dropping the sessions closes the app's browsers and frees the profiles.
+        drop(guard.take());
+        let dir = self.data_dir.clone();
+        tokio::task::spawn_blocking(move || forget_logins(&dir))
+            .await
+            .map_err(|_| "De gemte logins kunne ikke fjernes.".to_owned())?
+            .map_err(|error| error.to_string())
+    }
     /// Reading only needs the saved profile, so no browser window is opened.
     /// A window left over from login keeps serving these requests.
     async fn sessions(&self) -> Result<MutexGuard<'_, Option<BrowserSessions>>> {
@@ -399,19 +486,39 @@ impl Engine {
         let recorded = read_shapes(browser, &account, from, to, today)
             .await
             .map_err(|e| e.to_string())?;
-        let path = self.data_dir.join("service-shapes.json");
+        let path = self.data_dir.join("fejlrapport-tjenester.json");
         let target = path.clone();
         tokio::task::spawn_blocking(move || {
             serde_json::to_string_pretty(&recorded)
-                .map_err(|_| "Diagnostikken kunne ikke skrives.".to_owned())
+                .map_err(|_| "Fejlrapporten kunne ikke skrives.".to_owned())
                 .and_then(|document| {
                     std::fs::write(&target, document + "\n")
-                        .map_err(|_| "Diagnostikken kunne ikke gemmes.".to_owned())
+                        .map_err(|_| "Fejlrapporten kunne ikke gemmes.".to_owned())
                 })
         })
         .await
-        .map_err(|_| "Diagnostikken kunne ikke gemmes.".to_owned())??;
+        .map_err(|_| "Fejlrapporten kunne ikke gemmes.".to_owned())??;
         Ok(path)
+    }
+    /// Save the redacted report and open a prefilled issue in the person's own
+    /// browser. Nothing is published here: they read the text and decide to
+    /// send it. It needs no service and no confirmed account, so it also works
+    /// when setup is stuck.
+    async fn share_problem(&self) -> Result<Shared> {
+        let dir = self.data_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            let now = Utc::now().fixed_offset();
+            let report = redacted_report(&dir, now).map_err(|e| e.to_string())?;
+            let path = dir.join("fejlrapport.json");
+            let document = serde_json::to_string_pretty(&report)
+                .map_err(|_| "Fejlrapporten kunne ikke skrives.".to_owned())?;
+            std::fs::write(&path, document + "\n")
+                .map_err(|_| "Fejlrapporten kunne ikke gemmes.".to_owned())?;
+            let opened = open_in_browser(&issue_url(&report, &path));
+            Ok(Shared { path, opened })
+        })
+        .await
+        .map_err(|_| "Fejlrapporten kunne ikke gemmes.".to_owned())?
     }
     async fn preview(&self, account: Arc<LiveConfig>, from: NaiveDate) -> Result<Preview> {
         let guard = self.sessions().await?;
@@ -475,6 +582,31 @@ impl Engine {
         })
         .await
         .ok()?
+    }
+    /// Forget this app's own local sync records for one shift, so a fresh
+    /// preview may propose the transfer again. Nothing is deleted in MitHF or
+    /// DUOS, and the apply lock keeps this out of a running transfer.
+    async fn allow_retransfer(
+        &self,
+        account: Arc<LiveConfig>,
+        source_key: String,
+    ) -> Result<usize> {
+        tokio::task::spawn_blocking(move || {
+            let mut state = SyncState::open(&account.state_path)
+                .map_err(|_| "Den lokale overførselshistorik kunne ikke åbnes.".to_owned())?;
+            let _guard = state.exclusive_apply().map_err(|error| match error {
+                teamup_shift_sync_core::StateError::ApplyInProgress => {
+                    "En overførsel bruger denne konto. Vent, til den er færdig.".to_owned()
+                }
+                _ => "Den lokale overførselshistorik kunne ikke låses.".to_owned(),
+            })?;
+            state
+                .forget_steps(&source_key)
+                .map(|keys| keys.len())
+                .map_err(|_| "De lokale registreringer kunne ikke glemmes.".to_owned())
+        })
+        .await
+        .map_err(|_| "De lokale registreringer kunne ikke glemmes.".to_owned())?
     }
     async fn apply(
         &self,
@@ -698,16 +830,25 @@ enum Message {
     VerifiedLoaded(PathBuf, Option<String>),
     Setup(setup::Message),
     SetupUpdated(Result<setup::SetupState>),
+    Open(Screen),
     Navigate(i64),
     Current,
     Login(Service),
     LoginOpened(Result<()>),
     CheckLogin,
     LoginChecked(Result<()>),
+    ForgetLogins,
+    LoginsForgotten(Result<()>),
     Capture,
     Captured(Result<PathBuf>),
+    ShareProblem,
+    ProblemShared(Result<Shared>),
     Preview,
     PreviewLoaded(Result<Box<Preview>>),
+    AllowRetransfer(String),
+    CancelRetransfer,
+    ConfirmRetransfer,
+    Forgotten(Result<usize>),
     Apply,
     StopApply,
     ApplyTick,
@@ -720,6 +861,24 @@ impl std::fmt::Debug for Message {
         f.write_str("NativeMessage")
     }
 }
+/// Short Danish guidance for the Hjælp screen.
+const HELP: [&str; 6] = [
+    "1. Log ind i MitHF og DUOS under Indstillinger. Login holder, indtil tjenesten selv logger dig ud.",
+    "2. Vælg ugen på forsiden, og vælg Se ændringer. Appen læser TeamUp, MitHF og DUOS og viser, hvad der mangler.",
+    "3. Løs først punkterne under Kræver opmærksomhed. Rettelser laves i TeamUp eller i tjenesten, ikke i appen.",
+    "4. Vælg Overfør ændringer. Hver ændring læses tilbage og bekræftes, før den næste begynder.",
+    "Appen sletter aldrig noget i MitHF eller DUOS, og den godkender ikke registreringer for hjælperen.",
+    "Går noget galt, så vælg Del hvad der gik galt herunder. Appen skriver, hvad den ved om sig selv, og du bestemmer selv, om det skal sendes.",
+];
+
+/// The screen in view. Everything technical lives away from the week.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Screen {
+    Home,
+    Settings,
+    Help,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Activity {
     Idle,
@@ -727,11 +886,13 @@ enum Activity {
     Login,
     Capture,
     Preview,
+    Recover,
     Apply,
 }
 
 struct NativeApp {
     engine: Engine,
+    screen: Screen,
     account: Option<Arc<LiveConfig>>,
     setup: setup::SetupUi,
     monday: NaiveDate,
@@ -751,12 +912,16 @@ struct NativeApp {
     apply_summary: String,
     apply_stopping: bool,
     needs_recheck: bool,
+    /// The shift whose local records the user has been asked to confirm
+    /// forgetting. Set only from that shift's own conflict.
+    forget_source: Option<String>,
     close_after_apply: Option<iced::window::Id>,
 }
 impl NativeApp {
     fn new() -> (Self, Task<Message>) {
         let mut app = Self {
             engine: Engine::new(app_data_dir()),
+            screen: Screen::Home,
             account: None,
             setup: setup::SetupUi::default(),
             monday: Utc::now().date_naive(),
@@ -776,6 +941,7 @@ impl NativeApp {
             apply_summary: String::new(),
             apply_stopping: false,
             needs_recheck: false,
+            forget_source: None,
             close_after_apply: None,
         };
         let task = app.update(Message::Reload);
@@ -799,8 +965,11 @@ impl NativeApp {
                 | Message::SetupUpdated(_)
                 | Message::LoginOpened(_)
                 | Message::LoginChecked(_)
+                | Message::LoginsForgotten(_)
                 | Message::Captured(_)
+                | Message::ProblemShared(_)
                 | Message::PreviewLoaded(_)
+                | Message::Forgotten(_)
                 | Message::Applied(_)
         );
         // Progress ticks only run during a transfer. They never start work.
@@ -851,6 +1020,7 @@ impl NativeApp {
                 self.apply_summary.clear();
                 self.apply_stopping = false;
                 self.needs_recheck = false;
+                self.forget_source = None;
                 self.close_after_apply = None;
                 self.activity = Activity::Setup;
                 let engine = self.engine.clone();
@@ -931,11 +1101,22 @@ impl NativeApp {
                         self.setup.state = Some(state);
                         self.setup.error = None;
                         if confirmed {
+                            // confirm() revalidated both services before this.
+                            self.screen = Screen::Home;
                             return self.update(Message::Reload);
                         }
                     }
                     Err(error) => self.setup.error = Some(error),
                 }
+            }
+            Message::Open(screen) => {
+                // Settings may change the account, so no approval survives the
+                // trip. Any message that sent the user here is kept.
+                if screen == Screen::Settings {
+                    self.preview = None;
+                    self.forget_source = None;
+                }
+                self.screen = screen;
             }
             Message::Navigate(days) => {
                 if let Some(date) = self
@@ -990,6 +1171,28 @@ impl NativeApp {
                     }
                 }
             }
+            Message::ForgetLogins => {
+                self.invalidate();
+                self.activity = Activity::Login;
+                let engine = self.engine.clone();
+                return Task::perform(
+                    async move { engine.forget_logins().await },
+                    Message::LoginsForgotten,
+                );
+            }
+            Message::LoginsForgotten(result) => {
+                if self.activity != Activity::Login {
+                    return Task::none();
+                }
+                self.activity = Activity::Idle;
+                match result {
+                    Ok(()) => {
+                        self.notice =
+                            "Appen har glemt de gemte logins. Log ind igen for at fortsætte.".into()
+                    }
+                    Err(e) => self.error = Some(e),
+                }
+            }
             Message::Capture => {
                 let Some(account) = self.account.clone() else {
                     return Task::none();
@@ -1012,8 +1215,39 @@ impl NativeApp {
                 match result {
                     Ok(path) => {
                         self.notice = format!(
-                            "Tjenestediagnostik gemt i {}. Den beskriver kun felttyper og indeholder ingen navne, vagter eller kontooplysninger.",
+                            "Fejlrapporten om MitHF og DUOS er gemt i {}. Den beskriver kun, hvilke felter tjenesterne sender, og indeholder ingen navne, vagter eller kontooplysninger.",
                             path.display()
+                        )
+                    }
+                    Err(e) => self.error = Some(e),
+                }
+            }
+            Message::ShareProblem => {
+                self.error = None;
+                self.notice.clear();
+                self.activity = Activity::Capture;
+                let engine = self.engine.clone();
+                return Task::perform(
+                    async move { engine.share_problem().await },
+                    Message::ProblemShared,
+                );
+            }
+            Message::ProblemShared(result) => {
+                if self.activity != Activity::Capture {
+                    return Task::none();
+                }
+                self.activity = Activity::Idle;
+                match result {
+                    Ok(shared) if shared.opened => {
+                        self.notice = format!(
+                            "Din browser er åbnet med et opslag, du selv kan læse igennem og sende. Oplysningerne er også gemt i {}, hvis du hellere vil sende filen.",
+                            shared.path.display()
+                        )
+                    }
+                    Ok(shared) => {
+                        self.notice = format!(
+                            "Browseren kunne ikke åbnes. Oplysningerne er gemt i {}. Send filen til den, der vedligeholder appen.",
+                            shared.path.display()
                         )
                     }
                     Err(e) => self.error = Some(e),
@@ -1041,6 +1275,57 @@ impl NativeApp {
                     Ok(preview) if preview.from == self.monday => self.preview = Some(*preview),
                     Ok(_) => {}
                     Err(e) => self.error = Some(e),
+                }
+            }
+            Message::AllowRetransfer(source_key) => {
+                // Only the conflict this shift produced may offer recovery.
+                let offered = self.preview.as_ref().is_some_and(|preview| {
+                    preview
+                        .week
+                        .attention
+                        .iter()
+                        .any(|item| item.can_allow_retransfer && item.source_key == source_key)
+                });
+                if offered {
+                    self.error = None;
+                    self.notice.clear();
+                    self.forget_source = Some(source_key);
+                }
+            }
+            Message::CancelRetransfer => self.forget_source = None,
+            Message::ConfirmRetransfer => {
+                let (Some(account), Some(source_key)) =
+                    (self.account.clone(), self.forget_source.clone())
+                else {
+                    return Task::none();
+                };
+                self.error = None;
+                self.notice.clear();
+                self.activity = Activity::Recover;
+                let engine = self.engine.clone();
+                return Task::perform(
+                    async move { engine.allow_retransfer(account, source_key).await },
+                    Message::Forgotten,
+                );
+            }
+            Message::Forgotten(result) => {
+                if self.activity != Activity::Recover {
+                    return Task::none();
+                }
+                self.activity = Activity::Idle;
+                self.forget_source = None;
+                match result {
+                    Ok(count) => {
+                        // The approval is gone with the records it was built on.
+                        self.preview = None;
+                        self.needs_recheck = true;
+                        self.notice = if count == 0 {
+                            "Der var ingen lokale registreringer for vagten. Hent ugen igen, og gennemgå den.".into()
+                        } else {
+                            "Appen har glemt sine egne registreringer for vagten. Intet er slettet i MitHF eller DUOS. Hent ugen igen, og godkend den på ny.".into()
+                        };
+                    }
+                    Err(error) => self.error = Some(error),
                 }
             }
             Message::Apply => {
@@ -1125,6 +1410,7 @@ impl NativeApp {
         self.error = None;
         self.notice.clear();
         self.needs_recheck = false;
+        self.forget_source = None;
     }
     fn refresh_progress(&mut self) {
         let Some(shared) = self.apply_progress.clone() else {
@@ -1177,100 +1463,11 @@ impl NativeApp {
         if !self.notice.is_empty() {
             content = content.push(text(&self.notice));
         }
-        if self.account.is_none() {
-            // Both services have to be reachable before the catalog can be
-            // read, so login stays available throughout setup.
-            content = content
-                .push(
-                    row![
-                        self.action("Log ind i MitHF", Message::Login(Service::Mithf)),
-                        self.action("Log ind i DUOS", Message::Login(Service::Duos)),
-                        self.action("Kontrollér login", Message::CheckLogin)
-                    ]
-                    .spacing(8),
-                )
-                .push(self.setup.view().map(Message::Setup))
-                .push(self.action("Genindlæs opsætning", Message::Reload));
-        } else {
-            content = content
-                .push(
-                    text(super::widgets::format_week_da(
-                        self.monday,
-                        self.monday + Duration::days(6),
-                    ))
-                    .size(20),
-                )
-                .push(
-                    row![
-                        self.action("‹ Forrige", Message::Navigate(-7)),
-                        self.action("Denne uge", Message::Current),
-                        self.action("Næste ›", Message::Navigate(7))
-                    ]
-                    .spacing(8),
-                )
-                .push(
-                    row![
-                        self.action("Log ind i MitHF", Message::Login(Service::Mithf)),
-                        self.action("Log ind i DUOS", Message::Login(Service::Duos)),
-                        self.action("Kontrollér login", Message::CheckLogin)
-                    ]
-                    .spacing(8),
-                )
-                .push(
-                    row![
-                        self.action("Genindlæs opsætning", Message::Reload),
-                        self.action("Gem tjenestediagnostik", Message::Capture)
-                    ]
-                    .spacing(8),
-                );
-            if self.activity != Activity::Apply {
-                if let Some(stamp) = &self.last_verified {
-                    content = content.push(text(format!("Sidst verificeret {stamp}.")));
-                }
-            }
-            if let Some(preview) = &self.preview {
-                let week = &preview.week;
-                content = content.push(text(&week.headline).size(18));
-                if !week.notice.is_empty() {
-                    content = content.push(text(&week.notice));
-                }
-                if !week.attention.is_empty() {
-                    content = content.push(text("Kræver opmærksomhed").size(18));
-                }
-                for item in &week.attention {
-                    content = content.push(
-                        column![
-                            text(format!("{} · {}", item.when, item.who)),
-                            text(&item.explanation),
-                            text(format!("Gør sådan: {}", item.action))
-                        ]
-                        .spacing(4),
-                    );
-                }
-                if week.days.iter().any(|d| !d.blocks.is_empty()) {
-                    content = content
-                        .push(super::widgets::week_grid(week))
-                        .push(super::widgets::day_details(week));
-                }
-                for line in &week.summary {
-                    content = content.push(text(line));
-                }
-                if week.can_apply {
-                    content = content
-                        .push(text(&week.apply_summary))
-                        .push(self.action("Overfør ændringer", Message::Apply));
-                } else {
-                    content = content
-                        .push(text(&week.blocked_reason))
-                        .push(button("Overfør ændringer").padding(12));
-                }
-            }
-            content = if self.needs_recheck {
-                content.push(self.action("Kontrollér igen", Message::Preview))
-            } else {
-                content.push(self.action("Se ændringer", Message::Preview))
-            };
-        }
+        content = match self.visible_screen() {
+            Screen::Home => self.home(content),
+            Screen::Settings => self.settings(content),
+            Screen::Help => self.help(content),
+        };
         if self.activity == Activity::Apply {
             if !self.apply_summary.is_empty() {
                 content = content.push(text(&self.apply_summary));
@@ -1309,8 +1506,9 @@ impl NativeApp {
                 Activity::Idle => "",
                 Activity::Setup => "Indlæser opsætning …",
                 Activity::Login => "Kontakter browseren …",
-                Activity::Capture => "Læser tjenesternes svar …",
+                Activity::Capture => "Forbereder fejlrapporten …",
                 Activity::Preview => "Henter ugens ændringer …",
+                Activity::Recover => "Glemmer lokale registreringer …",
                 Activity::Apply => "",
             };
             if !busy.is_empty() {
@@ -1321,6 +1519,162 @@ impl NativeApp {
             .center_x(Length::Fill)
             .height(Length::Fill)
             .into()
+    }
+
+    /// There is no week to show before an account is confirmed, but help and
+    /// its diagnostics stay reachable: that is when they are needed most.
+    fn visible_screen(&self) -> Screen {
+        match self.screen {
+            Screen::Home if self.account.is_none() => Screen::Settings,
+            screen => screen,
+        }
+    }
+
+    /// The week, its changes and the two primary actions. Service connections,
+    /// mappings and diagnostics belong on the secondary screens.
+    fn home<'a>(&'a self, mut content: Column<'a, Message>) -> Column<'a, Message> {
+        content = content
+            .push(
+                text(super::widgets::format_week_da(
+                    self.monday,
+                    self.monday + Duration::days(6),
+                ))
+                .size(20),
+            )
+            .push(
+                row![
+                    self.action("‹ Forrige", Message::Navigate(-7)),
+                    self.action("Denne uge", Message::Current),
+                    self.action("Næste ›", Message::Navigate(7))
+                ]
+                .spacing(8),
+            );
+        if self.activity != Activity::Apply {
+            if let Some(stamp) = &self.last_verified {
+                content = content.push(text(format!("Sidst verificeret {stamp}.")));
+            }
+        }
+        if let Some(preview) = &self.preview {
+            let week = &preview.week;
+            content = content.push(text(&week.headline).size(18));
+            if !week.notice.is_empty() {
+                content = content.push(text(&week.notice));
+            }
+            if !week.attention.is_empty() {
+                content = content.push(text("Kræver opmærksomhed").size(18));
+            }
+            for item in &week.attention {
+                let mut entry = column![
+                    text(format!("{} · {}", item.when, item.who)),
+                    text(&item.explanation),
+                    text(format!("Gør sådan: {}", item.action))
+                ]
+                .spacing(4);
+                if item.can_allow_retransfer {
+                    entry = if self.forget_source.as_deref() == Some(item.source_key.as_str()) {
+                        entry
+                            .push(text(
+                                "Appen glemmer kun sine egne registreringer for denne vagt. Intet slettes i MitHF eller DUOS. Bagefter skal du hente ugen igen og godkende den på ny.",
+                            ))
+                            .push(
+                                row![
+                                    self.action(
+                                        "Ja, tillad overførsel igen",
+                                        Message::ConfirmRetransfer
+                                    ),
+                                    self.action("Fortryd", Message::CancelRetransfer)
+                                ]
+                                .spacing(8),
+                            )
+                    } else {
+                        entry.push(self.action(
+                            "Tillad overførsel igen",
+                            Message::AllowRetransfer(item.source_key.clone()),
+                        ))
+                    };
+                }
+                content = content.push(entry);
+            }
+            if week.days.iter().any(|d| !d.blocks.is_empty()) {
+                content = content
+                    .push(super::widgets::week_grid(week))
+                    .push(super::widgets::day_details(week));
+            }
+            for line in &week.summary {
+                content = content.push(text(line));
+            }
+            if week.can_apply {
+                content = content
+                    .push(text(&week.apply_summary))
+                    .push(self.action("Overfør ændringer", Message::Apply));
+            } else {
+                content = content
+                    .push(text(&week.blocked_reason))
+                    .push(button("Overfør ændringer").padding(12));
+            }
+        }
+        content = if self.needs_recheck {
+            content.push(self.action("Kontrollér igen", Message::Preview))
+        } else {
+            content.push(self.action("Se ændringer", Message::Preview))
+        };
+        content.push(
+            row![
+                self.action("Indstillinger", Message::Open(Screen::Settings)),
+                self.action("Hjælp", Message::Open(Screen::Help))
+            ]
+            .spacing(8),
+        )
+    }
+
+    /// Service connections, the calendar and the confirmed choices.
+    fn settings<'a>(&'a self, mut content: Column<'a, Message>) -> Column<'a, Message> {
+        content = content
+            .push(text("Indstillinger").size(22))
+            .push(text("Tjenester"))
+            // Both services have to be reachable before the catalog can be
+            // read, so login stays available throughout setup.
+            .push(
+                row![
+                    self.action("Log ind i MitHF", Message::Login(Service::Mithf)),
+                    self.action("Log ind i DUOS", Message::Login(Service::Duos)),
+                    self.action("Kontrollér login", Message::CheckLogin)
+                ]
+                .spacing(8),
+            )
+            .push(text(
+                "Skifter du til en anden konto, så log ud her først. Appen lukker sine browservinduer og glemmer de gemte logins, så den nye konto ikke arver den gamles adgang. Overførselshistorikken bevares, og der slettes intet i MitHF eller DUOS.",
+            ))
+            .push(self.action("Log ud af MitHF og DUOS", Message::ForgetLogins))
+            .push(self.setup.view().map(Message::Setup))
+            .push(self.action("Genindlæs opsætning", Message::Reload));
+        content = content.push(self.action("Hjælp", Message::Open(Screen::Help)));
+        if self.account.is_some() {
+            content = content.push(self.action("Tilbage til ugen", Message::Open(Screen::Home)));
+        }
+        content
+    }
+
+    /// Short guidance and the diagnostics the maintainer may ask for.
+    fn help<'a>(&'a self, mut content: Column<'a, Message>) -> Column<'a, Message> {
+        content = content.push(text("Hjælp").size(22));
+        for line in HELP {
+            content = content.push(text(line));
+        }
+        content = content
+            .push(text(
+                "Del hvad der gik galt åbner et opslag på GitHub i din browser. Opslaget er offentligt, og du skal have en GitHub-konto for at sende det. Du læser teksten igennem først, og der står hverken navne, vagttekst, adgangskoder, cookies eller kalenderlink i den.",
+            ))
+            .push(self.action("Del hvad der gik galt", Message::ShareProblem));
+        if self.account.is_some() {
+            content = content
+                .push(self.action("Gem en fejlrapport om MitHF og DUOS", Message::Capture))
+                .push(self.action("Tilbage til ugen", Message::Open(Screen::Home)))
+        } else {
+            content = content
+                .push(self.action("Tilbage til Indstillinger", Message::Open(Screen::Settings)))
+        }
+        content
     }
 }
 
@@ -1400,6 +1754,7 @@ mod tests {
     fn app() -> NativeApp {
         NativeApp {
             engine: Engine::new("unused-test-directory".into()),
+            screen: Screen::Home,
             account: None,
             setup: setup::SetupUi::default(),
             monday: NaiveDate::from_ymd_opt(2026, 9, 14).unwrap(),
@@ -1419,6 +1774,7 @@ mod tests {
             apply_summary: String::new(),
             apply_stopping: false,
             needs_recheck: false,
+            forget_source: None,
             close_after_apply: None,
         }
     }
@@ -1533,6 +1889,149 @@ mod tests {
         assert!(app.needs_recheck);
         assert!(app.notice.contains("stoppet sikkert"));
         assert!(app.last_verified.is_none());
+    }
+    fn conflicted(app: &NativeApp, source_key: &str) -> Preview {
+        let mut blocked = preview(app, false);
+        blocked.week.attention = vec![teamup_shift_sync_gui::protocol::Attention {
+            when: "man 14. sep 07:30".into(),
+            who: "Ida".into(),
+            explanation: "…".into(),
+            action: "…".into(),
+            source_key: source_key.into(),
+            can_allow_retransfer: true,
+        }];
+        blocked
+    }
+    #[test]
+    fn allowing_a_transfer_again_needs_its_own_conflict_and_a_confirmation() {
+        let mut app = app();
+        app.preview = Some(conflicted(&app, "shift-a"));
+
+        // A shift without an offered conflict can never reach the confirmation.
+        let _ = app.update(Message::AllowRetransfer("shift-b".into()));
+        assert!(app.forget_source.is_none());
+        let _ = app.update(Message::ConfirmRetransfer);
+        assert_eq!(app.activity, Activity::Idle);
+
+        let _ = app.update(Message::AllowRetransfer("shift-a".into()));
+        assert_eq!(app.forget_source.as_deref(), Some("shift-a"));
+        let _ = app.view();
+        let _ = app.update(Message::CancelRetransfer);
+        assert!(app.forget_source.is_none());
+    }
+    #[test]
+    fn forgetting_local_records_revokes_the_preview_and_requires_a_fresh_one() {
+        let mut app = app();
+        app.preview = Some(conflicted(&app, "shift-a"));
+        app.forget_source = Some("shift-a".into());
+        app.activity = Activity::Recover;
+
+        let _ = app.update(Message::Forgotten(Ok(2)));
+
+        assert_eq!(app.activity, Activity::Idle);
+        assert!(app.preview.is_none());
+        assert!(app.forget_source.is_none());
+        assert!(app.needs_recheck);
+        assert!(app.notice.contains("Intet er slettet i MitHF eller DUOS"));
+        let _ = app.view();
+    }
+    #[test]
+    fn a_blocked_forget_reports_and_keeps_the_conflict_visible() {
+        let mut app = app();
+        app.preview = Some(conflicted(&app, "shift-a"));
+        app.forget_source = Some("shift-a".into());
+        app.activity = Activity::Recover;
+
+        let _ = app.update(Message::Forgotten(Err(
+            "En overførsel bruger denne konto.".into()
+        )));
+
+        assert_eq!(app.activity, Activity::Idle);
+        assert!(app.preview.is_some());
+        assert!(app.forget_source.is_none());
+        assert!(app.error.is_some());
+    }
+    #[test]
+    fn settings_are_reachable_from_the_week_and_revoke_a_shown_approval() {
+        let mut app = app();
+        app.account = None;
+        // Without a confirmed account there is nowhere else to be.
+        assert_eq!(app.visible_screen(), Screen::Settings);
+        let _ = app.view();
+
+        app.preview = Some(preview(&app, true));
+        let _ = app.update(Message::Open(Screen::Settings));
+        assert_eq!(app.screen, Screen::Settings);
+        assert!(app.preview.is_none());
+
+        let _ = app.update(Message::Open(Screen::Help));
+        assert_eq!(app.screen, Screen::Help);
+        let _ = app.view();
+        let _ = app.update(Message::Open(Screen::Home));
+        assert_eq!(app.screen, Screen::Home);
+    }
+    #[test]
+    fn forgetting_logins_revokes_a_shown_approval() {
+        let mut app = app();
+        app.screen = Screen::Settings;
+        app.preview = Some(preview(&app, true));
+
+        let _ = app.update(Message::ForgetLogins);
+
+        assert_eq!(app.activity, Activity::Login);
+        assert!(app.preview.is_none());
+        let _ = app.update(Message::LoginsForgotten(Ok(())));
+        assert_eq!(app.activity, Activity::Idle);
+        assert!(app.notice.contains("Log ind igen"));
+        let _ = app.view();
+    }
+    #[test]
+    fn help_and_its_diagnostics_stay_reachable_before_setup_is_finished() {
+        let mut app = app();
+        app.account = None;
+        let _ = app.update(Message::Open(Screen::Help));
+        assert_eq!(app.visible_screen(), Screen::Help);
+        let _ = app.view();
+
+        let _ = app.update(Message::ShareProblem);
+        assert_eq!(app.activity, Activity::Capture);
+        let _ = app.update(Message::ProblemShared(Ok(Shared {
+            path: "fejlrapport.json".into(),
+            opened: true,
+        })));
+        assert_eq!(app.activity, Activity::Idle);
+        assert!(app.notice.contains("fejlrapport.json"));
+
+        // Without a browser the file is still there to send by hand.
+        app.activity = Activity::Capture;
+        let _ = app.update(Message::ProblemShared(Ok(Shared {
+            path: "fejlrapport.json".into(),
+            opened: false,
+        })));
+        assert!(app.notice.contains("Send filen"));
+    }
+    #[test]
+    fn the_shared_issue_is_prefilled_and_falls_back_to_the_saved_file() {
+        let path = std::path::Path::new("/hjem/fejlrapport.json");
+        let url = issue_url(&json!({"version": 1, "setup": {"stage": "ready"}}), path);
+        assert!(url.starts_with("https://github.com/Jdreioe/teamup_sync/issues/new?title="));
+        assert!(url.contains("Vagtplanl%C3%A6gning"));
+        assert!(url.contains("%22stage%22"));
+
+        // A report too long for an address points at the file instead.
+        let long = json!({"padding": "x".repeat(8000)});
+        let url = issue_url(&long, path);
+        assert!(!url.contains("xxxx"));
+        assert!(url.contains("fejlrapport.json"));
+    }
+    #[test]
+    fn a_confirmed_setup_returns_to_the_week() {
+        let mut app = app();
+        app.screen = Screen::Settings;
+        app.activity = Activity::Setup;
+        app.setup.busy = true;
+        let _ = app.update(Message::SetupUpdated(Ok(setup_state("ready"))));
+        assert_eq!(app.screen, Screen::Home);
     }
     #[test]
     fn blocked_and_wrong_week_previews_cannot_start_apply() {

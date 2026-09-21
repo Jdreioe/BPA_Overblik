@@ -218,6 +218,17 @@ async fn cdp(socket: &str, method: &str, params: Value) -> Result<Value, LiveErr
     }).await.map_err(|_| LiveError("Browserforespørgslen tog for lang tid. Prøv igen."))?
 }
 
+/// Forget the saved MitHF and DUOS logins by removing the app's own browser
+/// profiles. Nothing is sent to either service, and no synchronization record
+/// is touched: this only clears local session data, so the next login starts
+/// clean. Close the sessions first. Run on a blocking thread.
+pub fn forget_logins(data_dir: &Path) -> Result<(), LiveError> {
+    let profiles = data_dir.join("rust-preview/profiles");
+    if !profiles.exists() { return Ok(()); }
+    std::fs::remove_dir_all(&profiles)
+        .map_err(|_| LiveError("De gemte logins kunne ikke fjernes. Luk appens browservinduer, og prøv igen."))
+}
+
 fn private_dir(path: &Path) -> Result<(), LiveError> {
     std::fs::create_dir_all(path).map_err(|_| INVALID)?;
     #[cfg(unix)] {
@@ -226,7 +237,7 @@ fn private_dir(path: &Path) -> Result<(), LiveError> {
     }
     Ok(())
 }
-fn browser_executable(data_dir: &Path) -> Result<PathBuf, LiveError> {
+pub(super) fn browser_executable(data_dir: &Path) -> Result<PathBuf, LiveError> {
     if let Some(path) = std::env::var_os("TEAMUP_BROWSER_PATH") {
         let path = PathBuf::from(path);
         if path.is_file() { return Ok(path); }
@@ -251,6 +262,21 @@ fn browser_executable(data_dir: &Path) -> Result<PathBuf, LiveError> {
 #[cfg(test)]
 mod tests {
     use super::{write_allowed, Service};
+
+    #[test]
+    fn forgetting_logins_removes_only_the_app_profiles() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let profiles = dir.path().join("rust-preview/profiles/mithf");
+        std::fs::create_dir_all(&profiles).expect("profile");
+        std::fs::write(dir.path().join("sync-abc.sqlite3"), b"history").expect("history");
+
+        super::forget_logins(dir.path()).expect("forget");
+        // Logging out twice is not an error.
+        super::forget_logins(dir.path()).expect("forget again");
+
+        assert!(!dir.path().join("rust-preview/profiles").exists());
+        assert!(dir.path().join("sync-abc.sqlite3").is_file());
+    }
 
     #[test]
     fn duos_transport_can_save_but_cannot_accept_registrations() {
