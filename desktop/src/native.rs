@@ -243,6 +243,80 @@ fn completion_summary(done: &ApplyDone) -> String {
     }
 }
 
+/// Where a report can be shared. The repository is public, which the Hjælp
+/// screen says before anything is opened.
+const ISSUE_FORM: &str = "https://github.com/Jdreioe/teamup_sync/issues/new";
+
+/// The saved report, and whether a browser accepted the prefilled issue.
+#[derive(Clone, Debug)]
+struct Shared {
+    path: PathBuf,
+    opened: bool,
+}
+
+/// Percent-encode one query value. Only the unreserved set survives, which is
+/// always safe inside a query string.
+fn query_encoded(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                encoded.push(*byte as char)
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+
+/// A prefilled issue the person can read and send themselves. A long report is
+/// left out of the address, which browsers and GitHub both limit; the saved
+/// file can be attached in the form instead.
+fn issue_url(report: &Value, path: &std::path::Path) -> String {
+    const BUDGET: usize = 6000;
+    const INTRO: &str = "Skriv kort, hvad du gjorde, og hvad der skete:\n\n\n";
+    let details = serde_json::to_string_pretty(report).unwrap_or_default();
+    let mut body = format!("{INTRO}Oplysninger fra appen:\n\n```json\n{details}\n```\n");
+    let title = query_encoded("Der gik noget galt i Vagtplanlægning");
+    if ISSUE_FORM.len() + title.len() + query_encoded(&body).len() > BUDGET {
+        body = format!(
+            "{INTRO}Vedhæft filen {} fra din computer.\n",
+            path.display()
+        );
+    }
+    format!("{ISSUE_FORM}?title={title}&body={}", query_encoded(&body))
+}
+
+/// Open an address in the person's own browser. The app's own browser profiles
+/// belong to MitHF and DUOS and are never used for anything else.
+fn open_in_browser(url: &str) -> bool {
+    #[cfg(target_os = "linux")]
+    let mut command = {
+        let mut command = std::process::Command::new("xdg-open");
+        command.arg(url);
+        command
+    };
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = std::process::Command::new("open");
+        command.arg(url);
+        command
+    };
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = std::process::Command::new("cmd");
+        // The empty argument is the window title `start` expects first.
+        command.args(["/C", "start", "", url]);
+        command
+    };
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .is_ok()
+}
+
 #[derive(Clone)]
 struct Engine {
     data_dir: PathBuf,
@@ -426,9 +500,11 @@ impl Engine {
         .map_err(|_| "Fejlrapporten kunne ikke gemmes.".to_owned())??;
         Ok(path)
     }
-    /// Write the redacted diagnostics the maintainer may ask for. It needs no
-    /// service and no confirmed account, so it also works when setup is stuck.
-    async fn diagnostics(&self) -> Result<PathBuf> {
+    /// Save the redacted report and open a prefilled issue in the person's own
+    /// browser. Nothing is published here: they read the text and decide to
+    /// send it. It needs no service and no confirmed account, so it also works
+    /// when setup is stuck.
+    async fn share_problem(&self) -> Result<Shared> {
         let dir = self.data_dir.clone();
         tokio::task::spawn_blocking(move || {
             let now = Utc::now().fixed_offset();
@@ -438,7 +514,8 @@ impl Engine {
                 .map_err(|_| "Fejlrapporten kunne ikke skrives.".to_owned())?;
             std::fs::write(&path, document + "\n")
                 .map_err(|_| "Fejlrapporten kunne ikke gemmes.".to_owned())?;
-            Ok(path)
+            let opened = open_in_browser(&issue_url(&report, &path));
+            Ok(Shared { path, opened })
         })
         .await
         .map_err(|_| "Fejlrapporten kunne ikke gemmes.".to_owned())?
@@ -764,8 +841,8 @@ enum Message {
     LoginsForgotten(Result<()>),
     Capture,
     Captured(Result<PathBuf>),
-    SaveDiagnostics,
-    DiagnosticsSaved(Result<PathBuf>),
+    ShareProblem,
+    ProblemShared(Result<Shared>),
     Preview,
     PreviewLoaded(Result<Box<Preview>>),
     AllowRetransfer(String),
@@ -791,7 +868,7 @@ const HELP: [&str; 6] = [
     "3. Løs først punkterne under Kræver opmærksomhed. Rettelser laves i TeamUp eller i tjenesten, ikke i appen.",
     "4. Vælg Overfør ændringer. Hver ændring læses tilbage og bekræftes, før den næste begynder.",
     "Appen sletter aldrig noget i MitHF eller DUOS, og den godkender ikke registreringer for hjælperen.",
-    "Går noget galt, så gem en fejlrapport herunder, og send filen til den, der vedligeholder appen. Filen indeholder hverken navne, vagttekst, adgangskoder eller cookies.",
+    "Går noget galt, så vælg Del hvad der gik galt herunder. Appen skriver, hvad den ved om sig selv, og du bestemmer selv, om det skal sendes.",
 ];
 
 /// The screen in view. Everything technical lives away from the week.
@@ -890,7 +967,7 @@ impl NativeApp {
                 | Message::LoginChecked(_)
                 | Message::LoginsForgotten(_)
                 | Message::Captured(_)
-                | Message::DiagnosticsSaved(_)
+                | Message::ProblemShared(_)
                 | Message::PreviewLoaded(_)
                 | Message::Forgotten(_)
                 | Message::Applied(_)
@@ -1145,26 +1222,32 @@ impl NativeApp {
                     Err(e) => self.error = Some(e),
                 }
             }
-            Message::SaveDiagnostics => {
+            Message::ShareProblem => {
                 self.error = None;
                 self.notice.clear();
                 self.activity = Activity::Capture;
                 let engine = self.engine.clone();
                 return Task::perform(
-                    async move { engine.diagnostics().await },
-                    Message::DiagnosticsSaved,
+                    async move { engine.share_problem().await },
+                    Message::ProblemShared,
                 );
             }
-            Message::DiagnosticsSaved(result) => {
+            Message::ProblemShared(result) => {
                 if self.activity != Activity::Capture {
                     return Task::none();
                 }
                 self.activity = Activity::Idle;
                 match result {
-                    Ok(path) => {
+                    Ok(shared) if shared.opened => {
                         self.notice = format!(
-                            "Fejlrapporten er gemt i {}. Den indeholder kun tal og ja/nej-svar: hverken navne, vagttekst, adgangskoder, cookies eller kalenderlink.",
-                            path.display()
+                            "Din browser er åbnet med et opslag, du selv kan læse igennem og sende. Oplysningerne er også gemt i {}, hvis du hellere vil sende filen.",
+                            shared.path.display()
+                        )
+                    }
+                    Ok(shared) => {
+                        self.notice = format!(
+                            "Browseren kunne ikke åbnes. Oplysningerne er gemt i {}. Send filen til den, der vedligeholder appen.",
+                            shared.path.display()
                         )
                     }
                     Err(e) => self.error = Some(e),
@@ -1423,7 +1506,7 @@ impl NativeApp {
                 Activity::Idle => "",
                 Activity::Setup => "Indlæser opsætning …",
                 Activity::Login => "Kontakter browseren …",
-                Activity::Capture => "Skriver fejlrapporten …",
+                Activity::Capture => "Forbereder fejlrapporten …",
                 Activity::Preview => "Henter ugens ændringer …",
                 Activity::Recover => "Glemmer lokale registreringer …",
                 Activity::Apply => "",
@@ -1578,8 +1661,11 @@ impl NativeApp {
         for line in HELP {
             content = content.push(text(line));
         }
-        content =
-            content.push(self.action("Gem en fejlrapport om appen", Message::SaveDiagnostics));
+        content = content
+            .push(text(
+                "Del hvad der gik galt åbner et opslag på GitHub i din browser. Opslaget er offentligt, og du skal have en GitHub-konto for at sende det. Du læser teksten igennem først, og der står hverken navne, vagttekst, adgangskoder, cookies eller kalenderlink i den.",
+            ))
+            .push(self.action("Del hvad der gik galt", Message::ShareProblem));
         if self.account.is_some() {
             content = content
                 .push(self.action("Gem en fejlrapport om MitHF og DUOS", Message::Capture))
@@ -1907,11 +1993,36 @@ mod tests {
         assert_eq!(app.visible_screen(), Screen::Help);
         let _ = app.view();
 
-        let _ = app.update(Message::SaveDiagnostics);
+        let _ = app.update(Message::ShareProblem);
         assert_eq!(app.activity, Activity::Capture);
-        let _ = app.update(Message::DiagnosticsSaved(Ok("fejlrapport.json".into())));
+        let _ = app.update(Message::ProblemShared(Ok(Shared {
+            path: "fejlrapport.json".into(),
+            opened: true,
+        })));
         assert_eq!(app.activity, Activity::Idle);
-        assert!(app.notice.contains("hverken navne"));
+        assert!(app.notice.contains("fejlrapport.json"));
+
+        // Without a browser the file is still there to send by hand.
+        app.activity = Activity::Capture;
+        let _ = app.update(Message::ProblemShared(Ok(Shared {
+            path: "fejlrapport.json".into(),
+            opened: false,
+        })));
+        assert!(app.notice.contains("Send filen"));
+    }
+    #[test]
+    fn the_shared_issue_is_prefilled_and_falls_back_to_the_saved_file() {
+        let path = std::path::Path::new("/hjem/fejlrapport.json");
+        let url = issue_url(&json!({"version": 1, "setup": {"stage": "ready"}}), path);
+        assert!(url.starts_with("https://github.com/Jdreioe/teamup_sync/issues/new?title="));
+        assert!(url.contains("Vagtplanl%C3%A6gning"));
+        assert!(url.contains("%22stage%22"));
+
+        // A report too long for an address points at the file instead.
+        let long = json!({"padding": "x".repeat(8000)});
+        let url = issue_url(&long, path);
+        assert!(!url.contains("xxxx"));
+        assert!(url.contains("fejlrapport.json"));
     }
     #[test]
     fn a_confirmed_setup_returns_to_the_week() {

@@ -62,12 +62,20 @@ can be approved.
 **Hjælp** holds short Danish guidance and two exports. Neither is called a
 diagnostic on screen: the person asked to produce one is not a developer.
 
-**Gem en fejlrapport om appen** writes `fejlrapport.json`: app and system
+**Del hvad der gik galt** writes `fejlrapport.json` and opens a prefilled issue
+on this repository in the person's own browser. The report holds app and system
 versions, how far setup reached, per-account step counts by status, the last
 verification time, and whether the browser and its profiles are present. It is
 counts and yes/no answers only, with no credential, cookie, calendar link,
 service identifier, name, shift text or raw service response, and it needs no
 service or confirmed account, so it also works while setup is stuck.
+
+Nothing is published by the app: there is no token and no API call, only a
+`…/issues/new?title=&body=` address that the browser opens. The person reads the
+filled form and presses Submit themselves, and the screen says beforehand that
+the issue is public and needs a GitHub account. A report too long for an address
+is left out of it, and the form then asks for the saved file instead. If no
+browser can be opened, the file is still written and the app says to send it.
 
 **Gem en fejlrapport om MitHF og DUOS** writes `fejlrapport-tjenester.json`,
 which records the field types the two services return, without any values. It is
