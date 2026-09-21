@@ -21,7 +21,7 @@ pub fn redacted_report(data_dir: &Path, now: DateTime<FixedOffset>) -> Result<Va
         "version": 1,
         "recorded_at": isoformat(now),
         "app": {
-            "version": env!("CARGO_PKG_VERSION"),
+            "version": app_version(),
             "os": std::env::consts::OS,
             "arch": std::env::consts::ARCH,
         },
@@ -32,6 +32,12 @@ pub fn redacted_report(data_dir: &Path, now: DateTime<FixedOffset>) -> Result<Va
             "profiles": profiles(data_dir),
         },
     }))
+}
+
+/// The dated version of the installed package when the build had one, and the
+/// crate version for a plain `cargo build`.
+fn app_version() -> &'static str {
+    option_env!("TEAMUP_SHIFT_SYNC_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
 }
 
 /// How far setup got, as sizes and yes/no answers. No chosen id or name.
