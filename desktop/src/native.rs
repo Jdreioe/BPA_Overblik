@@ -578,6 +578,9 @@ struct NativeApp {
     apply_progress: Option<Arc<StdMutex<TransferProgress>>>,
     apply_total: usize,
     apply_verified: usize,
+    apply_write_total: usize,
+    apply_write_verified: usize,
+    apply_bar: f32,
     apply_current: String,
     apply_summary: String,
 }
@@ -596,6 +599,9 @@ impl NativeApp {
             apply_progress: None,
             apply_total: 0,
             apply_verified: 0,
+            apply_write_total: 0,
+            apply_write_verified: 0,
+            apply_bar: 0.0,
             apply_current: String::new(),
             apply_summary: String::new(),
         };
@@ -645,6 +651,9 @@ impl NativeApp {
                 self.apply_progress = None;
                 self.apply_total = 0;
                 self.apply_verified = 0;
+                self.apply_write_total = 0;
+                self.apply_write_verified = 0;
+                self.apply_bar = 0.0;
                 self.apply_current.clear();
                 self.apply_summary.clear();
                 self.activity = Activity::Setup;
@@ -889,6 +898,9 @@ impl NativeApp {
                 let expected = write_counts(&preview.items);
                 self.apply_total = expected.len();
                 self.apply_verified = 0;
+                self.apply_write_total = expected.values().sum();
+                self.apply_write_verified = 0;
+                self.apply_bar = 0.0;
                 self.apply_current.clear();
                 let progress = Arc::new(StdMutex::new(TransferProgress {
                     expected,
@@ -939,6 +951,16 @@ impl NativeApp {
         let Ok(state) = shared.lock() else {
             return;
         };
+        self.apply_write_verified = state.verified.len();
+        self.apply_write_total = state.expected.values().sum();
+        // The bar chases the verified count so it glides instead of jumping.
+        let target = self.apply_write_verified as f32;
+        if target > self.apply_bar {
+            let step = (target - self.apply_bar) * 0.3;
+            self.apply_bar = if step < 0.02 { target } else { self.apply_bar + step };
+        } else {
+            self.apply_bar = target;
+        }
         self.apply_verified = state
             .expected
             .iter()
@@ -969,7 +991,7 @@ impl NativeApp {
     }
     fn subscription(&self) -> Subscription<Message> {
         if self.activity == Activity::Apply {
-            iced::time::every(std::time::Duration::from_millis(200)).map(|_| Message::ApplyTick)
+            iced::time::every(std::time::Duration::from_millis(50)).map(|_| Message::ApplyTick)
         } else {
             Subscription::none()
         }
@@ -1099,10 +1121,10 @@ impl NativeApp {
             if !self.apply_summary.is_empty() {
                 content = content.push(text(&self.apply_summary));
             }
-            let total = self.apply_total.max(1);
+            let bar_total = self.apply_write_total.max(1);
             content = content.push(
                 row![
-                    progress_bar(0.0..=total as f32, self.apply_verified as f32).girth(16),
+                    progress_bar(0.0..=bar_total as f32, self.apply_bar).girth(16),
                     text(progress_line(self.apply_verified, self.apply_total))
                 ]
                 .spacing(8),
@@ -1224,6 +1246,9 @@ mod tests {
             apply_progress: None,
             apply_total: 0,
             apply_verified: 0,
+            apply_write_total: 0,
+            apply_write_verified: 0,
+            apply_bar: 0.0,
             apply_current: String::new(),
             apply_summary: String::new(),
         }
@@ -1379,6 +1404,11 @@ mod tests {
         let _ = app.update(Message::ApplyTick);
         // One of two writes is verified, so no shift is done yet.
         assert_eq!(app.apply_verified, 0);
+        assert_eq!(app.apply_write_verified, 1);
+        assert_eq!(app.apply_write_total, 2);
+        // The bar glides toward the target instead of jumping to it.
+        assert!(app.apply_bar > 0.0 && app.apply_bar < 1.0);
+        let gliding = app.apply_bar;
         assert_eq!(app.apply_current, "Tilføjer Anna Hansen 28. sep i MitHF");
         let _ = app.view();
         shared.lock().unwrap().verified.push(VerifiedStep {
@@ -1388,6 +1418,8 @@ mod tests {
         });
         let _ = app.update(Message::ApplyTick);
         assert_eq!(app.apply_verified, 1);
+        assert_eq!(app.apply_write_verified, 2);
+        assert!(app.apply_bar > gliding && app.apply_bar < 2.0);
         let _ = app.update(Message::Applied(Ok(done())));
         assert_eq!(app.activity, Activity::Idle);
         assert!(app.apply_progress.is_none());
