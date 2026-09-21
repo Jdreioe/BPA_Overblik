@@ -31,4 +31,7 @@ pub use planning_models::{
 
 pub use approval::{payload_digest, plan_digest, ApprovalError, ApprovedPlan, StepAction};
 
-pub use transfer::{apply_plan, ApplyRequest, Destinations, TransferError};
+pub use transfer::{
+    apply_plan, apply_plan_controlled, ApplyOutcome, ApplyRequest, Destinations, TransferError,
+    TransferEvent, TransferOperation,
+};

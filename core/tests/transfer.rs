@@ -8,9 +8,10 @@ use chrono::{DateTime, FixedOffset};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use teamup_shift_sync_core::{
-    apply_plan, build_plan, plan_digest, ApplyRequest, ApprovalError, DestinationSnapshot,
-    Destinations, DuosRegistration, MitHfShift, Outcome, PlanItem, PlanRequest, PlanningConfig,
-    SourceShift, StateError, StepRecord, SyncState, TimeInterval, TransferError,
+    apply_plan, apply_plan_controlled, build_plan, plan_digest, ApplyOutcome, ApplyRequest,
+    ApprovalError, DestinationSnapshot, Destinations, DuosRegistration, MitHfShift, Outcome,
+    PlanItem, PlanRequest, PlanningConfig, SourceShift, StateError, StepRecord, SyncState,
+    TimeInterval, TransferError, TransferEvent,
 };
 
 #[derive(Default)]
@@ -222,7 +223,11 @@ fn split_transfers_verify_changed_ids_and_repeat_without_writes() {
             request.clone(),
             adapter.state_path.clone(),
             &mut adapter,
-            |item| progress.push(item.step_key.clone()),
+            |event| {
+                if let teamup_shift_sync_core::TransferEvent::Verified(operation) = event {
+                    progress.push(operation.step_key);
+                }
+            },
         ))
         .unwrap();
     assert!(final_plan
@@ -257,6 +262,51 @@ fn split_transfers_verify_changed_ids_and_repeat_without_writes() {
         ))
         .unwrap();
     assert!(adapter.writes.is_empty());
+}
+
+#[test]
+fn requested_stop_finishes_readback_and_stops_before_the_next_write() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut adapter = MemoryDestinations {
+        state_path: temp.path().join("sync.sqlite3"),
+        ..Default::default()
+    };
+    let mut request = request();
+    approve(&mut request, &adapter);
+    let verified = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let progress_count = verified.clone();
+    let stop_count = verified.clone();
+
+    let outcome = runtime()
+        .block_on(apply_plan_controlled(
+            request.clone(),
+            adapter.state_path.clone(),
+            &mut adapter,
+            move |event| {
+                if matches!(event, TransferEvent::Verified(_)) {
+                    progress_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            },
+            move || stop_count.load(std::sync::atomic::Ordering::SeqCst) > 0,
+        ))
+        .unwrap();
+
+    assert!(matches!(outcome, ApplyOutcome::Stopped { .. }));
+    assert_eq!(adapter.writes, ["mithf.create_shift"]);
+    let state = SyncState::open(&adapter.state_path).unwrap();
+    assert_eq!(
+        state
+            .get_step(&request.shifts[0].key(), "mithf.create_shift")
+            .unwrap()
+            .unwrap()
+            .status,
+        "verified"
+    );
+    assert!(state
+        .get_step(&request.shifts[0].key(), "mithf.assign_helper")
+        .unwrap()
+        .is_none());
+    assert_eq!(snapshots(&adapter.state_path), 0);
 }
 
 #[test]
@@ -571,6 +621,11 @@ fn meeting_uses_full_shift_read_bounds_and_final_read_failure_leaves_no_source_s
         assert_eq!(
             snapshots(&adapter.state_path),
             if fail_final { 0 } else { 1 }
+        );
+        let state = SyncState::open(&adapter.state_path).unwrap();
+        assert_eq!(
+            state.last_source_snapshot_at().unwrap().is_some(),
+            !fail_final
         );
     }
 }

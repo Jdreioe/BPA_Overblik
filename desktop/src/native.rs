@@ -1,22 +1,26 @@
 //! Native Iced workflow using the Rust core and app-owned browser sessions.
 //! Setup editing remains in the existing application during migration.
 use crate::setup;
-use chrono::{Datelike, DateTime, Duration, FixedOffset, NaiveDate, TimeZone, Timelike, Utc};
+use chrono::{DateTime, Datelike, Duration, FixedOffset, NaiveDate, TimeZone, Timelike, Utc};
 use iced::widget::{button, column, container, progress_bar, row, scrollable, text};
 use iced::{Element, Length, Subscription, Task};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
-    sync::{Arc, Mutex as StdMutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex as StdMutex,
+    },
 };
 use teamup_shift_sync_core::{
-    apply_plan, build_plan,
+    apply_plan_controlled, build_plan,
     live::{
         load_saved_setup, read_destinations, read_shapes, read_teamup, BrowserSessions, LiveConfig,
         LiveDestinations, Service, Setup, Visibility,
     },
-    plan_digest, reconciliation_range, ApplyRequest, Outcome, PlanItem, PlanRequest, SyncState,
+    plan_digest, reconciliation_range, ApplyOutcome, ApplyRequest, Outcome, PlanItem, PlanRequest,
+    PlanSystem, SyncState, TransferEvent, TransferOperation,
 };
 use teamup_shift_sync_gui::{files::app_data_dir, preview::build_week, protocol::Week};
 use tokio::sync::{Mutex, MutexGuard};
@@ -28,32 +32,142 @@ fn view(document: &Setup) -> Result<setup::SetupState> {
     serde_json::from_value(document.view()).map_err(|_| "Opsætningen kunne ikke vises.".to_owned())
 }
 
-/// One verified write: its destination and a plain display line naming the
-/// helper and date. No payloads, ids, or times beyond the day.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum Destination {
+    Mithf,
+    Duos,
+}
+
+impl Destination {
+    fn from_system(system: PlanSystem) -> Option<Self> {
+        match system {
+            PlanSystem::Mithf => Some(Self::Mithf),
+            PlanSystem::Duos => Some(Self::Duos),
+            PlanSystem::Source | PlanSystem::Mapping => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Mithf => "MitHF",
+            Self::Duos => "DUOS",
+        }
+    }
+}
+
+/// One user-visible shift or registration. Several MitHF API writes may make
+/// up one shift, while every DUOS interval remains its own registration.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ProgressUnit {
+    destination: Destination,
+    source: String,
+    unit: String,
+}
+
+#[derive(Clone, Debug)]
+struct StepLabels {
+    unit: ProgressUnit,
+    started: String,
+    verified: String,
+}
+
+/// Transfer state shared with the async runner. It contains display labels and
+/// opaque identifiers, never plan payloads or source text.
 #[derive(Clone, Debug, Default)]
 struct TransferProgress {
-    expected: BTreeMap<String, usize>,
+    expected: BTreeMap<ProgressUnit, usize>,
+    current: String,
+    uncertain: BTreeSet<ProgressUnit>,
     verified: Vec<VerifiedStep>,
 }
 
 #[derive(Clone, Debug)]
 struct VerifiedStep {
-    service: String,
-    label: String,
-    source: String,
+    unit: ProgressUnit,
 }
 
-fn write_counts(items: &[PlanItem]) -> BTreeMap<String, usize> {
+impl TransferProgress {
+    fn verified_units(&self) -> usize {
+        self.expected
+            .iter()
+            .filter(|(unit, total)| {
+                self.verified
+                    .iter()
+                    .filter(|step| &step.unit == *unit)
+                    .count()
+                    >= **total
+            })
+            .count()
+    }
+
+    fn verified_in(&self, destination: Destination) -> usize {
+        self.expected
+            .iter()
+            .filter(|(unit, total)| {
+                unit.destination == destination
+                    && self
+                        .verified
+                        .iter()
+                        .filter(|step| &step.unit == *unit)
+                        .count()
+                        >= **total
+            })
+            .count()
+    }
+}
+
+fn progress_unit(item: &PlanItem) -> Option<ProgressUnit> {
+    progress_unit_parts(item.system, &item.source_key, &item.step_key)
+}
+
+fn operation_unit(operation: &TransferOperation) -> Option<ProgressUnit> {
+    progress_unit_parts(operation.system, &operation.source_key, &operation.step_key)
+}
+
+fn progress_unit_parts(
+    system: PlanSystem,
+    source_key: &str,
+    step_key: &str,
+) -> Option<ProgressUnit> {
+    let destination = Destination::from_system(system)?;
+    let unit = match destination {
+        Destination::Mithf => step_key
+            .split_once('#')
+            .map_or_else(|| "0".to_owned(), |(_, suffix)| suffix.to_owned()),
+        Destination::Duos => step_key.to_owned(),
+    };
+    Some(ProgressUnit {
+        destination,
+        source: source_key.to_owned(),
+        unit,
+    })
+}
+
+fn write_counts(items: &[PlanItem]) -> BTreeMap<ProgressUnit, usize> {
     let mut counts = BTreeMap::new();
-    for item in items.iter().filter(|item| {
-        matches!(
-            item.outcome,
-            Outcome::WouldCreate | Outcome::WouldUpdate
-        )
-    }) {
-        *counts.entry(item.source_key.clone()).or_insert(0) += 1;
+    for item in items
+        .iter()
+        .filter(|item| matches!(item.outcome, Outcome::WouldCreate | Outcome::WouldUpdate))
+    {
+        if let Some(unit) = progress_unit(item) {
+            *counts.entry(unit).or_insert(0) += 1;
+        }
     }
     counts
+}
+
+fn has_unvalidated_duos_writes(items: &[PlanItem]) -> bool {
+    items.iter().any(|item| {
+        item.system == PlanSystem::Duos
+            && matches!(item.outcome, Outcome::WouldCreate | Outcome::WouldUpdate)
+    })
+}
+
+fn block_unvalidated_duos(week: &mut Week, items: &[PlanItem]) {
+    if has_unvalidated_duos_writes(items) {
+        week.can_apply = false;
+        week.blocked_reason = "DUOS-overførsel er ikke aktiveret endnu. Gemme- og godkendelsesforløbet skal verificeres først.".into();
+    }
 }
 
 /// The verified result of one approved run.
@@ -61,19 +175,19 @@ fn write_counts(items: &[PlanItem]) -> BTreeMap<String, usize> {
 struct ApplyDone {
     mithf: usize,
     duos: usize,
-    verified_label: String,
+    verified_label: Option<String>,
+    stopped: bool,
 }
 
-fn service_of(step_key: &str) -> String {
-    let base = step_key.split('#').next().unwrap_or("");
-    match base {
-        "mithf.create_shift" | "mithf.assign_helper" | "mithf.set_sps" | "mithf.set_meeting" => {
-            "MitHF".into()
-        }
-        _ if base.starts_with("duos") => "DUOS".into(),
-        _ => String::new(),
-    }
+#[derive(Clone, Debug)]
+struct ApplyFailure {
+    message: String,
+    verified: usize,
+    uncertain: usize,
+    remaining: usize,
 }
+
+type ApplyResult = std::result::Result<ApplyDone, ApplyFailure>;
 
 fn verb_of(outcome: Outcome) -> &'static str {
     match outcome {
@@ -90,50 +204,57 @@ fn short_date_da(day: u32, month0: u32) -> String {
     format!("{day}. {}", MONTHS[month0 as usize % 12])
 }
 
-fn counted(steps: &[VerifiedStep], destination: &str) -> usize {
-    steps
-        .iter()
-        .filter(|step| step.service == destination)
-        .count()
-}
-
-/// Short Danish timestamp without seconds. Keeps the stored offset, so the
-/// time matches what the services saw.
-fn format_verified_da(moment: DateTime<FixedOffset>) -> String {
+/// Short Danish timestamp without seconds in the configured local timezone.
+fn format_verified_da(moment: DateTime<FixedOffset>, zone: chrono_tz::Tz) -> String {
     const MONTHS: [&str; 12] = [
         "jan", "feb", "mar", "apr", "maj", "jun", "jul", "aug", "sep", "okt", "nov", "dec",
     ];
+    let local = moment.with_timezone(&zone);
     format!(
         "{}. {} kl. {:02}.{:02}",
-        moment.day(),
-        MONTHS[moment.month0() as usize],
-        moment.hour(),
-        moment.minute()
+        local.day(),
+        MONTHS[local.month0() as usize],
+        local.hour(),
+        local.minute()
     )
+}
+
+fn failure_summary(failure: &ApplyFailure) -> String {
+    let mut summary = format!(
+        "Overførslen blev ikke færdig. {} verificeret, {} uafklaret og {} ikke startet.",
+        failure.verified, failure.uncertain, failure.remaining
+    );
+    if failure.uncertain > 0 {
+        summary.push_str(" En uafklaret ændring kan allerede være gemt.");
+    }
+    summary
 }
 
 fn progress_line(verified: usize, total: usize) -> String {
     if total == 0 {
         "Overfører.".into()
     } else {
-        format!("{verified} af {total} vagter overført.")
+        format!("{verified} af {total} ændringer overført.")
     }
 }
 
 fn completion_summary(done: &ApplyDone) -> String {
     let mut parts = Vec::new();
     if done.mithf > 0 {
-        parts.push(format!("{} trin i MitHF", done.mithf));
+        parts.push(format!("{} vagter i MitHF", done.mithf));
     }
     if done.duos > 0 {
-        parts.push(format!("{} trin i DUOS", done.duos));
+        parts.push(format!("{} registreringer i DUOS", done.duos));
     }
     let what = if parts.is_empty() {
-        "Ingen nye trin.".to_owned()
+        "Ingen nye ændringer.".to_owned()
     } else {
         parts.join(" og ") + " er læst tilbage og verificeret."
     };
-    format!("Færdig. {what} Sidst verificeret {}.", done.verified_label)
+    match &done.verified_label {
+        Some(label) => format!("Færdig. {what} Sidst verificeret {label}."),
+        None => format!("Færdig. {what}"),
+    }
 }
 
 #[derive(Clone)]
@@ -334,7 +455,7 @@ impl Engine {
                 &state,
             )
             .map_err(|_| "Ugens plan kunne ikke beregnes sikkert.".to_owned())?;
-            let week = build_week(
+            let mut week = build_week(
                 &account.planning,
                 &account.helper_names,
                 &account.helper_colors,
@@ -344,6 +465,7 @@ impl Engine {
                 true,
             )
             .map_err(str::to_owned)?;
+            block_unvalidated_duos(&mut week, &plan.items);
             let digest = plan_digest(&plan)
                 .map_err(|_| "Ugens godkendelse kunne ikke beregnes.".to_owned())?;
             Ok(Preview {
@@ -357,35 +479,14 @@ impl Engine {
         .await
         .map_err(|_| "Ugens plan kunne ikke indlæses.".to_owned())?
     }
-    /// Forget local step records for explicitly named sources, so deleted
-    /// destination entries can be transferred again after a fresh preview.
-    /// Only local history is forgotten. Nothing is deleted in any service.
-    async fn forget_sources(&self, state_path: PathBuf, sources: Vec<String>) -> Result<usize> {
-        tokio::task::spawn_blocking(move || {
-            let mut state = SyncState::open(&state_path)
-                .map_err(|_| "Den lokale overførselshistorik kunne ikke læses.".to_owned())?;
-            let _guard = state.exclusive_apply().map_err(|_| {
-                "En anden overførsel bruger denne konto. Vent, og prøv igen.".to_owned()
-            })?;
-            let mut count = 0;
-            for source in sources {
-                count += state
-                    .forget_steps(&source)
-                    .map_err(|_| "Historikken kunne ikke glemmes. Prøv igen.".to_owned())?
-                    .len();
-            }
-            Ok(count)
-        })
-        .await
-        .map_err(|_| "Historikken kunne ikke glemmes. Prøv igen.".to_owned())?
-    }
     /// The last fully verified transfer, if any. Snapshots are only stored
     /// after the final read-back, so this never reports a partial attempt.
     /// Failures return None. The home screen then simply shows no timestamp.
-    async fn last_verified(&self, state_path: PathBuf) -> Option<String> {        tokio::task::spawn_blocking(move || {
+    async fn last_verified(&self, state_path: PathBuf, zone: chrono_tz::Tz) -> Option<String> {
+        tokio::task::spawn_blocking(move || {
             let state = SyncState::open(&state_path).ok()?;
             let moment = state.last_source_snapshot_at().ok()??;
-            Some(format_verified_da(moment))
+            Some(format_verified_da(moment, zone))
         })
         .await
         .ok()?
@@ -394,25 +495,42 @@ impl Engine {
         &self,
         approved: Preview,
         progress: Arc<StdMutex<TransferProgress>>,
-    ) -> Result<ApplyDone> {
+        stop: Arc<AtomicBool>,
+    ) -> ApplyResult {
         // Re-read saved setup as well as TeamUp. A changed account scope must
         // never inherit an approval, even when its week happens to look alike.
-        let account = self.account().await?;
+        let account = self
+            .account()
+            .await
+            .map_err(|message| apply_failure(message, &progress))?;
         if account.state_path != approved.state_path {
-            return Err(
+            return Err(apply_failure(
                 "Opsætningen er ændret. Genindlæs opsætningen, og gennemgå ugen igen.".into(),
-            );
+                &progress,
+            ));
         }
-        let guard = self.sessions().await?;
-        let browser = guard.as_ref().ok_or("Log ind i MitHF og DUOS først.")?;
-        let (to, start, end) = range(&account, approved.from)?;
+        if has_unvalidated_duos_writes(&approved.items) {
+            return Err(apply_failure(
+                "DUOS-overførsel er ikke aktiveret endnu. Gemme- og godkendelsesforløbet skal verificeres først.".into(),
+                &progress,
+            ));
+        }
+        let guard = self
+            .sessions()
+            .await
+            .map_err(|message| apply_failure(message, &progress))?;
+        let browser = guard
+            .as_ref()
+            .ok_or_else(|| apply_failure("Log ind i MitHF og DUOS først.".into(), &progress))?;
+        let (to, start, end) =
+            range(&account, approved.from).map_err(|message| apply_failure(message, &progress))?;
         let shifts = read_teamup(&account, approved.from, to)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|error| apply_failure(error.to_string(), &progress))?;
         let now = Utc::now().fixed_offset();
         let mut destination = LiveDestinations::connect(browser, &account, now)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|error| apply_failure(error.to_string(), &progress))?;
         // Display lines for each approved write, keyed by source and step.
         // The progress callback only names the verified item, so resolve
         // helper and date here while shifts and names are at hand.
@@ -431,64 +549,133 @@ impl Engine {
                 })
                 .unwrap_or_else(|| "Ukendt hjælper".into());
             let at = shift.starts_at.with_timezone(&account.planning.timezone);
-            context.insert(
-                shift.key(),
-                (
-                    helper,
-                    short_date_da(at.day(), at.month0()),
-                ),
-            );
+            context.insert(shift.key(), (helper, short_date_da(at.day(), at.month0())));
         }
         let mut labels = BTreeMap::new();
         for item in &approved.items {
-            let service = service_of(&item.step_key);
-            if service.is_empty() {
+            let Some(unit) = progress_unit(item) else {
                 continue;
-            }
+            };
+            let service = unit.destination.name();
             if let Some((helper, date)) = context.get(&item.source_key) {
                 labels.insert(
                     (item.source_key.clone(), item.step_key.clone()),
-                    (
-                        service.clone(),
-                        format!(
-                            "{} {helper} {date} i {service}",
-                            verb_of(item.outcome)
-                        ),
-                    ),
+                    StepLabels {
+                        unit,
+                        started: format!("{} {helper} {date} i {service}", verb_of(item.outcome)),
+                        verified: format!("Verificeret: {helper} {date} i {service}"),
+                    },
                 );
             }
         }
-        apply_plan(ApplyRequest {config:account.planning.clone(),shifts,range_start:start,range_end:end,now,expected_digest:approved.digest},account.state_path.clone(),&mut destination, |item: &PlanItem|{
-            if let Ok(mut state) = progress.lock() {
-                let key = (item.source_key.clone(), item.step_key.clone());
-                match labels.get(&key) {
-                    Some((service, label)) => state.verified.push(VerifiedStep {
-                        service: service.clone(),
-                        label: label.clone(),
-                        source: item.source_key.clone(),
-                    }),
-                    None => state.verified.push(VerifiedStep {
-                        service: service_of(&item.step_key),
-                        label: String::new(),
-                        source: item.source_key.clone(),
-                    }),
-                }
-            }
-        }).await
-            .map_err(|e| match e {
-                teamup_shift_sync_core::TransferError::Approval(teamup_shift_sync_core::ApprovalError::PlanChanged) => "Ugen er ændret. Hent ændringerne igen, og gennemgå dem før overførsel.".to_owned(),
-                teamup_shift_sync_core::TransferError::State(teamup_shift_sync_core::StateError::ApplyInProgress) => "En anden overførsel bruger denne konto. Vent, og hent ugen igen.".to_owned(),
-                _ => "Overførslen kunne ikke afsluttes og verificeres. Nogle trin kan være gemt. Hent ugen igen, før du prøver at overføre mere.".to_owned(),
-            })?;
-        let steps = progress
+        let outcome = apply_plan_controlled(
+            ApplyRequest {
+                config: account.planning.clone(),
+                shifts,
+                range_start: start,
+                range_end: end,
+                now,
+                expected_digest: approved.digest,
+            },
+            account.state_path.clone(),
+            &mut destination,
+            |event| update_transfer_progress(&progress, &labels, event),
+            || stop.load(Ordering::SeqCst),
+        )
+        .await
+        .map_err(|error| {
+            let message = match error {
+                teamup_shift_sync_core::TransferError::Approval(
+                    teamup_shift_sync_core::ApprovalError::PlanChanged,
+                ) => "Ugen er ændret. Hent ændringerne igen, og gennemgå dem før overførsel."
+                    .to_owned(),
+                teamup_shift_sync_core::TransferError::State(
+                    teamup_shift_sync_core::StateError::ApplyInProgress,
+                ) => "En anden overførsel bruger denne konto. Vent, og hent ugen igen.".to_owned(),
+                _ => "Overførslen kunne ikke afsluttes og verificeres.".to_owned(),
+            };
+            apply_failure(message, &progress)
+        })?;
+        let (mithf, duos) = progress
             .lock()
-            .map(|state| state.verified.clone())
+            .map(|state| {
+                (
+                    state.verified_in(Destination::Mithf),
+                    state.verified_in(Destination::Duos),
+                )
+            })
             .unwrap_or_default();
+        let (stopped, verified_label) = match outcome {
+            ApplyOutcome::Completed { verified_at, .. } => (
+                false,
+                Some(format_verified_da(verified_at, account.planning.timezone)),
+            ),
+            ApplyOutcome::Stopped { .. } => (true, None),
+        };
         Ok(ApplyDone {
-            mithf: counted(&steps, "MitHF"),
-            duos: counted(&steps, "DUOS"),
-            verified_label: format_verified_da(Utc::now().fixed_offset()),
+            mithf,
+            duos,
+            verified_label,
+            stopped,
         })
+    }
+}
+
+fn update_transfer_progress(
+    progress: &Arc<StdMutex<TransferProgress>>,
+    labels: &BTreeMap<(String, String), StepLabels>,
+    event: TransferEvent,
+) {
+    enum Phase {
+        Started,
+        Uncertain,
+        Verified,
+    }
+    let (phase, operation) = match event {
+        TransferEvent::Started(operation) => (Phase::Started, operation),
+        TransferEvent::Uncertain(operation) => (Phase::Uncertain, operation),
+        TransferEvent::Verified(operation) => (Phase::Verified, operation),
+    };
+    let Some(unit) = operation_unit(&operation) else {
+        return;
+    };
+    let key = (operation.source_key, operation.step_key);
+    let Some(labels) = labels.get(&key) else {
+        return;
+    };
+    if let Ok(mut state) = progress.lock() {
+        match phase {
+            Phase::Started => state.current = labels.started.clone(),
+            Phase::Uncertain => {
+                state.uncertain.insert(unit);
+            }
+            Phase::Verified => {
+                state.uncertain.remove(&unit);
+                state.current = labels.verified.clone();
+                state.verified.push(VerifiedStep {
+                    unit: labels.unit.clone(),
+                });
+            }
+        }
+    }
+}
+
+fn apply_failure(message: String, progress: &Arc<StdMutex<TransferProgress>>) -> ApplyFailure {
+    let (verified, uncertain, total) = progress
+        .lock()
+        .map(|state| {
+            (
+                state.verified_units(),
+                state.uncertain.len(),
+                state.expected.len(),
+            )
+        })
+        .unwrap_or_default();
+    ApplyFailure {
+        message,
+        verified,
+        uncertain,
+        remaining: total.saturating_sub(verified + uncertain),
     }
 }
 
@@ -529,7 +716,7 @@ struct Preview {
 enum Message {
     Reload,
     Loaded(Result<Loaded>),
-    VerifiedLoaded(Option<String>),
+    VerifiedLoaded(PathBuf, Option<String>),
     Setup(setup::Message),
     SetupUpdated(Result<setup::SetupState>),
     Navigate(i64),
@@ -542,11 +729,11 @@ enum Message {
     Captured(Result<PathBuf>),
     Preview,
     PreviewLoaded(Result<Box<Preview>>),
-    Forget,
-    Forgotten(Result<usize>),
     Apply,
+    StopApply,
     ApplyTick,
-    Applied(Result<ApplyDone>),
+    Applied(ApplyResult),
+    CloseRequested(iced::window::Id),
 }
 // Events may carry account configuration or private shift data.
 impl std::fmt::Debug for Message {
@@ -561,7 +748,6 @@ enum Activity {
     Login,
     Capture,
     Preview,
-    Forget,
     Apply,
 }
 
@@ -576,6 +762,7 @@ struct NativeApp {
     error: Option<String>,
     last_verified: Option<String>,
     apply_progress: Option<Arc<StdMutex<TransferProgress>>>,
+    apply_stop: Option<Arc<AtomicBool>>,
     apply_total: usize,
     apply_verified: usize,
     apply_write_total: usize,
@@ -583,6 +770,9 @@ struct NativeApp {
     apply_bar: f32,
     apply_current: String,
     apply_summary: String,
+    apply_stopping: bool,
+    needs_recheck: bool,
+    close_after_apply: Option<iced::window::Id>,
 }
 impl NativeApp {
     fn new() -> (Self, Task<Message>) {
@@ -597,6 +787,7 @@ impl NativeApp {
             error: None,
             last_verified: None,
             apply_progress: None,
+            apply_stop: None,
             apply_total: 0,
             apply_verified: 0,
             apply_write_total: 0,
@@ -604,6 +795,9 @@ impl NativeApp {
             apply_bar: 0.0,
             apply_current: String::new(),
             apply_summary: String::new(),
+            apply_stopping: false,
+            needs_recheck: false,
+            close_after_apply: None,
         };
         let task = app.update(Message::Reload);
         (app, task)
@@ -622,13 +816,12 @@ impl NativeApp {
         let completion = matches!(
             message,
             Message::Loaded(_)
-                | Message::VerifiedLoaded(_)
+                | Message::VerifiedLoaded(..)
                 | Message::SetupUpdated(_)
                 | Message::LoginOpened(_)
                 | Message::LoginChecked(_)
                 | Message::Captured(_)
                 | Message::PreviewLoaded(_)
-                | Message::Forgotten(_)
                 | Message::Applied(_)
         );
         // Progress ticks only run during a transfer. They never start work.
@@ -637,6 +830,26 @@ impl NativeApp {
                 self.refresh_progress();
             }
             return Task::none();
+        }
+        if matches!(message, Message::StopApply) {
+            if self.activity == Activity::Apply {
+                if let Some(stop) = &self.apply_stop {
+                    stop.store(true, Ordering::SeqCst);
+                    self.apply_stopping = true;
+                }
+            }
+            return Task::none();
+        }
+        if let Message::CloseRequested(id) = message {
+            if self.activity == Activity::Apply {
+                if let Some(stop) = &self.apply_stop {
+                    stop.store(true, Ordering::SeqCst);
+                    self.apply_stopping = true;
+                    self.close_after_apply = Some(id);
+                    return Task::none();
+                }
+            }
+            return iced::window::close(id);
         }
         if self.activity != Activity::Idle && !completion {
             return Task::none();
@@ -649,6 +862,7 @@ impl NativeApp {
                 self.error = None;
                 self.last_verified = None;
                 self.apply_progress = None;
+                self.apply_stop = None;
                 self.apply_total = 0;
                 self.apply_verified = 0;
                 self.apply_write_total = 0;
@@ -656,6 +870,9 @@ impl NativeApp {
                 self.apply_bar = 0.0;
                 self.apply_current.clear();
                 self.apply_summary.clear();
+                self.apply_stopping = false;
+                self.needs_recheck = false;
+                self.close_after_apply = None;
                 self.activity = Activity::Setup;
                 let engine = self.engine.clone();
                 return Task::perform(async move { engine.load().await }, Message::Loaded);
@@ -675,17 +892,23 @@ impl NativeApp {
                         if let Some(account) = loaded.account {
                             let engine = self.engine.clone();
                             let path = account.state_path.clone();
+                            let lookup_path = path.clone();
+                            let zone = account.planning.timezone;
                             return Task::perform(
-                                async move { engine.last_verified(path).await },
-                                Message::VerifiedLoaded,
+                                async move { (lookup_path, engine.last_verified(path, zone).await) },
+                                |(path, label)| Message::VerifiedLoaded(path, label),
                             );
                         }
                     }
                     Err(error) => self.error = Some(error),
                 }
             }
-            Message::VerifiedLoaded(label) => {
-                if self.account.is_some() {
+            Message::VerifiedLoaded(path, label) => {
+                if self
+                    .account
+                    .as_ref()
+                    .is_some_and(|account| account.state_path == path)
+                {
                     self.last_verified = label;
                 }
             }
@@ -841,50 +1064,6 @@ impl NativeApp {
                     Err(e) => self.error = Some(e),
                 }
             }
-            Message::Forget => {
-                let (state_path, sources) = match self.preview.as_ref() {
-                    Some(preview) => {
-                        let sources: BTreeSet<String> = preview
-                            .items
-                            .iter()
-                            .filter(|item| item.reason == "destination_missing")
-                            .map(|item| item.source_key.clone())
-                            .collect();
-                        (preview.state_path.clone(), sources)
-                    }
-                    None => return Task::none(),
-                };
-                if sources.is_empty() {
-                    return Task::none();
-                }
-                self.preview = None;
-                self.error = None;
-                self.notice.clear();
-                self.activity = Activity::Forget;
-                let engine = self.engine.clone();
-                let sources: Vec<String> = sources.into_iter().collect();
-                return Task::perform(
-                    async move { engine.forget_sources(state_path, sources).await },
-                    Message::Forgotten,
-                );
-            }
-            Message::Forgotten(result) => {
-                if self.activity != Activity::Forget {
-                    return Task::none();
-                }
-                self.activity = Activity::Idle;
-                // A fresh preview re-reads destinations, so anything recreated
-                // elsewhere reconciles before another approval can happen.
-                self.preview = None;
-                match result {
-                    Ok(count) => {
-                        self.notice = format!(
-                            "Tillader overførsel igen for {count} gemte trin. Hent ugen igen, og gennemgå den før overførsel."
-                        )
-                    }
-                    Err(error) => self.error = Some(error),
-                }
-            }
             Message::Apply => {
                 let Some(preview) = self
                     .preview
@@ -904,16 +1083,22 @@ impl NativeApp {
                 self.apply_current.clear();
                 let progress = Arc::new(StdMutex::new(TransferProgress {
                     expected,
+                    current: String::new(),
+                    uncertain: BTreeSet::new(),
                     verified: Vec::new(),
                 }));
+                let stop = Arc::new(AtomicBool::new(false));
                 self.apply_progress = Some(progress.clone());
+                self.apply_stop = Some(stop.clone());
                 self.preview = None;
                 self.error = None;
                 self.notice.clear();
+                self.needs_recheck = false;
+                self.apply_stopping = false;
                 self.activity = Activity::Apply;
                 let engine = self.engine.clone();
                 return Task::perform(
-                    async move { engine.apply(preview, progress).await },
+                    async move { engine.apply(preview, progress, stop).await },
                     Message::Applied,
                 );
             }
@@ -923,19 +1108,36 @@ impl NativeApp {
                 }
                 self.activity = Activity::Idle;
                 self.apply_progress = None;
+                self.apply_stop = None;
                 // Consume approval on success and failure. A retry requires a
                 // fresh preview, which can reconcile uncertain persisted steps.
                 self.preview = None;
                 match result {
                     Ok(done) => {
                         self.apply_verified = done.mithf + done.duos;
-                        self.last_verified = Some(done.verified_label.clone());
-                        self.notice = completion_summary(&done);
+                        if done.stopped {
+                            self.needs_recheck = true;
+                            self.notice = format!(
+                                "Overførslen blev stoppet sikkert. {} af {} ændringer er verificeret. Kontrollér igen, før du overfører resten.",
+                                self.apply_verified, self.apply_total
+                            );
+                        } else {
+                            self.last_verified = done.verified_label.clone();
+                            self.notice = completion_summary(&done);
+                        }
                     }
-                    Err(error) => self.error = Some(error),
+                    Err(failure) => {
+                        self.needs_recheck = true;
+                        self.notice = failure_summary(&failure);
+                        self.error = Some(failure.message);
+                    }
+                }
+                self.apply_stopping = false;
+                if let Some(id) = self.close_after_apply.take() {
+                    return iced::window::close(id);
                 }
             }
-            Message::ApplyTick => {}
+            Message::StopApply | Message::ApplyTick | Message::CloseRequested(_) => {}
         }
         Task::none()
     }
@@ -943,6 +1145,7 @@ impl NativeApp {
         self.preview = None;
         self.error = None;
         self.notice.clear();
+        self.needs_recheck = false;
     }
     fn refresh_progress(&mut self) {
         let Some(shared) = self.apply_progress.clone() else {
@@ -957,44 +1160,27 @@ impl NativeApp {
         let target = self.apply_write_verified as f32;
         if target > self.apply_bar {
             let step = (target - self.apply_bar) * 0.3;
-            self.apply_bar = if step < 0.02 { target } else { self.apply_bar + step };
+            self.apply_bar = if step < 0.02 {
+                target
+            } else {
+                self.apply_bar + step
+            };
         } else {
             self.apply_bar = target;
         }
-        self.apply_verified = state
-            .expected
-            .iter()
-            .filter(|(source, total)| {
-                state
-                    .verified
-                    .iter()
-                    .filter(|step| &step.source == *source)
-                    .count()
-                    >= **total
-            })
-            .count();
-        self.apply_current = state
-            .verified
-            .last()
-            .map(|step| {
-                if step.label.is_empty() {
-                    if step.service.is_empty() {
-                        "Verificeret".into()
-                    } else {
-                        format!("Verificeret i {}", step.service)
-                    }
-                } else {
-                    step.label.clone()
-                }
-            })
-            .unwrap_or_default();
+        self.apply_verified = state.verified_units();
+        self.apply_current = state.current.clone();
     }
     fn subscription(&self) -> Subscription<Message> {
-        if self.activity == Activity::Apply {
+        let ticks = if self.activity == Activity::Apply {
             iced::time::every(std::time::Duration::from_millis(50)).map(|_| Message::ApplyTick)
         } else {
             Subscription::none()
-        }
+        };
+        Subscription::batch([
+            ticks,
+            iced::window::close_requests().map(Message::CloseRequested),
+        ])
     }
     fn action<'a>(&self, label: &'a str, message: Message) -> iced::widget::Button<'a, Message> {
         button(text(label))
@@ -1029,7 +1215,7 @@ impl NativeApp {
         } else {
             content = content
                 .push(
-                        text(super::widgets::format_week_da(
+                    text(super::widgets::format_week_da(
                         self.monday,
                         self.monday + Duration::days(6),
                     ))
@@ -1090,21 +1276,6 @@ impl NativeApp {
                 for line in &week.summary {
                     content = content.push(text(line));
                 }
-                let missing: BTreeSet<&str> = preview
-                    .items
-                    .iter()
-                    .filter(|item| item.reason == "destination_missing")
-                    .map(|item| item.source_key.as_str())
-                    .collect();
-                if !missing.is_empty() {
-                    content = content.push(text(
-                        "Nogle tidligere overførte vagter mangler i destinationen. Appen genskaber dem ikke af sig selv.",
-                    ));
-                    content = content.push(text(
-                        "Tillad overførsel igen glemmer kun den lokale historik. Intet slettes i destinationerne.",
-                    ));
-                    content = content.push(self.action("Tillad overførsel igen", Message::Forget));
-                }
                 if week.can_apply {
                     content = content
                         .push(text(&week.apply_summary))
@@ -1115,7 +1286,11 @@ impl NativeApp {
                         .push(button("Overfør ændringer").padding(12));
                 }
             }
-            content = content.push(self.action("Se ændringer", Message::Preview));
+            content = if self.needs_recheck {
+                content.push(self.action("Kontrollér igen", Message::Preview))
+            } else {
+                content.push(self.action("Se ændringer", Message::Preview))
+            };
         }
         if self.activity == Activity::Apply {
             if !self.apply_summary.is_empty() {
@@ -1137,8 +1312,19 @@ impl NativeApp {
                 content = content.push(text(format!("{}.", self.apply_current)));
             }
             content = content.push(text(
-                "Lad appen være åben, til alt er verificeret. Det, der allerede er verificeret, gemmes.",
+                "Hvis du stopper eller lukker, afslutter appen den igangværende ændring og kontrollerer den, før den standser.",
             ));
+            if self.apply_stopping {
+                content = content.push(text(
+                    "Stopper sikkert efter den igangværende ændring er kontrolleret …",
+                ));
+            } else {
+                content = content.push(
+                    button("Stop efter denne ændring")
+                        .padding(12)
+                        .on_press(Message::StopApply),
+                );
+            }
         } else {
             let busy = match self.activity {
                 Activity::Idle => "",
@@ -1146,7 +1332,6 @@ impl NativeApp {
                 Activity::Login => "Kontakter browseren …",
                 Activity::Capture => "Læser tjenesternes svar …",
                 Activity::Preview => "Henter ugens ændringer …",
-                Activity::Forget => "Glemmer lokal historik …",
                 Activity::Apply => "",
             };
             if !busy.is_empty() {
@@ -1168,6 +1353,7 @@ pub fn run() -> iced::Result {
     }
     iced::application(NativeApp::new, NativeApp::update, NativeApp::view)
         .subscription(NativeApp::subscription)
+        .exit_on_close_request(false)
         .title("Vagtplanlægning")
         .run()
 }
@@ -1244,6 +1430,7 @@ mod tests {
             error: None,
             last_verified: None,
             apply_progress: None,
+            apply_stop: None,
             apply_total: 0,
             apply_verified: 0,
             apply_write_total: 0,
@@ -1251,6 +1438,9 @@ mod tests {
             apply_bar: 0.0,
             apply_current: String::new(),
             apply_summary: String::new(),
+            apply_stopping: false,
+            needs_recheck: false,
+            close_after_apply: None,
         }
     }
     fn write_item(source: &str, step: &str) -> PlanItem {
@@ -1285,7 +1475,8 @@ mod tests {
         ApplyDone {
             mithf: 1,
             duos: 1,
-            verified_label: "20. sep kl. 20.00".into(),
+            verified_label: Some("20. sep kl. 20.00".into()),
+            stopped: false,
         }
     }
     #[test]
@@ -1309,14 +1500,44 @@ mod tests {
         }
         assert_eq!(app.monday, monday);
         assert_eq!(app.activity, Activity::Apply);
-        let _ = app.update(Message::Applied(Err("Uncertain write".into())));
+        let _ = app.update(Message::Applied(Err(ApplyFailure {
+            message: "Uafklaret ændring".into(),
+            verified: 0,
+            uncertain: 1,
+            remaining: 0,
+        })));
         assert_eq!(app.activity, Activity::Idle);
         assert!(app.preview.is_none());
         assert!(app.error.is_some());
+        assert!(app.notice.contains("1 uafklaret"));
+        assert!(app.needs_recheck);
         let _ = app.update(Message::Apply);
         assert_eq!(app.activity, Activity::Idle);
         // Widget construction exercises the recoverable failure screen.
         let _ = app.view();
+    }
+    #[test]
+    fn stop_request_waits_for_a_safe_boundary_and_requires_recheck() {
+        let mut app = app();
+        app.preview = Some(preview(&app, true));
+        let _ = app.update(Message::Apply);
+        let stop = app.apply_stop.clone().expect("stop token");
+
+        let _ = app.update(Message::StopApply);
+
+        assert!(stop.load(Ordering::SeqCst));
+        assert!(app.apply_stopping);
+        let _ = app.view();
+        let _ = app.update(Message::Applied(Ok(ApplyDone {
+            mithf: 1,
+            duos: 0,
+            verified_label: None,
+            stopped: true,
+        })));
+        assert_eq!(app.activity, Activity::Idle);
+        assert!(app.needs_recheck);
+        assert!(app.notice.contains("stoppet sikkert"));
+        assert!(app.last_verified.is_none());
     }
     #[test]
     fn blocked_and_wrong_week_previews_cannot_start_apply() {
@@ -1334,45 +1555,18 @@ mod tests {
         assert!(app.preview.is_none());
     }
     #[test]
-    fn forget_without_deleted_sources_does_nothing() {
-        let mut pending = app();
-        pending.preview = Some(preview(&pending, true));
-        let _ = pending.update(Message::Forget);
-        assert_eq!(pending.activity, Activity::Idle);
-        assert!(pending.preview.is_some());
-        let mut fresh = app();
-        let _ = fresh.update(Message::Forgotten(Ok(1)));
-        assert!(fresh.notice.is_empty());
-    }
-    fn missing_preview(app: &NativeApp) -> Preview {
-        let mut preview = preview(app, false);
-        preview.items.push(PlanItem {
-            source_key: "cal:ev:oc".into(),
-            system: teamup_shift_sync_core::PlanSystem::Mithf,
-            step_key: "mithf.create_shift".into(),
-            outcome: Outcome::Conflicted,
-            summary: String::new(),
-            payload: Default::default(),
-            destination_id: Some("gone".into()),
-            reason: "destination_missing".into(),
-        });
-        preview
-    }
-    #[test]
-    fn retransfer_forgets_only_deleted_sources_and_needs_a_fresh_preview() {
-        let mut app = app();
-        app.preview = Some(missing_preview(&app));
-        let _ = app.view();
-        let _ = app.update(Message::Forget);
-        assert_eq!(app.activity, Activity::Forget);
-        assert!(app.preview.is_none());
-        let _ = app.update(Message::Applied(Ok(done())));
-        assert_eq!(app.activity, Activity::Forget);
-        let _ = app.update(Message::Forgotten(Ok(2)));
-        assert_eq!(app.activity, Activity::Idle);
-        assert!(app.preview.is_none());
-        assert!(app.notice.contains("Hent ugen igen"));
-        let _ = app.view();
+    fn live_duos_writes_stay_blocked_until_save_semantics_are_verified() {
+        let mut week = Week {
+            can_apply: true,
+            ..Week::default()
+        };
+        let mut item = write_item("s", "duos.interval:0");
+        item.system = PlanSystem::Duos;
+
+        block_unvalidated_duos(&mut week, &[item]);
+
+        assert!(!week.can_apply);
+        assert!(week.blocked_reason.contains("verificeres først"));
     }
     #[test]
     fn late_results_cannot_restore_consumed_approval() {
@@ -1396,11 +1590,16 @@ mod tests {
         let _ = app.update(Message::Apply);
         assert_eq!(app.activity, Activity::Apply);
         let shared = app.apply_progress.clone().expect("progress state");
-        shared.lock().unwrap().verified.push(VerifiedStep {
-            service: "MitHF".into(),
-            label: "Tilføjer Anna Hansen 28. sep i MitHF".into(),
+        let unit = ProgressUnit {
+            destination: Destination::Mithf,
             source: "s".into(),
-        });
+            unit: "0".into(),
+        };
+        {
+            let mut progress = shared.lock().unwrap();
+            progress.current = "Verificeret: Anna Hansen 28. sep i MitHF".into();
+            progress.verified.push(VerifiedStep { unit: unit.clone() });
+        }
         let _ = app.update(Message::ApplyTick);
         // One of two writes is verified, so no shift is done yet.
         assert_eq!(app.apply_verified, 0);
@@ -1409,13 +1608,12 @@ mod tests {
         // The bar glides toward the target instead of jumping to it.
         assert!(app.apply_bar > 0.0 && app.apply_bar < 1.0);
         let gliding = app.apply_bar;
-        assert_eq!(app.apply_current, "Tilføjer Anna Hansen 28. sep i MitHF");
+        assert_eq!(
+            app.apply_current,
+            "Verificeret: Anna Hansen 28. sep i MitHF"
+        );
         let _ = app.view();
-        shared.lock().unwrap().verified.push(VerifiedStep {
-            service: "MitHF".into(),
-            label: "Tilføjer Anna Hansen 28. sep i MitHF".into(),
-            source: "s".into(),
-        });
+        shared.lock().unwrap().verified.push(VerifiedStep { unit });
         let _ = app.update(Message::ApplyTick);
         assert_eq!(app.apply_verified, 1);
         assert_eq!(app.apply_write_verified, 2);
@@ -1429,27 +1627,21 @@ mod tests {
     }
     #[test]
     fn step_labels_stay_plain_and_count_by_destination() {
-        assert_eq!(service_of("mithf.create_shift"), "MitHF");
-        assert_eq!(service_of("duos.interval:3"), "DUOS");
+        assert_eq!(Destination::Mithf.name(), "MitHF");
+        assert_eq!(Destination::Duos.name(), "DUOS");
         assert_eq!(verb_of(Outcome::WouldCreate), "Tilføjer");
         assert_eq!(verb_of(Outcome::WouldUpdate), "Opdaterer");
         assert_eq!(short_date_da(28, 8), "28. sep");
-        let steps = vec![
-            VerifiedStep {
-                service: "MitHF".into(),
-                label: "Tilføjer Anna 28. sep i MitHF".into(),
-                source: "s".into(),
-            },
-            VerifiedStep {
-                service: "DUOS".into(),
-                label: "Tilføjer Anna 28. sep i DUOS".into(),
-                source: "s".into(),
-            },
-        ];
-        assert_eq!(counted(&steps, "MitHF"), 1);
-        assert_eq!(counted(&steps, "DUOS"), 1);
-        assert_eq!(progress_line(1, 2), "1 af 2 vagter overført.");
+        assert_eq!(progress_line(1, 2), "1 af 2 ændringer overført.");
         assert!(completion_summary(&done()).contains("Sidst verificeret 20. sep kl. 20.00."));
+    }
+    #[test]
+    fn verification_time_uses_the_configured_timezone() {
+        let utc = DateTime::parse_from_rfc3339("2026-09-20T18:00:00+00:00").unwrap();
+        assert_eq!(
+            format_verified_da(utc, chrono_tz::Europe::Copenhagen),
+            "20. sep kl. 20.00"
+        );
     }
     #[test]
     fn setup_reload_revokes_preview_and_messages_redact_private_data() {

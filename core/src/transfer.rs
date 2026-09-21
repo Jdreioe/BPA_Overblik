@@ -11,7 +11,7 @@ use chrono::{DateTime, FixedOffset, Utc};
 
 use crate::{
     build_plan, payload_digest, reconciliation_range, ApplyGuard, ApprovalError, ApprovedPlan,
-    DestinationSnapshot, Outcome, PlanItem, PlanRequest, PlanningConfig, PlanningError,
+    DestinationSnapshot, Outcome, PlanItem, PlanRequest, PlanSystem, PlanningConfig, PlanningError,
     SourceShift, StateError, StepAction, StepRecord, SyncPlan, SyncState,
 };
 
@@ -45,6 +45,33 @@ pub struct ApplyRequest {
     pub expected_digest: String,
 }
 
+/// Public progress data contains only stable identifiers needed by callers.
+/// Payloads and source text stay inside the transfer runner.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransferOperation {
+    pub source_key: String,
+    pub step_key: String,
+    pub system: PlanSystem,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TransferEvent {
+    Started(TransferOperation),
+    Uncertain(TransferOperation),
+    Verified(TransferOperation),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ApplyOutcome {
+    Completed {
+        plan: SyncPlan,
+        verified_at: DateTime<FixedOffset>,
+    },
+    Stopped {
+        plan: SyncPlan,
+    },
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum TransferError {
     #[error(transparent)]
@@ -72,15 +99,29 @@ type SharedState = Arc<Mutex<LockedState>>;
 /// Requires a Tokio runtime. Owns the account-state connection and apply lock.
 /// Dropping this future releases the lock and leaves any committed uncertain
 /// marker intact. Adapters must not spawn detached writes after cancellation.
-/// Progress receives each verified item after its read-back. Keep the
-/// callback fast; it runs on the async executor. Do not log the item.
-/// The progress callback must return promptly; it runs on the async executor.
+/// Progress receives structured start and verification events without payloads.
+/// The callback must return promptly; it runs on the async executor.
 pub async fn apply_plan(
     request: ApplyRequest,
     state_path: PathBuf,
     destinations: &mut (impl Destinations + Send),
-    mut progress: impl FnMut(&PlanItem) + Send,
+    progress: impl FnMut(TransferEvent) + Send,
 ) -> Result<SyncPlan, TransferError> {
+    match apply_plan_controlled(request, state_path, destinations, progress, || false).await? {
+        ApplyOutcome::Completed { plan, .. } => Ok(plan),
+        ApplyOutcome::Stopped { .. } => unreachable!("an uncontrolled apply cannot stop"),
+    }
+}
+
+/// Run an approved transfer and honor stop requests between operations.
+/// A request that arrives during a write takes effect after its read-back.
+pub async fn apply_plan_controlled(
+    request: ApplyRequest,
+    state_path: PathBuf,
+    destinations: &mut (impl Destinations + Send),
+    mut progress: impl FnMut(TransferEvent) + Send,
+    should_stop: impl Fn() -> bool + Send + Sync,
+) -> Result<ApplyOutcome, TransferError> {
     let state = tokio::task::spawn_blocking(move || -> Result<_, StateError> {
         let state = SyncState::open(state_path)?;
         let guard = state.exclusive_apply()?;
@@ -101,6 +142,11 @@ pub async fn apply_plan(
         .map_err(destination_error)?;
     let initial = plan(&state, &request, snapshot).await?;
     let approved = ApprovedPlan::validate(&initial, &request.expected_digest)?;
+    if should_stop() {
+        return Ok(ApplyOutcome::Stopped {
+            plan: initial.clone(),
+        });
+    }
 
     for (index, original) in approved.plan().items.iter().enumerate() {
         if original.outcome == Outcome::Excluded {
@@ -115,13 +161,25 @@ pub async fn apply_plan(
             StepAction::Skip => continue,
             StepAction::AlreadyMatched(item) => {
                 record(&state, item, "verified", item.destination_id.clone()).await?;
+                if matches!(
+                    original.outcome,
+                    Outcome::WouldCreate | Outcome::WouldUpdate
+                ) {
+                    progress(TransferEvent::Verified(operation(item)));
+                }
                 continue;
             }
             StepAction::Write(item) => item,
         };
+        if should_stop() {
+            return Ok(ApplyOutcome::Stopped { plan: current });
+        }
+        let operation = operation(item);
+        progress(TransferEvent::Started(operation.clone()));
         // Commit before submission, so timeout, cancellation or process death
         // cannot make an ambiguous request look safe to repeat.
         record(&state, item, "uncertain", item.destination_id.clone()).await?;
+        progress(TransferEvent::Uncertain(operation.clone()));
         let id = destinations
             .write(item, &snapshot)
             .await
@@ -169,7 +227,7 @@ pub async fn apply_plan(
             verified.destination_id.clone(),
         )
         .await?;
-        progress(item);
+        progress(TransferEvent::Verified(operation));
     }
     let snapshot = destinations
         .read(read_start, read_end)
@@ -177,6 +235,7 @@ pub async fn apply_plan(
         .map_err(destination_error)?;
     let final_plan = plan(&state, &request, snapshot).await?;
     approved.check_final(&final_plan)?;
+    let verified_at = Utc::now().fixed_offset();
     let source_keys: std::collections::BTreeSet<_> = final_plan
         .items
         .iter()
@@ -186,13 +245,24 @@ pub async fn apply_plan(
     state_call(&state, move |state| {
         for shift in &request.shifts {
             if source_keys.contains(&shift.key()) {
-                state.record_source_snapshot(shift, Utc::now().fixed_offset())?;
+                state.record_source_snapshot(shift, verified_at)?;
             }
         }
         Ok(())
     })
     .await?;
-    Ok(final_plan)
+    Ok(ApplyOutcome::Completed {
+        plan: final_plan,
+        verified_at,
+    })
+}
+
+fn operation(item: &PlanItem) -> TransferOperation {
+    TransferOperation {
+        source_key: item.source_key.clone(),
+        step_key: item.step_key.clone(),
+        system: item.system,
+    }
 }
 
 fn destination_error(error: impl Error + Send + Sync + 'static) -> TransferError {

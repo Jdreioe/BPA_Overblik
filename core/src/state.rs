@@ -232,11 +232,11 @@ impl SyncState {
     /// Source snapshots are only recorded after the final read-back, so this
     /// is the last time a transfer was fully verified, not the last attempt.
     pub fn last_source_snapshot_at(&self) -> Result<Option<DateTime<FixedOffset>>, StateError> {
-        let latest: Option<String> = self
-            .connection
-            .query_row("SELECT max(last_seen_at) FROM source_occurrences", [], |row| {
-                row.get(0)
-            })?;
+        let latest: Option<String> = self.connection.query_row(
+            "SELECT max(last_seen_at) FROM source_occurrences",
+            [],
+            |row| row.get(0),
+        )?;
         latest
             .map(|value| {
                 DateTime::parse_from_rfc3339(&value).map_err(|_| {
