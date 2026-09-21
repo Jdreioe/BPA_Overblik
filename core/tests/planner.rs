@@ -32,7 +32,7 @@ struct StoredStep {
 }
 
 #[test]
-fn plans_match_python_safety_scenarios_and_representative_week() {
+fn plans_match_recorded_safety_scenarios_and_representative_week() {
     // Frozen at the Python removal cutover: the oracle compared 263 safety
     // combinations and the representative week, all passing.
     let cases: Vec<Case> =

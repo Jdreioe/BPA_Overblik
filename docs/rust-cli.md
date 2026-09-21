@@ -1,4 +1,4 @@
-# Native Rust CLI
+# Rust CLI
 
 Build from the repository root:
 
@@ -7,8 +7,7 @@ cargo build -p teamup-shift-sync-cli
 ```
 
 The binary is `target/debug/teamup-shift-sync-rust`, with `.exe` on Windows.
-It runs without Python. The temporary migration parity tests still need Python.
-The existing desktop and packaged application continue to use the Python worker.
+It runs without Python, as do the desktop app and all tests.
 
 ## Offline preview
 
@@ -33,8 +32,8 @@ does not record successful transfers or contact destinations.
 
 ## Live preview and apply
 
-Complete setup in the existing desktop app first. Use its data directory below.
-The Python worker uses `TEAMUP_SHIFT_SYNC_DATA_DIR` when set; otherwise it uses
+Complete setup in the desktop app first. Use its data directory below.
+The app uses `TEAMUP_SHIFT_SYNC_DATA_DIR` when set; otherwise it uses
 `$XDG_DATA_HOME/teamup-shift-sync` on Linux, falling back to
 `~/.local/share/teamup-shift-sync`, `~/Library/Application Support/teamup-shift-sync`
 on macOS, or `%APPDATA%/teamup-shift-sync` on Windows. It must contain `setup.json`;
@@ -69,7 +68,7 @@ committed as the recorded wire contract.
 Use it to check what the readers assume against what the services send. The
 native readers had no coverage of real service JSON, and two fields typed as
 JSON booleans in Rust (`valgbar`, `daekket`) are plain truthy values in the
-working Python implementation. A shape file makes that class of mismatch
+previous Python implementation. A shape file makes that class of mismatch
 visible instead of leaving it to fail on a live account.
 
 TeamUp is not captured: its reads tolerate missing and differently typed fields
@@ -108,7 +107,7 @@ cargo run -p teamup-shift-sync-cli -- forget \
 ```
 
 This clears only that source's stored steps and holds the same apply lock as
-Python. It never changes a destination. Review a new live preview afterwards.
+transfers. It never changes a destination. Review a new live preview afterwards.
 
 Exit codes: 0 means success, 1 means a blocked preview or nothing to forget,
 and 2 means invalid arguments or an operational error. Live CLI behavior has

@@ -49,7 +49,7 @@ fn snapshot_rows(path: &Path) -> Vec<Vec<String>> {
 }
 
 #[test]
-fn python_database_copy_preserves_recovery_and_snapshot_hashes_in_both_directions() {
+fn legacy_python_database_copy_preserves_recovery_and_snapshot_hashes() {
     // Database file written by the Python engine before its removal, frozen
     // at the cutover along with the shifts it stored.
     let directory = tempdir().unwrap();

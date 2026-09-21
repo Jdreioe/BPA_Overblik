@@ -5,7 +5,7 @@ Windows, macOS and Linux.
 
 Tracking issue: https://github.com/Jdreioe/teamup_sync/issues/1
 
-- [ ] [Build the Iced desktop shell and bundled Python worker](https://github.com/Jdreioe/teamup_sync/issues/2)
+- [ ] [Build the Iced desktop shell on the pure Rust core](https://github.com/Jdreioe/teamup_sync/issues/2)
 - [ ] [Manage browser login sessions without manual browser setup](https://github.com/Jdreioe/teamup_sync/issues/3)
 - [ ] [Add guided setup with calendar discovery and confirmed helper matches](https://github.com/Jdreioe/teamup_sync/issues/4)
 - [ ] [Show a readable weekly preview and bind approval to its exact changes](https://github.com/Jdreioe/teamup_sync/issues/5)
@@ -15,9 +15,9 @@ Tracking issue: https://github.com/Jdreioe/teamup_sync/issues/1
 
 ## Product decision
 
-Build a locally installed Rust/Iced desktop app around the existing Python sync engine.
+Build a locally installed Rust/Iced desktop app around a pure Rust sync core.
 The user installs it, connects their services once, and reviews a week before
-transferring it. No terminal, Python installation, configuration editing, browser
+transferring it. No terminal, runtime installation, configuration editing, browser
 debugging address, or employee-number lookup should be part of normal setup.
 Keep account data and synchronization records on the user's computer. Do not add
 a hosted service, another account, scheduled transfers, or a calendar editor.
@@ -97,20 +97,19 @@ writes remain and allow work to stop safely between operations.
 
 ## Implementation boundaries
 
-Reuse `planner.py`, `sync.py`, `state.py` and the destination adapters. Extract
-only the orchestration needed by both CLI and GUI; do not parse CLI output.
+Reuse the Rust core (`core/`) from both CLI and GUI; do not parse CLI output.
 Run network/browser work away from the UI thread and provide structured progress
 and errors. Keep the existing CLI usable.
 
-Use Iced as requested: https://iced.rs/. Keep business rules in Python for v1.
-Use one app-owned Python worker with a small versioned JSON request/event protocol
-over standard input/output. Bundle its runtime; no user Python installation.
-Keep protocol output separate from redacted diagnostics. Define typed Rust
-messages for preview, approval, progress and errors. Detect worker failure and
-reconcile before resuming. Do not introduce a local HTTP service or rewrite the
-sync engine in Rust as part of the GUI work.
+Use Iced as requested: https://iced.rs/. Keep business rules in the core, UI
+code outside it. The desktop and the CLI call the same core planning and
+transfer functions. The Python worker and its JSON protocol were removed in
+#15 once parity was established; do not reintroduce a second engine.
+Keep diagnostics separate from redacted user-facing messages. Define typed
+messages for preview, approval, progress and errors. Detect adapter failure and
+reconcile before resuming. Do not introduce a local HTTP service.
 
-The first delivery task proves Iced accessibility, worker packaging and browser
+The first delivery task proves Iced accessibility, binary packaging and browser
 lifecycle on Windows, macOS and Linux, including any platform limitations.
 Prove installation on a clean machine early. Bundle or manage the required
 runtime/browser without shell commands. Use an isolated app browser profile;

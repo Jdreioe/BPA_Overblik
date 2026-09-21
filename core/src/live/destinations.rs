@@ -402,7 +402,7 @@ mod tests {
     use super::*;
     use crate::PlanItem;
 
-    /// Same synthetic identities the Python oracle is primed with.
+    /// Same synthetic identities the recorded cases were primed with.
     fn identities() -> Identities {
         Identities {
             helpers: [("Anna Hansen", "va-1"), ("Bo Jensen", "va-2")]
@@ -432,7 +432,7 @@ mod tests {
     struct Submitted { system: String, action: String, payload: Value }
 
     #[test]
-    fn write_requests_match_python() {
+    fn write_requests_match_recorded_cases() {
         // Frozen at the Python removal cutover: 12 supported operations.
         let cases: Vec<Case> =
             serde_json::from_str(include_str!("../../tests/goldens/destinations.json"))

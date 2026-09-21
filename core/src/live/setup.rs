@@ -355,7 +355,7 @@ impl Setup {
 mod tests {
     use super::*;
 
-    /// Replay the Python oracle's scenarios against the Rust state machine.
+    /// Replay the recorded Python-era scenarios against the Rust state machine.
     ///
     /// Only the two catalog readers are stubbed, exactly as the oracle stubs
     /// them, so what is compared is the state machine: which choices survive a
@@ -412,7 +412,7 @@ mod tests {
         }
 
         #[test]
-        fn the_setup_state_machine_matches_python() {
+        fn the_setup_state_machine_matches_recorded_scenarios() {
             let recorded = oracle();
             for scenario in recorded["scenarios"].as_array().expect("scenarios") {
                 let directory = tempfile::tempdir().expect("temp dir");
@@ -423,7 +423,7 @@ mod tests {
         }
 
         #[test]
-        fn the_account_scope_matches_python() {
+        fn the_account_scope_matches_recorded_identity() {
             let recorded = oracle();
             let expected = &recorded["account_scope"];
             let identity = &expected["identity"];

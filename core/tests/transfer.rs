@@ -474,7 +474,7 @@ fn step_record(value: &Value) -> StepRecord {
 }
 
 #[test]
-fn complete_rust_runs_match_python_writes_destinations_and_recovery_records() {
+fn complete_rust_runs_match_recorded_writes_and_recovery_records() {
     // Frozen at the Python removal cutover: 10 recorded apply traces.
     let oracle: Oracle = serde_json::from_str(include_str!("goldens/approval.json")).unwrap();
     assert!(oracle.traces.len() >= 6);

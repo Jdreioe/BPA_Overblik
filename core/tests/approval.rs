@@ -199,7 +199,7 @@ struct Trace {
 }
 
 #[test]
-fn digests_and_validation_match_real_python_apply_runs() {
+fn digests_and_validation_match_recorded_apply_runs() {
     // Frozen at the Python removal cutover: 10 recorded apply traces.
     let oracle: Oracle = serde_json::from_str(include_str!("goldens/approval.json")).unwrap();
     assert_eq!(
@@ -230,7 +230,7 @@ fn digests_and_validation_match_real_python_apply_runs() {
             match approved.check_step(index, plans.next().unwrap()).unwrap() {
                 StepAction::AlreadyMatched(_) => {}
                 StepAction::Write(_) => {
-                    // These Python integration tests deliberately lose a write
+                    // The recorded integration traces deliberately lose a write
                     // response. No read-back exists; Rust must not verify it.
                     if let Some(read_back) = plans.next() {
                         approved.check_read_back(index, read_back).unwrap();

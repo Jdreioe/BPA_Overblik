@@ -17,7 +17,7 @@ struct Case {
 }
 
 #[test]
-fn native_week_matches_python_presentation_scenarios() {
+fn native_week_matches_recorded_presentation_scenarios() {
     // Frozen at the Python removal cutover: 16 presentation scenarios.
     let cases: Vec<Case> = serde_json::from_str(include_str!("goldens/preview.json")).unwrap();
     assert!(cases.len() >= 15);

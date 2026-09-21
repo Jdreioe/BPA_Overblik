@@ -34,7 +34,7 @@ fn preview(state: &Path, fixture: &Path, extra: &[&str]) -> Output {
 }
 
 #[test]
-fn representative_cli_preview_matches_python_and_preserves_state() {
+fn representative_cli_preview_matches_recorded_digest_and_preserves_state() {
     let dir = tempfile::tempdir().unwrap();
     let state_path = dir.path().join("state.sqlite3");
     let output = preview(

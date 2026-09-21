@@ -722,10 +722,8 @@ impl NativeApp {
 
 pub fn run() -> iced::Result {
     // Fixture mode must never accidentally turn into a live account workflow.
-    if std::env::var_os("TEAMUP_FIXTURE").is_some()
-        || std::env::args().any(|arg| arg == "--self-check")
-    {
-        eprintln!("--native uses saved live setup. Run fixture/self-check mode without --native.");
+    if std::env::var_os("TEAMUP_FIXTURE").is_some() {
+        eprintln!("The desktop app uses saved live setup. Run fixture previews with the CLI.");
         std::process::exit(2);
     }
     iced::application(NativeApp::new, NativeApp::update, NativeApp::view)
