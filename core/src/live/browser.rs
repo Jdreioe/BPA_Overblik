@@ -7,7 +7,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use super::{rows, text, LiveError, INVALID};
 
-const REQUEST: &str = include_str!("../../../src/teamup_shift_sync/browser_request.js");
+const REQUEST: &str = include_str!("browser_request.js");
 
 /// Opening `/vagtplan/index.php` directly shows MitHF's "Gå til BPA-universet"
 /// interstitial instead of the calendar: entry requires the site's own
