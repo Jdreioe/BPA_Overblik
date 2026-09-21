@@ -121,9 +121,9 @@ an installation or login problem.
 The README currently describes an older offline milestone, while the code has
 live destination reads and apply logic. Validate actual capabilities before
 enabling them in the GUI. Preserve blockers for multiple SPS intervals, ambiguous
-helper matches, incomplete reads and unsupported destination operations. Confirm
-DUOS save-versus-approval semantics and label the GUI accordingly; transferring
-records must not silently authorize an additional approval action.
+helper matches, incomplete reads and unsupported destination operations. A DUOS
+transfer saves the citizen's registration as pending. The helper accepts it
+separately, and the app must not expose that acceptance action.
 
 ## Delivery and acceptance
 

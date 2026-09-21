@@ -156,20 +156,6 @@ fn write_counts(items: &[PlanItem]) -> BTreeMap<ProgressUnit, usize> {
     counts
 }
 
-fn has_unvalidated_duos_writes(items: &[PlanItem]) -> bool {
-    items.iter().any(|item| {
-        item.system == PlanSystem::Duos
-            && matches!(item.outcome, Outcome::WouldCreate | Outcome::WouldUpdate)
-    })
-}
-
-fn block_unvalidated_duos(week: &mut Week, items: &[PlanItem]) {
-    if has_unvalidated_duos_writes(items) {
-        week.can_apply = false;
-        week.blocked_reason = "DUOS-overførsel er ikke aktiveret endnu. Gemme- og godkendelsesforløbet skal verificeres først.".into();
-    }
-}
-
 /// The verified result of one approved run.
 #[derive(Clone, Debug)]
 struct ApplyDone {
@@ -455,7 +441,7 @@ impl Engine {
                 &state,
             )
             .map_err(|_| "Ugens plan kunne ikke beregnes sikkert.".to_owned())?;
-            let mut week = build_week(
+            let week = build_week(
                 &account.planning,
                 &account.helper_names,
                 &account.helper_colors,
@@ -465,7 +451,6 @@ impl Engine {
                 true,
             )
             .map_err(str::to_owned)?;
-            block_unvalidated_duos(&mut week, &plan.items);
             let digest = plan_digest(&plan)
                 .map_err(|_| "Ugens godkendelse kunne ikke beregnes.".to_owned())?;
             Ok(Preview {
@@ -506,12 +491,6 @@ impl Engine {
         if account.state_path != approved.state_path {
             return Err(apply_failure(
                 "Opsætningen er ændret. Genindlæs opsætningen, og gennemgå ugen igen.".into(),
-                &progress,
-            ));
-        }
-        if has_unvalidated_duos_writes(&approved.items) {
-            return Err(apply_failure(
-                "DUOS-overførsel er ikke aktiveret endnu. Gemme- og godkendelsesforløbet skal verificeres først.".into(),
                 &progress,
             ));
         }
@@ -1517,6 +1496,22 @@ mod tests {
         let _ = app.view();
     }
     #[test]
+    fn approved_duos_registration_can_start_apply() {
+        let mut app = app();
+        let mut approved = preview(&app, true);
+        let mut registration = write_item("s", "duos.interval:0");
+        registration.system = PlanSystem::Duos;
+        approved.items = vec![registration];
+        approved.week.apply_summary = "Overfører 1 registrering til DUOS.".into();
+        app.preview = Some(approved);
+
+        let _ = app.update(Message::Apply);
+
+        assert_eq!(app.activity, Activity::Apply);
+        assert!(app.preview.is_none());
+        assert_eq!(app.apply_total, 1);
+    }
+    #[test]
     fn stop_request_waits_for_a_safe_boundary_and_requires_recheck() {
         let mut app = app();
         app.preview = Some(preview(&app, true));
@@ -1553,20 +1548,6 @@ mod tests {
         app.preview = Some(preview(&app, true));
         let _ = app.update(Message::Navigate(7));
         assert!(app.preview.is_none());
-    }
-    #[test]
-    fn live_duos_writes_stay_blocked_until_save_semantics_are_verified() {
-        let mut week = Week {
-            can_apply: true,
-            ..Week::default()
-        };
-        let mut item = write_item("s", "duos.interval:0");
-        item.system = PlanSystem::Duos;
-
-        block_unvalidated_duos(&mut week, &[item]);
-
-        assert!(!week.can_apply);
-        assert!(week.blocked_reason.contains("verificeres først"));
     }
     #[test]
     fn late_results_cannot_restore_consumed_approval() {
