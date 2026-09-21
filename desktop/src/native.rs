@@ -14,7 +14,7 @@ use teamup_shift_sync_core::{
     },
     plan_digest, reconciliation_range, ApplyRequest, PlanRequest, SyncState,
 };
-use teamup_shift_sync_gui::{preview::build_week, protocol::Week, worker::app_data_dir};
+use teamup_shift_sync_gui::{files::app_data_dir, preview::build_week, protocol::Week};
 use tokio::sync::{Mutex, MutexGuard};
 
 type Result<T> = std::result::Result<T, String>;
@@ -634,7 +634,7 @@ impl NativeApp {
         } else {
             content = content
                 .push(
-                    text(super::format_week_da(
+                        text(super::widgets::format_week_da(
                         self.monday,
                         self.monday + Duration::days(6),
                     ))
@@ -684,8 +684,8 @@ impl NativeApp {
                 }
                 if week.days.iter().any(|d| !d.blocks.is_empty()) {
                     content = content
-                        .push(super::week_grid(week))
-                        .push(super::day_details(week));
+                        .push(super::widgets::week_grid(week))
+                        .push(super::widgets::day_details(week));
                 }
                 for line in &week.summary {
                     content = content.push(text(line));

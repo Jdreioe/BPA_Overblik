@@ -1,13 +1,41 @@
-//! Fixture input for the native CLI. This path cannot construct a live writer.
-use crate::{Dates, Result};
-use chrono::{DateTime, FixedOffset};
+//! Fixture input for offline previews and bundle checks.
+//!
+//! This path reads the TOML fixture configuration and the JSON fixture week,
+//! then plans against a scratch SQLite file. It cannot construct a live
+//! writer: no credentials are read and no service is contacted.
+
+use std::{collections::BTreeMap, path::Path};
+
+use chrono::{DateTime, Datelike, Duration, FixedOffset, NaiveDate, TimeZone};
 use chrono_tz::Tz;
 use serde::Deserialize;
-use std::{collections::BTreeMap, path::PathBuf};
-use teamup_shift_sync_core::{
-    build_plan, DestinationSnapshot, HelperMapping, PlanRequest, PlanningConfig, SourceShift,
-    SyncPlan, SyncState,
+
+use crate::{
+    build_plan, DestinationSnapshot, HelperMapping, PlanRequest, PlanningConfig, PlanningError,
+    SourceShift, SyncPlan, SyncState,
 };
+
+#[derive(Debug, thiserror::Error)]
+pub enum FixtureError {
+    #[error("{0}")]
+    Message(String),
+    #[error(transparent)]
+    Planning(#[from] PlanningError),
+    #[error(transparent)]
+    State(#[from] crate::StateError),
+}
+
+impl From<String> for FixtureError {
+    fn from(message: String) -> Self {
+        Self::Message(message)
+    }
+}
+
+impl From<&str> for FixtureError {
+    fn from(message: &str) -> Self {
+        Self::Message(message.to_owned())
+    }
+}
 
 #[derive(Deserialize)]
 struct Config {
@@ -40,17 +68,21 @@ fn one() -> i64 {
 struct Fixture {
     // Require all three lists: a missing destination list is not proof of emptiness.
     source_shifts: Vec<SourceShift>,
-    mithf_shifts: Vec<teamup_shift_sync_core::MitHfShift>,
-    duos_registrations: Vec<teamup_shift_sync_core::DuosRegistration>,
+    mithf_shifts: Vec<crate::MitHfShift>,
+    duos_registrations: Vec<crate::DuosRegistration>,
 }
 
-pub(crate) fn preview(
-    config_path: PathBuf,
-    fixture_path: PathBuf,
-    state_path: PathBuf,
-    dates: Dates,
+/// Plan the fixture week. `from`/`to` default to the current local week.
+/// The state file is created when needed but never gains transfer records.
+#[allow(clippy::too_many_arguments)]
+pub fn preview(
+    config_path: &Path,
+    fixture_path: &Path,
+    state_path: &Path,
+    from: Option<NaiveDate>,
+    to: Option<NaiveDate>,
     now: DateTime<FixedOffset>,
-) -> Result<SyncPlan> {
+) -> Result<SyncPlan, FixtureError> {
     let config: Config = toml::from_str(
         &std::fs::read_to_string(config_path)
             .map_err(|_| "Could not read fixture configuration")?,
@@ -87,7 +119,7 @@ pub(crate) fn preview(
         duos_registration_type: config.duos.registration_type,
         helpers,
     };
-    let range = dates.resolve(config.timezone, now)?;
+    let (range_start, range_end) = resolve_range(config.timezone, from, to, now)?;
     let fixture: Fixture = serde_json::from_str(
         &std::fs::read_to_string(fixture_path).map_err(|_| "Could not read fixture")?,
     )
@@ -120,11 +152,51 @@ pub(crate) fn preview(
                 mithf_shifts: fixture.mithf_shifts,
                 duos_registrations: fixture.duos_registrations,
             },
-            range_start: range.start,
-            range_end: range.end,
+            range_start,
+            range_end,
             now,
             live: false,
         },
         &state,
     )?)
+}
+
+fn resolve_range(
+    zone: Tz,
+    from: Option<NaiveDate>,
+    to: Option<NaiveDate>,
+    now: DateTime<FixedOffset>,
+) -> Result<(DateTime<FixedOffset>, DateTime<FixedOffset>), FixtureError> {
+    let today = now.with_timezone(&zone).date_naive();
+    let from = from
+        .or_else(|| {
+            today.checked_sub_signed(Duration::days(
+                today.weekday().num_days_from_monday().into(),
+            ))
+        })
+        .ok_or("Start date is outside the supported range")?;
+    let to = to
+        .or_else(|| from.checked_add_signed(Duration::days(6)))
+        .ok_or("End date is outside the supported range")?;
+    if to < from {
+        return Err("--to must be on or after --from".into());
+    }
+    let midnight = |date: NaiveDate| -> Result<DateTime<FixedOffset>, FixtureError> {
+        zone.from_local_datetime(&date.and_hms_opt(0, 0, 0).ok_or("Invalid date")?)
+            .single()
+            .map(|v| v.fixed_offset())
+            .ok_or_else(|| "Range boundary is an ambiguous or nonexistent local time".into())
+    };
+    let start = midnight(from)?;
+    let end = midnight(
+        to.succ_opt()
+            .ok_or("End date is outside the supported range")?,
+    )?;
+    Ok((start, end))
+}
+
+/// Fixed evaluation time the bundle check and golden tests share, so the
+/// representative digest is stable.
+pub fn golden_now() -> DateTime<FixedOffset> {
+    DateTime::parse_from_rfc3339("2026-09-20T20:00:00+02:00").expect("fixed golden time")
 }

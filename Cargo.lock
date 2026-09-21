@@ -4273,6 +4273,7 @@ dependencies = [
  "serde",
  "serde_json",
  "teamup-shift-sync-core",
+ "tempfile",
  "tokio",
 ]
 

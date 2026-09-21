@@ -1,5 +1,3 @@
-mod offline;
-
 use chrono::{DateTime, Datelike, Duration, FixedOffset, NaiveDate, TimeZone, Utc};
 use chrono_tz::Tz;
 use clap::{Args, Parser, Subcommand};
@@ -196,11 +194,12 @@ async fn run(cli: Cli) -> Result<u8> {
             ..
         } => {
             let plan = tokio::task::spawn_blocking(move || {
-                offline::preview(
-                    config.unwrap_or_else(|| "config.toml".into()),
-                    fixture,
-                    state.unwrap_or_else(|| ".local/offline-rust.sqlite3".into()),
-                    dates,
+                teamup_shift_sync_core::fixture::preview(
+                    &config.unwrap_or_else(|| "config.toml".into()),
+                    &fixture,
+                    &state.unwrap_or_else(|| ".local/offline-rust.sqlite3".into()),
+                    dates.from,
+                    dates.to,
                     now.unwrap_or_else(|| Utc::now().fixed_offset()),
                 )
             })

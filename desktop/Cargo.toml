@@ -2,7 +2,7 @@
 name = "teamup-shift-sync-gui"
 version = "0.1.0"
 edition = "2021"
-description = "Danish Iced desktop shell around the teamup-shift-sync Python engine (issue #2)"
+description = "Danish Iced desktop shell on the pure Rust core (issue #2)"
 
 [[bin]]
 name = "teamup-shift-sync-gui"
@@ -21,6 +21,7 @@ serde_json = "1"
 chrono = { version = "0.4", features = ["clock"] }
 directories = "6"
 tokio = { version = "1", features = ["rt", "sync"] }
+tempfile = "3"
 
 # Rendering/windowing backends. Default is GPU (wgpu) with Wayland+X11 for
 # real desktops; the `--no-default-features` build is pure software

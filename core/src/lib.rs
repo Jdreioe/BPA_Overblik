@@ -4,6 +4,7 @@
 //! live outside this crate and exchange typed values with it.
 
 mod approval;
+pub mod fixture;
 pub mod live;
 mod models;
 mod parser;

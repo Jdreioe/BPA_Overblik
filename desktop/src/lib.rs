@@ -1,7 +1,6 @@
-//! Desktop presentation and the legacy worker connection during migration.
-//! Native week views use the core models directly; the default desktop still
-//! uses the Python worker for setup and its existing workflow.
+//! Desktop presentation on top of the Rust core: the week preview builder,
+//! its view models, and the application data directory.
 
+pub mod files;
 pub mod preview;
 pub mod protocol;
-pub mod worker;
