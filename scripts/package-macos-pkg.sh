@@ -13,7 +13,10 @@ version="$("$root/scripts/release-version.sh")"
 IFS=. read -r year month day <<< "$version"
 bundle_version="$year.$((10#$month)).$((10#$day))"
 
-app="$root/target/macos/Vagtplanlægning.app"
+# The package is built from a staging root holding nothing but the app, so
+# pkgbuild's install location is exactly /Applications.
+staging="$root/target/macos/root"
+app="$staging/Vagtplanlægning.app"
 pkg="$root/dist/teamup-shift-sync-$version-universal.pkg"
 
 echo "Building Vagtplanlægning $version for macOS (universal)"
@@ -58,6 +61,12 @@ rm -f "$pkg"
 # The app is not signed or notarized yet, so macOS asks the person to confirm
 # the first open. docs/installation.md documents the exact steps and what it
 # would take to remove them.
-productbuild --component "$app" /Applications "$pkg"
+pkgbuild \
+  --root "$staging" \
+  --component-plist packaging/macos/component.plist \
+  --identifier io.github.jdreioe.teamup-shift-sync \
+  --version "$bundle_version" \
+  --install-location /Applications \
+  "$pkg"
 
 echo "macOS installer: $pkg"

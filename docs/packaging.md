@@ -1,13 +1,13 @@
 # Packaging and releases
 
-One tag produces one release with one installer per system (issue #8). The
-installers carry the desktop app, the CLI and the fixtures; nothing else has to
-be installed except a system Chromium.
+One tag produces one release with one file per system (issue #8). macOS and
+Linux wrap the desktop app, the CLI and the fixtures; Windows is the desktop
+`.exe` itself. Nothing else has to be installed except a system Chromium.
 
 | System | Package | Built on | Installed as |
 | --- | --- | --- | --- |
-| Windows 10/11 x86_64 | `.msi` (WiX, per-machine, no wizard) | `windows-latest` | `C:\Program Files\Vagtplanlægning` + Start menu |
-| macOS 11+ x86_64 and arm64 | `.pkg` (`productbuild`) | `macos-14` | `/Applications/Vagtplanlægning.app` |
+| Windows 10/11 x86_64 | `.exe` (portable desktop app) | `windows-latest` | wherever the person keeps the file |
+| macOS 11+ x86_64 and arm64 | `.pkg` (`pkgbuild`, not relocatable) | `macos-14` | `/Applications/Vagtplanlægning.app` |
 | Linux x86_64, glibc 2.35+ | `.AppImage` | `ubuntu-22.04` | wherever the person keeps the file |
 
 The user-facing instructions live in [installation](installation.md); this file
@@ -25,10 +25,9 @@ The build passes the same value in as an environment variable, so the redacted
 diagnostics report the installed release rather than `0.1.0`. A plain
 `cargo build` still reports the crate version.
 
-Windows Installer only allows 0-255 in the first version field, so the MSI
-version is `YY.M.D`: the release `2026.09.21` installs as `26.9.21` in
-Programs and Features. Ordering is preserved, and the file name and the app
-both show the full date.
+Windows is a portable `.exe` so an updater can replace the running file without
+administrator rights or Windows Installer. The file name carries the dated
+release; the app reports the same value.
 
 ## Releasing
 
@@ -43,7 +42,7 @@ manually builds and verifies the same packages with today's date and publishes
 nothing, which is how a packaging change is checked before tagging.
 
 Build one package locally with `scripts/package-linux-appimage.sh`,
-`scripts/package-windows-msi.ps1` or `scripts/package-macos-pkg.sh`. Each one
+`scripts/package-windows-exe.ps1` or `scripts/package-macos-pkg.sh`. Each one
 writes to `dist/` and runs the packaged app's `--self-check` before it reports
 success.
 
@@ -52,9 +51,9 @@ success.
 - The workspace tests, on Linux.
 - `--self-check` on the binaries that go into each package: it builds the
   representative fixture preview through the core and prints its digest.
-- Windows: a silent install of the MSI, `--self-check` and `--help` from the
-  installed location, a silent uninstall, and that the uninstall removed the
-  program but kept `%APPDATA%\teamup-shift-sync\data`.
+- Windows: `--self-check` on the packaged `.exe` with the repository fixtures,
+  `--help` on the built CLI, and that the run left `%APPDATA%\teamup-shift-sync\data`
+  alone.
 - macOS: `installer -pkg`, that the installed binary is universal
   (`x86_64 arm64`), `--self-check` and `--help` from `/Applications`, and that
   the installed package left the data directory alone.
@@ -66,20 +65,27 @@ remain manual checks in [desktop validation](desktop-validation.md).
 
 ## User data is never packaged, never removed
 
-Setup, credentials handles and sync history live outside the install location:
+Setup, credentials handles and sync history live outside the package:
 
 - Windows: `%APPDATA%\teamup-shift-sync\data`
 - macOS: `~/Library/Application Support/teamup-shift-sync`
 - Linux: `~/.local/share/teamup-shift-sync`
 
-No installer writes there, and no uninstaller deletes it. Passwords themselves
-are in the OS credential store, which the installers never touch either.
+No package writes there, and deleting or replacing the program does not delete
+it. Passwords themselves are in the OS credential store, which the packages
+never touch either.
 
 The only OS permission the app needs is access to that credential store:
 macOS prompts for keychain access on first save, Linux needs an unlocked
 desktop keyring (GNOME Keyring or equivalent through Secret Service), and
-Windows Credential Manager prompts for nothing. Installing per-machine on
-Windows needs administrator rights once; nothing after that does.
+Windows Credential Manager prompts for nothing. The Windows `.exe` and the
+Linux AppImage need no administrator rights. The macOS `.pkg` still asks once
+to install into `/Applications`.
+
+The macOS package is deliberately not relocatable. A relocatable bundle is
+installed over whatever copy Launch Services knows about, which in CI meant the
+build directory instead of `/Applications`, so an upgrade could land anywhere
+the person once kept a copy.
 
 ## Signing and notarization
 
@@ -89,7 +95,7 @@ once. [installation](installation.md) documents the exact clicks.
 Removing those prompts needs paid identities, not code:
 
 - Windows: an EV or Azure Trusted Signing certificate, then `signtool`/Trusted
-  Signing over both the `.exe` files and the `.msi` before upload.
+  Signing over the `.exe` before upload.
 - macOS: an Apple Developer ID Application and Installer certificate, then
   `codesign --options runtime` on the app, `productsign` on the pkg, and
   `xcrun notarytool submit --wait` plus `xcrun stapler staple`.
@@ -103,5 +109,5 @@ packages are unsigned.
 The app requires a system Chromium or `TEAMUP_BROWSER_PATH` and never downloads
 one. That stays true in the packages: shipping a browser would multiply the
 download size, and silently downloading one on a care worker's machine is not a
-decision this app should make. The installers therefore carry no browser, and
+decision this app should make. The packages therefore carry no browser, and
 the missing-browser message names what to install.

@@ -3,6 +3,7 @@
 //! The app runs entirely on the Rust core: setup, live reads, planning and
 //! verified transfers. Network, browser and SQLite work runs on blocking
 //! threads, never on the UI thread.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod native;
 mod selfcheck;

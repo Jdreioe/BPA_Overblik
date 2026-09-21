@@ -10,7 +10,7 @@ Udgivelserne hedder efter datoen, for eksempel `2026.09.21`.
 
 | Dit system | Filen du skal bruge |
 | --- | --- |
-| Windows 10 eller 11, 64-bit | `teamup-shift-sync-ÅÅÅÅ.MM.DD-x86_64.msi` |
+| Windows 10 eller 11, 64-bit | `teamup-shift-sync-ÅÅÅÅ.MM.DD-x86_64.exe` |
 | macOS 11 eller nyere, både Intel og Apple Silicon | `teamup-shift-sync-ÅÅÅÅ.MM.DD-universal.pkg` |
 | Linux, 64-bit | `teamup-shift-sync-ÅÅÅÅ.MM.DD-x86_64.AppImage` |
 
@@ -20,17 +20,15 @@ almindelige browser: den åbner sit eget vindue til MitHF og DUOS.
 
 ## Windows
 
-1. Dobbeltklik på `.msi`-filen.
-2. Windows viser "Windows beskyttede din pc", fordi filen endnu ikke er
+1. Gem `.exe`-filen et sted du kan finde igen, for eksempel i mappen
+   **Dokumenter** eller på skrivebordet.
+2. Dobbeltklik på filen.
+3. Windows viser "Windows beskyttede din pc", fordi filen endnu ikke er
    signeret. Klik **Flere oplysninger** og derefter **Kør alligevel**.
-3. Sig ja til at programmet må installeres. Der er ingen spørgsmål undervejs:
-   Windows viser en fremdriftsbjælke og er færdig efter få sekunder.
-4. Åbn **Vagtplanlægning** fra Start-menuen.
 
-Du afinstallerer under **Indstillinger → Apps → Installerede apps →
-Vagtplanlægning**. Dine logins, dine kobler mellem TeamUp, MitHF og DUOS og
-din historik bliver liggende, så du kan installere igen uden at sætte noget op
-forfra.
+Der er ikke noget at afinstallere: du sletter filen. Dine logins, dine kobler
+mellem TeamUp, MitHF og DUOS og din historik ligger i
+`%APPDATA%\teamup-shift-sync\data` og bliver ikke slettet med programmet.
 
 ## macOS
 
@@ -68,15 +66,16 @@ eneste tilladelse den beder om:
   hver gang.
 - **Windows** bruger Legitimationsstyring og spørger ikke om noget.
 
-Appen beder ikke om administratoradgang efter installationen, og den kører
-ikke noget i baggrunden.
+Appen beder ikke om administratoradgang på Windows eller Linux. På macOS
+spørger installationen én gang. Den kører ikke noget i baggrunden.
 
 ## Opdatering
 
-Hent den nyeste fil og installer den oven i den gamle, præcis som første gang.
-På Linux erstatter du `.AppImage`-filen med den nye. Dine logins, dine kobler
-og din synkroniseringshistorik følger med over. Programmet opdaterer aldrig sig
-selv, og det synkroniserer aldrig noget af sig selv.
+Hent den nyeste fil. På Windows og Linux erstatter du den gamle fil med den
+nye. På macOS installerer du `.pkg`-filen oven i den gamle, præcis som første
+gang. Dine logins, dine kobler og din synkroniseringshistorik følger med over.
+Programmet opdaterer aldrig sig selv, og det synkroniserer aldrig noget af sig
+selv.
 
 ## Hvis noget går galt
 

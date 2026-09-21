@@ -10,7 +10,7 @@ installation, no worker process and no bundled runtime; see the completed
 
 ## Install it
 
-Dated releases carry one installer per system: a `.msi` for Windows 10/11, a
+Dated releases carry one file per system: a `.exe` for Windows 10/11, a
 universal `.pkg` for macOS 11 and newer, and an `.AppImage` for 64-bit Linux.
 Download the newest one from
 [releases](https://github.com/Jdreioe/teamup_sync/releases/latest); the Danish
