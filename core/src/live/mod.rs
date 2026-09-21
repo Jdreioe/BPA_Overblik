@@ -7,7 +7,7 @@ mod diagnostics;
 mod setup;
 mod teamup;
 
-pub use browser::{BrowserSessions, Service, Visibility};
+pub use browser::{forget_logins, BrowserSessions, Service, Visibility};
 pub use capture::read_shapes;
 pub use diagnostics::redacted_report;
 pub use setup::Setup;

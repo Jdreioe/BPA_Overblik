@@ -16,8 +16,8 @@ use std::{
 use teamup_shift_sync_core::{
     apply_plan_controlled, build_plan,
     live::{
-        load_saved_setup, read_destinations, read_shapes, read_teamup, redacted_report,
-        BrowserSessions, LiveConfig, LiveDestinations, Service, Setup, Visibility,
+        forget_logins, load_saved_setup, read_destinations, read_shapes, read_teamup,
+        redacted_report, BrowserSessions, LiveConfig, LiveDestinations, Service, Setup, Visibility,
     },
     plan_digest, reconciliation_range, ApplyOutcome, ApplyRequest, Outcome, PlanItem, PlanRequest,
     PlanSystem, SyncState, TransferEvent, TransferOperation,
@@ -358,6 +358,19 @@ impl Engine {
             .open(service, Visibility::Window)
             .await
             .map_err(|e| e.to_string())
+    }
+    /// Forget the saved MitHF and DUOS logins, so a different account cannot
+    /// inherit another one's session. Sync history is keyed by account and
+    /// stays; nothing is changed in either service.
+    async fn forget_logins(&self) -> Result<()> {
+        let mut guard = self.browsers.lock().await;
+        // Dropping the sessions closes the app's browsers and frees the profiles.
+        drop(guard.take());
+        let dir = self.data_dir.clone();
+        tokio::task::spawn_blocking(move || forget_logins(&dir))
+            .await
+            .map_err(|_| "De gemte logins kunne ikke fjernes.".to_owned())?
+            .map_err(|error| error.to_string())
     }
     /// Reading only needs the saved profile, so no browser window is opened.
     /// A window left over from login keeps serving these requests.
@@ -747,6 +760,8 @@ enum Message {
     LoginOpened(Result<()>),
     CheckLogin,
     LoginChecked(Result<()>),
+    ForgetLogins,
+    LoginsForgotten(Result<()>),
     Capture,
     Captured(Result<PathBuf>),
     SaveDiagnostics,
@@ -873,6 +888,7 @@ impl NativeApp {
                 | Message::SetupUpdated(_)
                 | Message::LoginOpened(_)
                 | Message::LoginChecked(_)
+                | Message::LoginsForgotten(_)
                 | Message::Captured(_)
                 | Message::DiagnosticsSaved(_)
                 | Message::PreviewLoaded(_)
@@ -1076,6 +1092,28 @@ impl NativeApp {
                         self.preview = None;
                         self.error = Some(e);
                     }
+                }
+            }
+            Message::ForgetLogins => {
+                self.invalidate();
+                self.activity = Activity::Login;
+                let engine = self.engine.clone();
+                return Task::perform(
+                    async move { engine.forget_logins().await },
+                    Message::LoginsForgotten,
+                );
+            }
+            Message::LoginsForgotten(result) => {
+                if self.activity != Activity::Login {
+                    return Task::none();
+                }
+                self.activity = Activity::Idle;
+                match result {
+                    Ok(()) => {
+                        self.notice =
+                            "Appen har glemt de gemte logins. Log ind igen for at fortsætte.".into()
+                    }
+                    Err(e) => self.error = Some(e),
                 }
             }
             Message::Capture => {
@@ -1521,6 +1559,10 @@ impl NativeApp {
                 ]
                 .spacing(8),
             )
+            .push(text(
+                "Skifter du til en anden konto, så log ud her først. Appen lukker sine browservinduer og glemmer de gemte logins, så den nye konto ikke arver den gamles adgang. Overførselshistorikken bevares, og der slettes intet i MitHF eller DUOS.",
+            ))
+            .push(self.action("Log ud af MitHF og DUOS", Message::ForgetLogins))
             .push(self.setup.view().map(Message::Setup))
             .push(self.action("Genindlæs opsætning", Message::Reload));
         content = content.push(self.action("Hjælp", Message::Open(Screen::Help)));
@@ -1840,6 +1882,21 @@ mod tests {
         let _ = app.view();
         let _ = app.update(Message::Open(Screen::Home));
         assert_eq!(app.screen, Screen::Home);
+    }
+    #[test]
+    fn forgetting_logins_revokes_a_shown_approval() {
+        let mut app = app();
+        app.screen = Screen::Settings;
+        app.preview = Some(preview(&app, true));
+
+        let _ = app.update(Message::ForgetLogins);
+
+        assert_eq!(app.activity, Activity::Login);
+        assert!(app.preview.is_none());
+        let _ = app.update(Message::LoginsForgotten(Ok(())));
+        assert_eq!(app.activity, Activity::Idle);
+        assert!(app.notice.contains("Log ind igen"));
+        let _ = app.view();
     }
     #[test]
     fn help_and_its_diagnostics_stay_reachable_before_setup_is_finished() {
