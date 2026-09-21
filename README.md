@@ -99,6 +99,9 @@ cargo run -p teamup-shift-sync-cli -- forget \
            7e254c8bb3604748507391f8:2145427874:2145427874
 ```
 
+The desktop app offers the same recovery as **Tillad overførsel igen** on the
+affected shift's conflict, for that shift alone.
+
 `forget` only clears local memory of what was synchronized. It never contacts
 MitHF or DUOS, and the next dry-run still has to be reviewed and approved before
 anything is written.
