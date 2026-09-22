@@ -51,6 +51,11 @@ const ENTER_CALENDAR: &str = r#"() => {
   return false;
 }"#;
 
+/// Whether the DUOS app has restored the session the profile already holds.
+/// Presence only: no token, role or account value leaves the page.
+const DUOS_SESSION: &str = r#"() => localStorage.getItem('role') === 'citizen'
+  && !!localStorage.getItem('token')"#;
+
 /// Chromium visibility for a launch. Interactive login and its two-factor step
 /// need a window; every other launch reuses the saved profile without one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -217,6 +222,9 @@ impl BrowserSessions {
                             visibility,
                         },
                     );
+                    if service == Service::Duos && visibility == Visibility::Background {
+                        self.await_duos_session().await;
+                    }
                     return Ok(());
                 }
             }
@@ -234,6 +242,37 @@ impl BrowserSessions {
     pub(crate) fn remember_catalog(&self, stamp: [u8; 32]) {
         if let Ok(mut remembered) = self.catalog.lock() {
             *remembered = Some(stamp);
+        }
+    }
+
+    /// Give a freshly launched DUOS browser time to restore its saved session.
+    ///
+    /// A launch is debuggable before the app has read its profile, so a request
+    /// sent straight afterwards sees no session and is rejected as a missing
+    /// login. MitHF waits for its calendar page through `enter_calendar`; this
+    /// is the same handshake for DUOS.
+    ///
+    /// Best effort on purpose: waiting cannot create a session, so a profile
+    /// that really is signed out falls through to the ordinary login error
+    /// instead of a new one.
+    async fn await_duos_session(&self) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Ok(page) = self.page(Service::Duos, false).await {
+                let restored = cdp(
+                    &page,
+                    "Runtime.evaluate",
+                    json!({"expression": format!("({DUOS_SESSION})()"), "returnByValue": true}),
+                )
+                .await;
+                if restored.is_ok_and(|result| result["result"]["value"] == json!(true)) {
+                    return;
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 
@@ -379,9 +418,14 @@ impl BrowserSessions {
             return Err(INVALID);
         }
         let result = &result["result"]["value"];
-        result.get("data").cloned().ok_or(LiveError(
-            "Tjenesten kunne ikke læses. Log ind igen, og prøv igen.",
-        ))
+        // Name the service: the person has two logins and has to know which
+        // one to renew.
+        result.get("data").cloned().ok_or(match service {
+            Service::Mithf => {
+                LiveError("MitHF kunne ikke læses. Log ind i MitHF igen, og prøv igen.")
+            }
+            Service::Duos => LiveError("DUOS kunne ikke læses. Log ind i DUOS igen, og prøv igen."),
+        })
     }
 }
 
