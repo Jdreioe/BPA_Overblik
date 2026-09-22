@@ -8,6 +8,20 @@ The Iced desktop app and a small CLI both use it. There is no Python
 installation, no worker process and no bundled runtime; see the completed
 [migration](docs/rust-migration.md).
 
+## Install it
+
+Dated releases carry one file per system: a `.exe` for Windows 10/11, a
+universal `.pkg` for macOS 11 and newer, and an `.AppImage` for 64-bit Linux.
+Download the newest one from
+[releases](https://github.com/Jdreioe/teamup_sync/releases/latest); the Danish
+[installation guide](docs/installation.md) has the steps, including the
+one-time security prompt on Windows and macOS.
+
+A system Chromium is the only other requirement. The app never downloads a
+browser. Updating and uninstalling both leave credentials, mappings and sync
+history in place. How the packages are built, verified and versioned is in
+[packaging](docs/packaging.md).
+
 ## Set up
 
 A stable Rust toolchain is the only requirement.
@@ -181,8 +195,9 @@ cargo run -p teamup-shift-sync-gui
 its digest. CI runs it against every packaged bundle on Windows, macOS and
 Linux. See `docs/desktop-validation.md` for the package and accessibility checks.
 
-Release bundles contain the desktop and CLI binaries beside `fixtures/`. Build
-them with `cargo build --release --workspace`.
+Release installers contain the desktop app, the CLI and `fixtures/`, and are
+built by `scripts/package-*` from a dated tag. For a plain local build, use
+`cargo build --release --workspace`.
 
 ## The weekly preview
 

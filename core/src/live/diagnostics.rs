@@ -21,7 +21,7 @@ pub fn redacted_report(data_dir: &Path, now: DateTime<FixedOffset>) -> Result<Va
         "version": 1,
         "recorded_at": isoformat(now),
         "app": {
-            "version": env!("CARGO_PKG_VERSION"),
+            "version": app_version(),
             "os": std::env::consts::OS,
             "arch": std::env::consts::ARCH,
         },
@@ -34,6 +34,12 @@ pub fn redacted_report(data_dir: &Path, now: DateTime<FixedOffset>) -> Result<Va
     }))
 }
 
+/// The dated version of the installed package when the build had one, and the
+/// crate version for a plain `cargo build`.
+pub fn app_version() -> &'static str {
+    option_env!("TEAMUP_SHIFT_SYNC_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
 /// How far setup got, as sizes and yes/no answers. No chosen id or name.
 fn setup_summary(data_dir: &Path) -> Value {
     let Some(setup) = std::fs::read_to_string(data_dir.join("setup.json"))
@@ -42,8 +48,14 @@ fn setup_summary(data_dir: &Path) -> Value {
     else {
         return json!({"saved": false});
     };
-    let mappings = setup["mappings"].as_array().map(Vec::as_slice).unwrap_or(&[]);
-    let excluded = mappings.iter().filter(|row| row["excluded"] == json!(true)).count();
+    let mappings = setup["mappings"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let excluded = mappings
+        .iter()
+        .filter(|row| row["excluded"] == json!(true))
+        .count();
     json!({
         "saved": true,
         "version": setup["version"],
@@ -75,7 +87,10 @@ fn account_summaries(data_dir: &Path) -> Value {
         .collect();
     names.sort();
     for name in names {
-        let scope = name.trim_start_matches("sync-").trim_end_matches(".sqlite3").to_owned();
+        let scope = name
+            .trim_start_matches("sync-")
+            .trim_end_matches(".sqlite3")
+            .to_owned();
         let Ok(state) = SyncState::open(data_dir.join(&name)) else {
             accounts.push(json!({"scope": scope, "readable": false}));
             continue;
@@ -94,7 +109,12 @@ fn account_summaries(data_dir: &Path) -> Value {
 fn profiles(data_dir: &Path) -> Vec<&'static str> {
     ["mithf", "duos"]
         .into_iter()
-        .filter(|service| data_dir.join("rust-preview/profiles").join(service).is_dir())
+        .filter(|service| {
+            data_dir
+                .join("rust-preview/profiles")
+                .join(service)
+                .is_dir()
+        })
         .collect()
 }
 
@@ -136,8 +156,15 @@ mod tests {
         assert_eq!(report["setup"]["arrangement_chosen"], true);
         let document = report.to_string();
         for secret in [
-            "a-keyring-handle", "ks-sub-1", "Ida", "m1", "d1", "portfolio-7", "type-3",
-            "Bo Borger", "Bevilling",
+            "a-keyring-handle",
+            "ks-sub-1",
+            "Ida",
+            "m1",
+            "d1",
+            "portfolio-7",
+            "type-3",
+            "Bo Borger",
+            "Bevilling",
         ] {
             assert!(!document.contains(secret), "{secret} must not be reported");
         }

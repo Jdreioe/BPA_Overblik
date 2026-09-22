@@ -1,6 +1,6 @@
 //! Native Iced workflow using the Rust core and app-owned browser sessions.
 //! Setup editing remains in the existing application during migration.
-use crate::setup;
+use crate::{setup, update};
 use chrono::{DateTime, Datelike, Duration, FixedOffset, NaiveDate, TimeZone, Timelike, Utc};
 use iced::widget::{button, column, container, progress_bar, row, scrollable, text, Column};
 use iced::{Element, Length, Subscription, Task};
@@ -16,7 +16,7 @@ use std::{
 use teamup_shift_sync_core::{
     apply_plan_controlled, build_plan,
     live::{
-        forget_logins, load_saved_setup, read_destinations, read_shapes, read_teamup,
+        app_version, forget_logins, load_saved_setup, read_destinations, read_shapes, read_teamup,
         redacted_report, BrowserSessions, LiveConfig, LiveDestinations, Service, Setup, Visibility,
     },
     plan_digest, reconciliation_range, ApplyOutcome, ApplyRequest, Outcome, PlanItem, PlanRequest,
@@ -854,6 +854,12 @@ enum Message {
     ApplyTick,
     Applied(ApplyResult),
     CloseRequested(iced::window::Id),
+    CheckUpdates,
+    PeriodicUpdateCheck,
+    UpdateChecked(Result<Option<update::Offer>>),
+    InstallUpdate,
+    DismissUpdate,
+    UpdateApplied(Result<update::ApplyOutcome>),
 }
 // Events may carry account configuration or private shift data.
 impl std::fmt::Debug for Message {
@@ -888,6 +894,7 @@ enum Activity {
     Preview,
     Recover,
     Apply,
+    Update,
 }
 
 struct NativeApp {
@@ -916,8 +923,14 @@ struct NativeApp {
     /// forgetting. Set only from that shift's own conflict.
     forget_source: Option<String>,
     close_after_apply: Option<iced::window::Id>,
+    update_offer: Option<update::Offer>,
+    update_manual: bool,
 }
+
 impl NativeApp {
+    /// Silent GitHub check while the window stays open. Startup already ran one.
+    const UPDATE_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
+
     fn new() -> (Self, Task<Message>) {
         let mut app = Self {
             engine: Engine::new(app_data_dir()),
@@ -943,9 +956,18 @@ impl NativeApp {
             needs_recheck: false,
             forget_source: None,
             close_after_apply: None,
+            update_offer: None,
+            update_manual: false,
         };
-        let task = app.update(Message::Reload);
-        (app, task)
+        update::cleanup_replaced_backup();
+        let reload = app.update(Message::Reload);
+        (
+            app,
+            Task::batch([
+                reload,
+                Task::perform(update::check_latest(), Message::UpdateChecked),
+            ]),
+        )
     }
     fn monday(&self) -> NaiveDate {
         let today = self
@@ -971,6 +993,8 @@ impl NativeApp {
                 | Message::PreviewLoaded(_)
                 | Message::Forgotten(_)
                 | Message::Applied(_)
+                | Message::UpdateChecked(_)
+                | Message::UpdateApplied(_)
         );
         // Progress ticks only run during a transfer. They never start work.
         if matches!(message, Message::ApplyTick) {
@@ -1402,6 +1426,77 @@ impl NativeApp {
                 }
             }
             Message::StopApply | Message::ApplyTick | Message::CloseRequested(_) => {}
+            Message::CheckUpdates => {
+                if self.update_manual {
+                    return Task::none();
+                }
+                self.error = None;
+                self.notice = "Søger efter opdatering …".into();
+                self.update_manual = true;
+                return Task::perform(update::check_latest(), Message::UpdateChecked);
+            }
+            Message::PeriodicUpdateCheck => {
+                if self.update_offer.is_some() || self.update_manual {
+                    return Task::none();
+                }
+                return Task::perform(update::check_latest(), Message::UpdateChecked);
+            }
+            Message::UpdateChecked(result) => {
+                let manual = std::mem::take(&mut self.update_manual);
+                match result {
+                    Ok(Some(offer)) => {
+                        self.update_offer = Some(offer);
+                        if manual && self.notice == "Søger efter opdatering …" {
+                            self.notice.clear();
+                        }
+                    }
+                    Ok(None) => {
+                        self.update_offer = None;
+                        if manual {
+                            self.notice =
+                                format!("Du har allerede den nyeste version ({}).", app_version());
+                        }
+                    }
+                    Err(error) => {
+                        if manual {
+                            self.error = Some(error);
+                            if self.notice == "Søger efter opdatering …" {
+                                self.notice.clear();
+                            }
+                        }
+                    }
+                }
+            }
+            Message::InstallUpdate => {
+                let Some(offer) = self.update_offer.clone() else {
+                    return Task::none();
+                };
+                self.error = None;
+                self.notice.clear();
+                self.activity = Activity::Update;
+                return Task::perform(
+                    async move { update::apply(offer).await },
+                    Message::UpdateApplied,
+                );
+            }
+            Message::DismissUpdate => self.update_offer = None,
+            Message::UpdateApplied(result) => {
+                if self.activity != Activity::Update {
+                    return Task::none();
+                }
+                self.activity = Activity::Idle;
+                match result {
+                    Ok(update::ApplyOutcome::Restart(path)) => match update::restart(&path) {
+                        Ok(()) => return iced::exit(),
+                        Err(error) => self.error = Some(error),
+                    },
+                    Ok(update::ApplyOutcome::OpenedInstaller) => {
+                        self.update_offer = None;
+                        self.notice = "Installationsprogrammet er åbnet. Følg trinnene, og åbn Vagtplanlægning igen bagefter. Dine data bliver liggende.".into();
+                    }
+                    Err(error) => self.error = Some(error),
+                }
+            }
         }
         Task::none()
     }
@@ -1445,6 +1540,7 @@ impl NativeApp {
         Subscription::batch([
             ticks,
             iced::window::close_requests().map(Message::CloseRequested),
+            iced::time::every(Self::UPDATE_CHECK_INTERVAL).map(|_| Message::PeriodicUpdateCheck),
         ])
     }
     fn action<'a>(&self, label: &'a str, message: Message) -> iced::widget::Button<'a, Message> {
@@ -1462,6 +1558,17 @@ impl NativeApp {
         }
         if !self.notice.is_empty() {
             content = content.push(text(&self.notice));
+        }
+        if let Some(offer) = &self.update_offer {
+            content = content
+                .push(text(format!("En ny version ({}) er klar.", offer.version)))
+                .push(
+                    row![
+                        self.action("Hent opdatering", Message::InstallUpdate),
+                        self.action("Ikke nu", Message::DismissUpdate)
+                    ]
+                    .spacing(8),
+                );
         }
         content = match self.visible_screen() {
             Screen::Home => self.home(content),
@@ -1510,6 +1617,7 @@ impl NativeApp {
                 Activity::Preview => "Henter ugens ændringer …",
                 Activity::Recover => "Glemmer lokale registreringer …",
                 Activity::Apply => "",
+                Activity::Update => "Henter opdatering …",
             };
             if !busy.is_empty() {
                 content = content.push(text(busy));
@@ -1647,7 +1755,8 @@ impl NativeApp {
             ))
             .push(self.action("Log ud af MitHF og DUOS", Message::ForgetLogins))
             .push(self.setup.view().map(Message::Setup))
-            .push(self.action("Genindlæs opsætning", Message::Reload));
+            .push(self.action("Genindlæs opsætning", Message::Reload))
+            .push(self.action("Tjek for opdateringer", Message::CheckUpdates));
         content = content.push(self.action("Hjælp", Message::Open(Screen::Help)));
         if self.account.is_some() {
             content = content.push(self.action("Tilbage til ugen", Message::Open(Screen::Home)));
@@ -1661,6 +1770,7 @@ impl NativeApp {
         for line in HELP {
             content = content.push(text(line));
         }
+        content = content.push(text(format!("Version {}.", app_version())));
         content = content
             .push(text(
                 "Del hvad der gik galt åbner et opslag på GitHub i din browser. Opslaget er offentligt, og du skal have en GitHub-konto for at sende det. Du læser teksten igennem først, og der står hverken navne, vagttekst, adgangskoder, cookies eller kalenderlink i den.",
@@ -1776,6 +1886,8 @@ mod tests {
             needs_recheck: false,
             forget_source: None,
             close_after_apply: None,
+            update_offer: None,
+            update_manual: false,
         }
     }
     fn write_item(source: &str, step: &str) -> PlanItem {
@@ -2009,6 +2121,68 @@ mod tests {
             opened: false,
         })));
         assert!(app.notice.contains("Send filen"));
+    }
+    fn newer_offer() -> update::Offer {
+        update::offer_from_release(
+            r#"{
+                "tag_name": "v2026.09.22",
+                "assets": [{"name": "teamup-shift-sync-2026.09.22-x86_64.AppImage", "browser_download_url": "https://example.test/linux.AppImage"}]
+            }"#,
+            "2026.09.21",
+            "linux",
+        )
+        .expect("parse")
+        .expect("offer")
+    }
+    #[test]
+    fn a_background_update_check_survives_a_transfer_and_a_reload() {
+        let mut app = app();
+        app.activity = Activity::Apply;
+        let _ = app.update(Message::UpdateChecked(Ok(Some(newer_offer()))));
+        assert_eq!(app.activity, Activity::Apply);
+        assert_eq!(
+            app.update_offer
+                .as_ref()
+                .map(|offer| offer.version.as_str()),
+            Some("2026.09.22")
+        );
+
+        app.activity = Activity::Idle;
+        let _ = app.update(Message::Reload);
+        assert!(app.update_offer.is_some());
+        app.activity = Activity::Idle;
+        let _ = app.update(Message::Navigate(7));
+        assert!(app.update_offer.is_some());
+        let _ = app.view();
+    }
+    #[test]
+    fn dismissing_an_update_clears_it_and_a_transfer_cannot_start_one() {
+        let mut app = app();
+        app.update_offer = Some(newer_offer());
+        let _ = app.update(Message::DismissUpdate);
+        assert!(app.update_offer.is_none());
+
+        app.update_offer = Some(newer_offer());
+        app.activity = Activity::Apply;
+        let _ = app.update(Message::InstallUpdate);
+        assert_eq!(app.activity, Activity::Apply);
+    }
+    #[test]
+    fn a_periodic_check_stays_silent_and_waits_while_busy() {
+        let mut app = app();
+        app.activity = Activity::Apply;
+        let _ = app.update(Message::PeriodicUpdateCheck);
+        assert!(app.notice.is_empty());
+
+        app.activity = Activity::Idle;
+        let _ = app.update(Message::PeriodicUpdateCheck);
+        assert!(app.notice.is_empty());
+        assert!(!app.update_manual);
+
+        app.update_offer = Some(newer_offer());
+        let _ = app.update(Message::PeriodicUpdateCheck);
+        assert!(app.notice.is_empty());
+        assert!(app.update_offer.is_some());
     }
     #[test]
     fn the_shared_issue_is_prefilled_and_falls_back_to_the_saved_file() {

@@ -22,6 +22,10 @@ chrono = { version = "0.4", features = ["clock"] }
 directories = "6"
 tokio = { version = "1", features = ["rt", "sync"] }
 tempfile = "3"
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
 
 # Rendering/windowing backends. Default is GPU (wgpu) with Wayland+X11 for
 # real desktops; the `--no-default-features` build is pure software
