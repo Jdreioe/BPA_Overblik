@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, FixedOffset, NaiveDate};
 use chrono_tz::Tz;
+use futures_util::{stream, StreamExt, TryStreamExt};
 use serde_json::{json, Value};
 
 use super::{
@@ -11,6 +12,10 @@ use super::{
 use crate::{
     DestinationSnapshot, DuosRegistration, MitHfShift, PlanItem, PlanSystem, TimeInterval,
 };
+
+/// How many MitHF extras calls a read keeps in flight. The browser serves them
+/// from one authenticated tab, so this stays low enough not to flood it.
+const EKSTRA_CONCURRENCY: usize = 4;
 
 pub async fn read_destinations(
     browser: &BrowserSessions,
@@ -252,16 +257,23 @@ async fn read_mithf(
         .await?;
     stage.done(1);
     let raw_by_id = mithf_rows(config, &response, &first, &last, start, end)?;
+    // One extras call per shift row, none depending on another. Order is kept,
+    // so the snapshot does not change with how the calls happen to finish.
     let stage = Stage::start("mithf.ekstra");
-    let mut shifts = Vec::new();
-    for (identifier, row) in &raw_by_id {
-        let extra = browser
-            .request(Service::Mithf, "ekstra", json!({"eids": identifier}))
-            .await?;
-        shifts.push(mithf_shift(config, identifier, row, &extra)?);
+    let mut calls = Vec::with_capacity(raw_by_id.len());
+    for identifier in raw_by_id.keys() {
+        calls.push(browser.request(Service::Mithf, "ekstra", json!({"eids": identifier})));
     }
-    stage.done(raw_by_id.len());
-    Ok(shifts)
+    let extras: Vec<Value> = stream::iter(calls)
+        .buffered(EKSTRA_CONCURRENCY)
+        .try_collect()
+        .await?;
+    stage.done(extras.len());
+    raw_by_id
+        .iter()
+        .zip(&extras)
+        .map(|((identifier, row), extra)| mithf_shift(config, identifier, row, extra))
+        .collect()
 }
 
 fn mithf_rows(

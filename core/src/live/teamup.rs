@@ -1,4 +1,5 @@
 use chrono::{DateTime, FixedOffset, NaiveDate, TimeZone};
+use futures_util::{stream, StreamExt, TryStreamExt};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -23,6 +24,10 @@ impl LiveConfig {
         }
     }
 }
+
+/// How many event detail calls a read keeps in flight. Enough to hide the
+/// round trip on a week's shifts, low enough to stay a polite API client.
+const DETAIL_CONCURRENCY: usize = 6;
 
 fn client() -> Result<reqwest::Client, LiveError> {
     reqwest::Client::builder()
@@ -60,12 +65,31 @@ async fn get(
     let response = request.send().await.map_err(|_| {
         LiveError("TeamUp kunne ikke kontaktes. Kontrollér forbindelsen, og prøv igen.")
     })?;
+    if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return Err(LiveError(
+            "TeamUp modtog for mange forespørgsler. Vent et øjeblik, og prøv igen.",
+        ));
+    }
     if !response.status().is_success() {
         return Err(LiveError(
             "TeamUp afviste forbindelsen. Kontrollér kalenderadgang og API-nøgle i opsætningen.",
         ));
     }
     response.json().await.map_err(|_| INVALID)
+}
+
+async fn occurrence(
+    client: &reqwest::Client,
+    access: &Access<'_>,
+    event_id: &str,
+) -> Result<Value, LiveError> {
+    get(
+        client,
+        access,
+        &["events", event_id],
+        &[("format", "markdown".into())],
+    )
+    .await
 }
 
 /// Read configuration, hydrate all occurrences/comments, then resolve only the
@@ -109,19 +133,25 @@ pub async fn read_teamup(
     )
     .await?;
     stage.done(2);
+    // Every listed event needs its own detail call, and they do not depend on
+    // each other, so a week's worth is fetched a few at a time. Order is kept,
+    // so the same event still reports the first failure.
     let stage = Stage::start("teamup.details");
-    let mut details = 0;
-    let mut shifts = Vec::new();
-    for summary in rows(&listing["events"])? {
-        let event_id = id(&summary["id"])?;
-        let detail = get(
-            &client,
-            &access,
-            &["events", &event_id],
-            &[("format", "markdown".into())],
-        )
+    let event_ids: Vec<String> = rows(&listing["events"])?
+        .iter()
+        .map(|summary| id(&summary["id"]))
+        .collect::<Result<_, _>>()?;
+    let mut calls = Vec::with_capacity(event_ids.len());
+    for event_id in &event_ids {
+        calls.push(occurrence(&client, &access, event_id));
+    }
+    let details: Vec<Value> = stream::iter(calls)
+        .buffered(DETAIL_CONCURRENCY)
+        .try_collect()
         .await?;
-        details += 1;
+    stage.done(details.len());
+    let mut shifts = Vec::new();
+    for detail in &details {
         let raw = &detail["event"];
         let shift = parse_occurrence(config, raw)?;
         if shift.ends_at <= from || shift.starts_at >= to {
@@ -158,7 +188,6 @@ pub async fn read_teamup(
             ..shift
         });
     }
-    stage.done(details);
     Ok(shifts)
 }
 
