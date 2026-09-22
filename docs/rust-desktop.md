@@ -24,7 +24,7 @@ TOML configuration is the one setup feature not carried over from the old engine
    MitHF's shift calendar is entered through the site's own "Åbn din vagtplan"
    action. Login lives beside setup because reading the catalog needs both
    services.
-2. Choose **Kontrollér login**, then return to the week and **Se ændringer**.
+2. Choose **Kontrollér login**, then return to the week and **Se vagtplan fra TeamUp**.
 3. Review the split shifts, times, helper assignments, SPS and DUOS values.
    Resolve any points under **Kræver opmærksomhed** before proceeding.
 4. **Overfør ændringer** approves exactly the displayed plan and submits it.
