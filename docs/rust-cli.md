@@ -80,6 +80,18 @@ cargo run -p teamup-shift-sync-cli -- dry-run --live \
   --data-dir /path/to/app-data --from 2026-09-14 --to 2026-09-20
 ```
 
+Set `TEAMUP_TIMINGS=1` to print how long each read stage took and how many
+service calls it made:
+
+```
+timing teamup.catalog        412 ms    2 calls
+timing teamup.details       9120 ms   37 calls
+```
+
+The output is durations and counts only — no shift, helper or account content —
+so it is safe to paste into an issue. Use it to find the stage worth making
+faster rather than guessing.
+
 Review every item. Resolve blocked items and preview again before applying.
 Copy the exact `Plan digest` from the live preview into `--approve`:
 

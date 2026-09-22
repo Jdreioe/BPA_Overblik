@@ -6,6 +6,7 @@ mod destinations;
 mod diagnostics;
 mod setup;
 mod teamup;
+mod timing;
 
 pub use browser::{forget_logins, BrowserSessions, Service, Visibility};
 pub use capture::read_shapes;

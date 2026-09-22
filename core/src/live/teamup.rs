@@ -2,7 +2,9 @@ use chrono::{DateTime, FixedOffset, NaiveDate, TimeZone};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use super::{choice, id, rows, text, timestamp, unique, LiveConfig, LiveError, INVALID};
+use super::{
+    choice, id, rows, text, timestamp, timing::Stage, unique, LiveConfig, LiveError, INVALID,
+};
 use crate::{classify_source_title, SourceComment, SourceShift, SourceTitle};
 
 /// The three TeamUp credentials a request needs. Setup holds these before a
@@ -80,6 +82,7 @@ pub async fn read_teamup(
     }
     let client = client()?;
     let access = config.access();
+    let stage = Stage::start("teamup.catalog");
     let configuration = get(&client, &access, &["configuration"], &[]).await?;
     let calendars: Vec<_> = rows(&configuration["configuration"]["subcalendars"])?
         .iter().filter(|c| c["active"].as_bool().unwrap_or(true))
@@ -105,6 +108,9 @@ pub async fn read_teamup(
         ],
     )
     .await?;
+    stage.done(2);
+    let stage = Stage::start("teamup.details");
+    let mut details = 0;
     let mut shifts = Vec::new();
     for summary in rows(&listing["events"])? {
         let event_id = id(&summary["id"])?;
@@ -115,6 +121,7 @@ pub async fn read_teamup(
             &[("format", "markdown".into())],
         )
         .await?;
+        details += 1;
         let raw = &detail["event"];
         let shift = parse_occurrence(config, raw)?;
         if shift.ends_at <= from || shift.starts_at >= to {
@@ -151,6 +158,7 @@ pub async fn read_teamup(
             ..shift
         });
     }
+    stage.done(details);
     Ok(shifts)
 }
 

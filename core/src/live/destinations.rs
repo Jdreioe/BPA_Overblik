@@ -5,8 +5,8 @@ use chrono_tz::Tz;
 use serde_json::{json, Value};
 
 use super::{
-    choice, config::selected, id, named, rows, text, timestamp, truthy, unique, BrowserSessions,
-    LiveConfig, LiveError, Service, INVALID,
+    choice, config::selected, id, named, rows, text, timestamp, timing::Stage, truthy, unique,
+    BrowserSessions, LiveConfig, LiveError, Service, INVALID,
 };
 use crate::{
     DestinationSnapshot, DuosRegistration, MitHfShift, PlanItem, PlanSystem, TimeInterval,
@@ -164,7 +164,9 @@ async fn validate_catalog(
     config: &LiveConfig,
     today: NaiveDate,
 ) -> Result<Identities, LiveError> {
+    let stage = Stage::start("destination.catalog");
     let catalog = build_catalog(browser, &config.planning.duos_arrangement_id, today).await?;
+    stage.done(5);
     if catalog != config.setup["catalog"] {
         return Err(LiveError("Navne, ansættelser eller kontovalg er ændret. Bekræft opsætningen igen i den almindelige app."));
     }
@@ -240,6 +242,7 @@ async fn read_mithf(
         .with_timezone(&config.planning.timezone)
         .date_naive()
         .to_string();
+    let stage = Stage::start("mithf.plan");
     let response = browser
         .request(
             Service::Mithf,
@@ -247,14 +250,17 @@ async fn read_mithf(
             json!({"fra":first,"til":last,"frisk":1}),
         )
         .await?;
+    stage.done(1);
     let raw_by_id = mithf_rows(config, &response, &first, &last, start, end)?;
+    let stage = Stage::start("mithf.ekstra");
     let mut shifts = Vec::new();
-    for (identifier, row) in raw_by_id {
+    for (identifier, row) in &raw_by_id {
         let extra = browser
             .request(Service::Mithf, "ekstra", json!({"eids": identifier}))
             .await?;
-        shifts.push(mithf_shift(config, &identifier, &row, &extra)?);
+        shifts.push(mithf_shift(config, identifier, row, &extra)?);
     }
+    stage.done(raw_by_id.len());
     Ok(shifts)
 }
 
@@ -342,12 +348,15 @@ async fn read_duos(
     start: DateTime<FixedOffset>,
     end: DateTime<FixedOffset>,
 ) -> Result<Vec<DuosRegistration>, LiveError> {
+    let stage = Stage::start("duos.search");
     let mut result = Vec::new();
     let mut seen = BTreeSet::new();
+    let mut pages = 0;
     let mut skip = 0;
     loop {
         let response = browser.request(Service::Duos, "search", json!({"skip":skip,"take":100,"includeFields":["id","portfolioId","helperId","dutyTypeId","startDate","endDate","statusId"]})).await?;
         let page = rows(&response["data"])?;
+        pages += 1;
         let has_more = response["hasMore"].as_bool().ok_or(INVALID)?;
         if has_more && page.is_empty() {
             return Err(LiveError(
@@ -395,6 +404,7 @@ async fn read_duos(
             ));
         }
     }
+    stage.done(pages);
     Ok(result)
 }
 
