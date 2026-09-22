@@ -17,34 +17,76 @@ use crate::{
 /// from one authenticated tab, so this stays low enough not to flood it.
 const EKSTRA_CONCURRENCY: usize = 4;
 
-pub async fn read_destinations(
-    browser: &BrowserSessions,
-    config: &LiveConfig,
-    start: DateTime<FixedOffset>,
-    end: DateTime<FixedOffset>,
-    now: DateTime<FixedOffset>,
-) -> Result<DestinationSnapshot, LiveError> {
-    validate_catalog(
-        browser,
-        config,
-        now.with_timezone(&config.planning.timezone).date_naive(),
-    )
-    .await?;
-    read_snapshot(browser, config, start, end).await
+/// The part of a destination read that does not depend on the source range:
+/// the catalog check and the whole DUOS listing, which DUOS only serves
+/// unfiltered and this app narrows itself.
+///
+/// A preview starts this while TeamUp is still being read, and finishes it
+/// once the reconciliation range is known.
+pub(crate) struct DestinationPrelude {
+    duos_registrations: Vec<DuosRegistration>,
 }
 
+/// Validate the catalog and read DUOS, before any source range is known.
+pub(crate) async fn read_before_range(
+    browser: &BrowserSessions,
+    config: &LiveConfig,
+    now: DateTime<FixedOffset>,
+) -> Result<DestinationPrelude, LiveError> {
+    let today = now.with_timezone(&config.planning.timezone).date_naive();
+    let (_, duos_registrations) = futures_util::try_join!(
+        validate_catalog(browser, config, today),
+        read_duos(browser, config)
+    )?;
+    Ok(DestinationPrelude { duos_registrations })
+}
+
+impl DestinationPrelude {
+    /// Read MitHF for the resolved range and narrow DUOS to the same range.
+    pub(crate) async fn finish(
+        self,
+        browser: &BrowserSessions,
+        config: &LiveConfig,
+        start: DateTime<FixedOffset>,
+        end: DateTime<FixedOffset>,
+    ) -> Result<DestinationSnapshot, LiveError> {
+        Ok(DestinationSnapshot {
+            mithf_shifts: read_mithf(browser, config, start, end).await?,
+            duos_registrations: within(self.duos_registrations, start, end),
+        })
+    }
+}
+
+/// A read of both destinations for a known range, without the catalog check.
+/// The transfer's read-back uses this: the catalog was validated when the
+/// transfer connected.
 async fn read_snapshot(
     browser: &BrowserSessions,
     config: &LiveConfig,
     start: DateTime<FixedOffset>,
     end: DateTime<FixedOffset>,
 ) -> Result<DestinationSnapshot, LiveError> {
-    let mithf_shifts = read_mithf(browser, config, start, end).await?;
-    let duos_registrations = read_duos(browser, config, start, end).await?;
+    let (mithf_shifts, duos_registrations) = futures_util::try_join!(
+        read_mithf(browser, config, start, end),
+        read_duos(browser, config)
+    )?;
     Ok(DestinationSnapshot {
         mithf_shifts,
-        duos_registrations,
+        duos_registrations: within(duos_registrations, start, end),
     })
+}
+
+/// Keep the registrations overlapping the range. DUOS has no range parameter,
+/// so every read narrows the full listing here.
+fn within(
+    registrations: Vec<DuosRegistration>,
+    start: DateTime<FixedOffset>,
+    end: DateTime<FixedOffset>,
+) -> Vec<DuosRegistration> {
+    registrations
+        .into_iter()
+        .filter(|registration| registration.ends_at > start && registration.starts_at < end)
+        .collect()
 }
 
 /// Service identities a write depends on, resolved once before any submission.
@@ -354,11 +396,11 @@ fn mithf_shift(
     Ok(shift)
 }
 
+/// Page the account's whole registration listing. DUOS offers no range
+/// filter, so the caller narrows the result with `within`.
 async fn read_duos(
     browser: &BrowserSessions,
     config: &LiveConfig,
-    start: DateTime<FixedOffset>,
-    end: DateTime<FixedOffset>,
 ) -> Result<Vec<DuosRegistration>, LiveError> {
     let stage = Stage::start("duos.search");
     let mut result = Vec::new();
@@ -391,20 +433,18 @@ async fn read_duos(
             if finishes <= begins {
                 return Err(INVALID);
             }
-            if finishes > start && begins < end {
-                result.push(DuosRegistration {
-                    id: key,
-                    arrangement_id: id(&row["portfolioId"])?,
-                    employee_number: id(&row["helperId"])?,
-                    registration_type: id(&row["dutyTypeId"])?,
-                    starts_at: begins,
-                    ends_at: finishes,
-                    status_id: row["statusId"]
-                        .as_i64()
-                        .or_else(|| row["statusId"].as_str().and_then(|s| s.parse().ok()))
-                        .ok_or(INVALID)?,
-                });
-            }
+            result.push(DuosRegistration {
+                id: key,
+                arrangement_id: id(&row["portfolioId"])?,
+                employee_number: id(&row["helperId"])?,
+                registration_type: id(&row["dutyTypeId"])?,
+                starts_at: begins,
+                ends_at: finishes,
+                status_id: row["statusId"]
+                    .as_i64()
+                    .or_else(|| row["statusId"].as_str().and_then(|s| s.parse().ok()))
+                    .ok_or(INVALID)?,
+            });
         }
         skip += page.len();
         if !has_more {

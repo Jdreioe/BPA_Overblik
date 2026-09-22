@@ -11,14 +11,42 @@ mod timing;
 pub use browser::{forget_logins, BrowserSessions, Service, Visibility};
 pub use capture::read_shapes;
 pub use config::{load_saved_setup, LiveConfig};
-pub use destinations::{read_destinations, LiveDestinations};
+pub use destinations::LiveDestinations;
 pub use diagnostics::{app_version, redacted_report};
 pub use setup::Setup;
 pub use teamup::read_teamup;
 
-use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone};
+use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, TimeZone};
 use chrono_tz::Tz;
 use serde_json::Value;
+
+use crate::{reconciliation_range, DestinationSnapshot, SourceShift};
+
+/// Read one week's source shifts and the destination state they have to be
+/// reconciled against.
+///
+/// TeamUp, the destination catalog check and the DUOS listing do not depend on
+/// each other, so they run together. Only the MitHF read has to wait: its
+/// range covers the full bounds of the shifts TeamUp reports.
+pub async fn read_week(
+    browser: &BrowserSessions,
+    config: &LiveConfig,
+    from: NaiveDate,
+    to: NaiveDate,
+    start: DateTime<FixedOffset>,
+    end: DateTime<FixedOffset>,
+    now: DateTime<FixedOffset>,
+) -> Result<(Vec<SourceShift>, DestinationSnapshot), LiveError> {
+    let (shifts, prelude) = futures_util::try_join!(
+        teamup::read_teamup(config, from, to),
+        destinations::read_before_range(browser, config, now)
+    )?;
+    let (read_start, read_end) = reconciliation_range(&shifts, start, end);
+    let destination = prelude
+        .finish(browser, config, read_start, read_end)
+        .await?;
+    Ok((shifts, destination))
+}
 
 #[derive(Clone, Debug, thiserror::Error)]
 #[error("{0}")]

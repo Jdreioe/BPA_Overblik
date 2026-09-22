@@ -16,11 +16,11 @@ use std::{
 use teamup_shift_sync_core::{
     apply_plan_controlled, build_plan,
     live::{
-        app_version, forget_logins, load_saved_setup, read_destinations, read_shapes, read_teamup,
+        app_version, forget_logins, load_saved_setup, read_shapes, read_teamup, read_week,
         redacted_report, BrowserSessions, LiveConfig, LiveDestinations, Service, Setup, Visibility,
     },
-    plan_digest, reconciliation_range, ApplyOutcome, ApplyRequest, Outcome, PlanItem, PlanRequest,
-    PlanSystem, SyncState, TransferEvent, TransferOperation,
+    plan_digest, ApplyOutcome, ApplyRequest, Outcome, PlanItem, PlanRequest, PlanSystem, SyncState,
+    TransferEvent, TransferOperation,
 };
 use teamup_shift_sync_gui::{files::app_data_dir, preview::build_week, protocol::Week};
 use tokio::sync::{Mutex, MutexGuard};
@@ -524,12 +524,8 @@ impl Engine {
         let guard = self.sessions().await?;
         let browser = guard.as_ref().ok_or("Log ind i MitHF og DUOS først.")?;
         let (to, start, end) = range(&account, from)?;
-        let shifts = read_teamup(&account, from, to)
-            .await
-            .map_err(|e| e.to_string())?;
         let now = Utc::now().fixed_offset();
-        let (read_start, read_end) = reconciliation_range(&shifts, start, end);
-        let destination = read_destinations(browser, &account, read_start, read_end, now)
+        let (shifts, destination) = read_week(browser, &account, from, to, start, end, now)
             .await
             .map_err(|e| e.to_string())?;
         tokio::task::spawn_blocking(move || {
