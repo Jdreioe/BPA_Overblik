@@ -97,8 +97,14 @@ jobs:
 
           $env:TEAMUP_SHIFT_SYNC_CONFIG = Join-Path (Get-Location) "fixtures\offline-config.toml"
           $env:TEAMUP_FIXTURE = Join-Path (Get-Location) "fixtures\representative-week.json"
-          & $exe --self-check
-          if ($LASTEXITCODE -ne 0) { throw "packaged app failed its self-check" }
+          # The packaged GUI is a windowed app, so `&` returns without waiting
+          # and $LASTEXITCODE keeps a stale value. Wait for the process and
+          # read its exit code instead.
+          $stdout = Join-Path $env:TEMP "teamup-selfcheck.log"
+          $stderr = Join-Path $env:TEMP "teamup-selfcheck.err.log"
+          $selfcheck = Start-Process -FilePath $exe -ArgumentList "--self-check" -NoNewWindow -Wait -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          Get-Content $stdout
+          if ($selfcheck.ExitCode -ne 0) { Get-Content $stderr; throw "packaged app failed its self-check" }
           Remove-Item Env:TEAMUP_SHIFT_SYNC_CONFIG, Env:TEAMUP_FIXTURE
           if (-not (Test-Path (Join-Path $data "setup.json"))) { throw "the packaged exe erased the user's data" }
       - uses: actions/upload-artifact@v4

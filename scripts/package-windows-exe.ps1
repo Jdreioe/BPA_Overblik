@@ -24,8 +24,14 @@ Write-Host "Verifying the built binaries"
 $env:TEAMUP_SHIFT_SYNC_CONFIG = Join-Path $root "fixtures\offline-config.toml"
 $env:TEAMUP_FIXTURE = Join-Path $root "fixtures\representative-week.json"
 $gui = "target\$target\release\teamup-shift-sync-gui.exe"
-& $gui --self-check
-if ($LASTEXITCODE -ne 0) { throw "self-check failed" }
+# A release GUI build is a windowed app, so `&` returns without waiting and
+# $LASTEXITCODE keeps whatever the previous native command left. Wait for the
+# process and read its exit code instead.
+$stdout = Join-Path ([System.IO.Path]::GetTempPath()) "teamup-selfcheck.log"
+$stderr = Join-Path ([System.IO.Path]::GetTempPath()) "teamup-selfcheck.err.log"
+$selfcheck = Start-Process -FilePath $gui -ArgumentList "--self-check" -NoNewWindow -Wait -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+Get-Content $stdout
+if ($selfcheck.ExitCode -ne 0) { Get-Content $stderr; throw "self-check failed" }
 & "target\$target\release\teamup-shift-sync-rust.exe" --help | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "CLI failed to start" }
 Remove-Item Env:TEAMUP_SHIFT_SYNC_CONFIG, Env:TEAMUP_FIXTURE
