@@ -188,9 +188,6 @@ fn detail(item: &PlanItem, destination: &DestinationSnapshot, zone: Tz) -> Resul
                         .unwrap_or("ukendte timer".into());
                     format!("DUOS: registreringen ændres: {before} → {label} ({hours}).")
                 }
-                Excluded if item.reason == "future_hours" => {
-                    format!("DUOS: {label} kan overføres, når timerne er afsluttet.")
-                }
                 AlreadyMatched => format!("DUOS: {hours} er allerede registreret."),
                 _ => String::new(),
             }
@@ -419,7 +416,7 @@ pub fn build_week(
         "Ugen er klar til overførsel.".into()
     };
     let notice=if !destination_read { "MitHF og DUOS er ikke aflæst. Visningen viser, hvad TeamUp beder om, ikke hvad der allerede findes i tjenesterne." }
-        else if counts[7]>0 { "DUOS-timer registreres først, når tidsrummet er afsluttet." } else { "" }.into();
+        else { "" }.into();
     let blocked_reason = if !destination_read {
         "Log ind i MitHF og DUOS, så ugen kan aflæses."
     } else if !attention.is_empty() || has_blockers {
@@ -473,9 +470,9 @@ pub fn build_week(
 fn plural(count: usize, one: &str, many: &str) -> String {
     format!("{count} {}", if count == 1 { one } else { many })
 }
-// created, updated, sps, assignments, meetings, duos, matched, future
-fn counts(plan: &SyncPlan) -> Result<[usize; 8]> {
-    let mut counts = [0; 8];
+// created, updated, sps, assignments, meetings, duos, matched
+fn counts(plan: &SyncPlan) -> Result<[usize; 7]> {
+    let mut counts = [0; 7];
     let mut changed = BTreeSet::new();
     let mut created = BTreeSet::new();
     for item in &plan.items {
@@ -500,19 +497,15 @@ fn counts(plan: &SyncPlan) -> Result<[usize; 8]> {
                 counts[3] += 1
             }
             "mithf.set_meeting" if writes(item.outcome) => counts[4] += 1,
-            _ if item.system == PlanSystem::Duos => {
-                if writes(item.outcome) {
-                    counts[5] += 1;
-                } else if item.outcome == Outcome::Excluded && item.reason == "future_hours" {
-                    counts[7] += 1;
-                }
+            _ if item.system == PlanSystem::Duos && writes(item.outcome) => {
+                counts[5] += 1;
             }
             _ => {}
         }
     }
     Ok(counts)
 }
-fn labels(counts: &[usize; 8]) -> Vec<String> {
+fn labels(counts: &[usize; 7]) -> Vec<String> {
     [
         ("ny vagt", "nye vagter"),
         ("ændret vagt", "ændrede vagter"),
@@ -521,7 +514,6 @@ fn labels(counts: &[usize; 8]) -> Vec<String> {
         ("vagtmøde", "vagtmøder"),
         ("registrering", "registreringer"),
         ("vagt", "vagter"),
-        ("SPS-tidsrum", "SPS-tidsrum"),
     ]
     .iter()
     .zip(counts)
@@ -534,7 +526,7 @@ fn labels(counts: &[usize; 8]) -> Vec<String> {
     })
     .collect()
 }
-fn summary(counts: &[usize; 8]) -> Vec<String> {
+fn summary(counts: &[usize; 7]) -> Vec<String> {
     labels(counts)
         .into_iter()
         .enumerate()
@@ -545,8 +537,7 @@ fn summary(counts: &[usize; 8]) -> Vec<String> {
                 match i {
                     0..=4 => " i MitHF",
                     5 => " i DUOS",
-                    6 => " er allerede på plads",
-                    _ => " kan overføres, når timerne er afsluttet",
+                    _ => " er allerede på plads",
                 }
             )
         })

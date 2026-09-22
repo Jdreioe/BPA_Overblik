@@ -110,6 +110,64 @@ fn read_range_covers_full_shifts_but_excludes_touching_boundaries() {
 }
 
 #[test]
+fn future_and_ongoing_duos_intervals_are_planned_for_transfer() {
+    use serde_json::json;
+    use teamup_shift_sync_core::Outcome;
+
+    let config: PlanningConfig = serde_json::from_value(json!({
+        "timezone": "Europe/Copenhagen", "default_helper_count": 1,
+        "duos_arrangement_id": "arrangement", "duos_registration_type": "Almindelig",
+        "helpers": {"helper": {"mithf_name": "Helper", "duos_employee_number": "123"}}
+    }))
+    .unwrap();
+    let state = SyncState::open(":memory:").unwrap();
+    for (starts_at, ends_at, notes, now) in [
+        // Ongoing at planning time.
+        (
+            "2026-09-20T19:00:00+02:00",
+            "2026-09-20T22:00:00+02:00",
+            "uni 19-21",
+            "2026-09-20T20:00:00+02:00",
+        ),
+        // Entirely in the future at planning time.
+        (
+            "2026-09-20T20:00:00+02:00",
+            "2026-09-21T00:00:00+02:00",
+            "uni 21-22",
+            "2026-09-20T20:00:00+02:00",
+        ),
+    ] {
+        let shift: SourceShift = serde_json::from_value(json!({
+            "calendar_id": "calendar", "event_id": "event", "occurrence_id": starts_at,
+            "title": "Shift", "helper_key": "helper", "notes": notes,
+            "starts_at": starts_at, "ends_at": ends_at
+        }))
+        .unwrap();
+        let shifts = [shift];
+        let plan = build_plan(
+            &PlanRequest {
+                config: &config,
+                shifts: &shifts,
+                destination: &DestinationSnapshot::default(),
+                range_start: shifts[0].starts_at,
+                range_end: shifts[0].ends_at,
+                now: DateTime::parse_from_rfc3339(now).unwrap(),
+                live: true,
+            },
+            &state,
+        )
+        .unwrap();
+        let duos = plan
+            .items
+            .iter()
+            .find(|i| i.system == PlanSystem::Duos)
+            .expect("one DUOS step");
+        assert_eq!(duos.outcome, Outcome::WouldCreate, "notes: {notes}");
+        assert_eq!(duos.reason, "");
+    }
+}
+
+#[test]
 fn planning_preserves_recovery_records_and_rejects_corrupt_state() {
     use serde_json::json;
     use teamup_shift_sync_core::{Outcome, PlanningError};

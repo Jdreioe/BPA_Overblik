@@ -151,15 +151,6 @@ pub fn build_plan(request: &PlanRequest<'_>, state: &SyncState) -> Result<SyncPl
                     "DUOS arrangement and registration type must be confirmed in configuration",
                     "missing_configuration",
                 )
-            } else if expected.ends_at > request.now {
-                item(
-                    shift,
-                    PlanSystem::Duos,
-                    &key,
-                    Outcome::Excluded,
-                    "SPS interval is ongoing or in the future; DUOS is retrospective only",
-                    "future_hours",
-                )
             } else {
                 let reconciled = reconcile_duos(
                     &expected,

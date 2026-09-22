@@ -128,7 +128,7 @@ cargo test -p teamup-shift-sync-gui --all-targets
 The frozen golden files compare the native week view against 16 Python-era
 presentation scenarios. They cover split shifts, colours, overnight
 continuations, old/new values, helper/category-only writes, blocked instructions,
-future DUOS hours, and empty, unchanged and unread weeks. Invalid display times
+DUOS registrations due later the same day, and empty, unchanged and unread weeks. Invalid display times
 fail the preview. UI state tests check approval consumption, blocked and stale
 previews, setup reload and changes attempted during apply. Further tests cover
 screen navigation, that only a missing destination entry offers allowing a

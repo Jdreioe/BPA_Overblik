@@ -470,13 +470,9 @@ impl<'a> LiveDestinations<'a> {
                 ));
             }
         }
-        // Wall-clock, not the run's fixed planning time: DUOS accepts only
-        // completed intervals, and an apply may outlive its own preview.
-        let request = duos_request(
-            self.config.planning.timezone,
-            item,
-            chrono::Utc::now().fixed_offset(),
-        )?;
+        // The 26-hour limit is checked at submission, so an apply that
+        // outlives its own preview still validates what it actually sends.
+        let request = duos_request(self.config.planning.timezone, item)?;
         self.browser
             .submit(request.service, request.action, request.body)
             .await?;
@@ -549,18 +545,12 @@ struct Request {
     body: Value,
 }
 
-fn duos_request(
-    zone: Tz,
-    item: &PlanItem,
-    now: DateTime<FixedOffset>,
-) -> Result<Request, LiveError> {
+fn duos_request(zone: Tz, item: &PlanItem) -> Result<Request, LiveError> {
     let start = moment(zone, &item.payload["starts_at"])?;
     let end = moment(zone, &item.payload["ends_at"])?;
     let hours = (end - start).num_seconds() as f64 / 3600.0;
-    if end > now || !(0.0 < hours && hours <= 26.0) {
-        return Err(LiveError(
-            "DUOS kræver et afsluttet interval på højst 26 timer.",
-        ));
+    if !(0.0 < hours && hours <= 26.0) {
+        return Err(LiveError("DUOS kræver et interval på højst 26 timer."));
     }
     let mut body = json!({
         "portfolioId": number(&item.payload["arrangement_id"])?,
@@ -779,15 +769,11 @@ mod tests {
         }
     }
 
-    fn build(
-        item: &PlanItem,
-        snapshot: &DestinationSnapshot,
-        now: DateTime<FixedOffset>,
-    ) -> Result<Request, LiveError> {
+    fn build(item: &PlanItem, snapshot: &DestinationSnapshot) -> Result<Request, LiveError> {
         let zone = chrono_tz::Europe::Copenhagen;
         let step = item.step_key.split('#').next().unwrap_or_default();
         if item.system == PlanSystem::Duos {
-            return duos_request(zone, item, now);
+            return duos_request(zone, item);
         }
         if step == "mithf.create_shift" {
             return shift_request(&identities(), zone, item, snapshot);
@@ -811,7 +797,6 @@ mod tests {
         name: String,
         item: PlanItem,
         snapshot: DestinationSnapshot,
-        now: DateTime<FixedOffset>,
         request: Submitted,
     }
     #[derive(serde::Deserialize)]
@@ -832,7 +817,7 @@ mod tests {
             "the oracle must cover every supported operation"
         );
         for case in cases {
-            let request = build(&case.item, &case.snapshot, case.now)
+            let request = build(&case.item, &case.snapshot)
                 .unwrap_or_else(|error| panic!("{}: {error}", case.name));
             assert_eq!(request.service.key(), case.request.system, "{}", case.name);
             assert_eq!(request.action, case.request.action, "{}", case.name);
@@ -885,21 +870,27 @@ mod tests {
             None,
         )
     }
-    fn now() -> DateTime<FixedOffset> {
-        DateTime::parse_from_rfc3339("2025-01-01T00:00:00+01:00").unwrap()
-    }
-
     #[test]
-    fn duos_rejects_unfinished_and_overlong_intervals() {
+    fn duos_accepts_future_and_ongoing_but_rejects_overlong_intervals() {
         let future = duos("2025-06-01T08:00:00+02:00", "2025-06-01T16:00:00+02:00");
-        assert!(duos_request(zone(), &future, now()).is_err());
+        assert!(
+            duos_request(zone(), &future).is_ok(),
+            "future intervals are accepted"
+        );
+        let ongoing = duos("2024-12-31T22:00:00+01:00", "2025-01-01T06:00:00+01:00");
+        assert!(
+            duos_request(zone(), &ongoing).is_ok(),
+            "ongoing intervals are accepted"
+        );
         let long = duos("2024-03-01T08:00:00+01:00", "2024-03-02T11:00:00+01:00");
-        assert!(duos_request(zone(), &long, now()).is_err());
+        assert!(duos_request(zone(), &long).is_err());
         let limit = duos("2024-03-01T08:00:00+01:00", "2024-03-02T10:00:00+01:00");
         assert!(
-            duos_request(zone(), &limit, now()).is_ok(),
+            duos_request(zone(), &limit).is_ok(),
             "26 hours is still allowed"
         );
+        let empty = duos("2024-03-01T08:00:00+01:00", "2024-03-01T08:00:00+01:00");
+        assert!(duos_request(zone(), &empty).is_err());
     }
 
     #[test]

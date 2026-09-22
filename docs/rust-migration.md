@@ -180,8 +180,8 @@ Two differences from the previous engine, both deliberate:
   puts in a meeting payload, so a live P-møde write raised there. The Rust
   path is the corrected one.
 
-The 26-hour completed-interval rule for DUOS uses the wall clock at submission,
-not the run's fixed planning time, because an apply can outlive its preview.
+The 26-hour interval rule for DUOS is checked at submission against the
+interval duration alone; future and ongoing intervals are accepted.
 
 ### Validation
 
