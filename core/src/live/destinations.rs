@@ -14,6 +14,11 @@ use crate::{
     DestinationSnapshot, DuosRegistration, MitHfShift, PlanItem, PlanSystem, TimeInterval,
 };
 
+/// How many shifts one MitHF extras call asks about. The endpoint takes a
+/// comma-separated `eids` list and answers keyed by shift id; the bound keeps
+/// one request's body predictable over a long range.
+const EKSTRA_BATCH: usize = 20;
+
 /// How many MitHF extras calls a read keeps in flight. The browser serves them
 /// from one authenticated tab, so this stays low enough not to flood it.
 const EKSTRA_CONCURRENCY: usize = 4;
@@ -337,23 +342,40 @@ async fn read_mithf(
         .await?;
     stage.done(1);
     let raw_by_id = mithf_rows(config, &response, &first, &last, start, end)?;
-    // One extras call per shift row, none depending on another. Order is kept,
-    // so the snapshot does not change with how the calls happen to finish.
+    // `ekstra` answers for several shifts at once, keyed by shift id, so a
+    // week is a couple of calls rather than one per row. Batches are bounded
+    // so a long range cannot grow a single request without limit, and the
+    // remaining calls do not depend on each other.
     let stage = Stage::start("mithf.ekstra");
-    let mut calls = Vec::with_capacity(raw_by_id.len());
-    for identifier in raw_by_id.keys() {
-        calls.push(browser.request(Service::Mithf, "ekstra", json!({"eids": identifier})));
+    let identifiers: Vec<&String> = raw_by_id.keys().collect();
+    let mut calls = Vec::new();
+    for batch in identifiers.chunks(EKSTRA_BATCH) {
+        let eids = batch
+            .iter()
+            .map(|id| id.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        calls.push(browser.request(Service::Mithf, "ekstra", json!({ "eids": eids })));
     }
     let extras: Vec<Value> = stream::iter(calls)
         .buffered(EKSTRA_CONCURRENCY)
         .try_collect()
         .await?;
     stage.done(extras.len());
-    raw_by_id
-        .iter()
-        .zip(&extras)
-        .map(|((identifier, row), extra)| mithf_shift(config, identifier, row, extra))
-        .collect()
+    let mut shifts = Vec::with_capacity(identifiers.len());
+    for (batch, extra) in identifiers.chunks(EKSTRA_BATCH).zip(&extras) {
+        for identifier in batch {
+            // A shift missing from its own batch's answer fails the read: the
+            // planner may not treat absent extras as "no SPS hours".
+            shifts.push(mithf_shift(
+                config,
+                identifier,
+                &raw_by_id[*identifier],
+                extra,
+            )?);
+        }
+    }
+    Ok(shifts)
 }
 
 fn mithf_rows(
@@ -956,6 +978,32 @@ mod tests {
                 day,
             )
         );
+    }
+
+    /// One batched answer covers several shifts, so each shift must take the
+    /// records filed under its own id and no other's.
+    #[test]
+    fn a_batched_extras_answer_is_read_per_shift() {
+        let config = config("ord-1", json!({}));
+        let row = |day: &str| {
+            json!({"startFaktisk": day, "start": "08:00", "slutdato": day, "slut": "16:00",
+                   "daekket": 1, "navn": "Anna Hansen"})
+        };
+        let record = |id: &str, name: &str, day: &str, from: &str, to: &str| json!({"id": id, "navn": name, "fraDato": day, "fra": from, "tilDato": day, "til": to});
+        let extra = json!({"ekstra": {
+            "11": {"paa": [record("r-1", "SPS timer", "2026-09-14", "09:00", "10:00")]},
+            "12": {"paa": [record("r-2", "Vagtmøde", "2026-09-15", "12:00", "13:00")]},
+        }});
+
+        let first = mithf_shift(&config, "11", &row("2026-09-14"), &extra).expect("first shift");
+        let second = mithf_shift(&config, "12", &row("2026-09-15"), &extra).expect("second shift");
+
+        assert_eq!(first.sps_record_ids, ["r-1"]);
+        assert!(first.meeting_record_ids.is_empty());
+        assert_eq!(second.meeting_record_ids, ["r-2"]);
+        assert!(second.sps_record_ids.is_empty());
+        // A shift the answer does not cover is a failed read, never "no hours".
+        assert!(mithf_shift(&config, "13", &row("2026-09-16"), &extra).is_err());
     }
 
     #[test]
