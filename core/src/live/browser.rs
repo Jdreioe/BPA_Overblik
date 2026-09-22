@@ -368,21 +368,31 @@ impl BrowserSessions {
 
     /// Reach MitHF's shift calendar through the site's own entry action, so a
     /// restored session does not depend on someone clicking it in a window.
+    ///
+    /// A freshly launched browser is debuggable before its entry page has
+    /// rendered, so the action is retried until the calendar appears rather
+    /// than given up on the first attempt. The entry action is only repeated
+    /// after the previous one has had time to navigate, so a ticket exchange
+    /// already under way is never cut short.
     async fn enter_calendar(&self) -> Result<(), LiveError> {
-        let page = self.page(Service::Mithf, false).await?;
-        let result = cdp(
-            &page,
-            "Runtime.evaluate",
-            json!({"expression": format!("({ENTER_CALENDAR})()"), "returnByValue": true}),
-        )
-        .await?;
-        if result["result"]["value"] != json!(true) {
-            return Err(INVALID);
-        }
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        let mut entered_at: Option<tokio::time::Instant> = None;
         loop {
             if self.page(Service::Mithf, true).await.is_ok() {
                 return Ok(());
+            }
+            if entered_at.is_none_or(|at| at.elapsed() >= Duration::from_secs(3)) {
+                if let Ok(page) = self.page(Service::Mithf, false).await {
+                    let result = cdp(
+                        &page,
+                        "Runtime.evaluate",
+                        json!({"expression": format!("({ENTER_CALENDAR})()"), "returnByValue": true}),
+                    )
+                    .await;
+                    if result.is_ok_and(|result| result["result"]["value"] == json!(true)) {
+                        entered_at = Some(tokio::time::Instant::now());
+                    }
+                }
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(INVALID);
