@@ -35,8 +35,7 @@ struct StoredStep {
 fn plans_match_recorded_safety_scenarios_and_representative_week() {
     // Frozen at the Python removal cutover: the oracle compared 263 safety
     // combinations and the representative week, all passing.
-    let cases: Vec<Case> =
-        serde_json::from_str(include_str!("goldens/planner.json")).unwrap();
+    let cases: Vec<Case> = serde_json::from_str(include_str!("goldens/planner.json")).unwrap();
     assert!(cases.len() > 200, "oracle must run all safety combinations");
     for (index, case) in cases.into_iter().enumerate() {
         let state = SyncState::open(":memory:").unwrap();

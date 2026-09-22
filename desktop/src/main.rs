@@ -8,6 +8,7 @@
 mod native;
 mod selfcheck;
 mod setup;
+mod update;
 mod widgets;
 
 fn main() -> iced::Result {

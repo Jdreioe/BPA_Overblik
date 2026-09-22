@@ -9,10 +9,10 @@ mod teamup;
 
 pub use browser::{forget_logins, BrowserSessions, Service, Visibility};
 pub use capture::read_shapes;
-pub use diagnostics::redacted_report;
-pub use setup::Setup;
 pub use config::{load_saved_setup, LiveConfig};
 pub use destinations::{read_destinations, LiveDestinations};
+pub use diagnostics::{app_version, redacted_report};
+pub use setup::Setup;
 pub use teamup::read_teamup;
 
 use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone};
@@ -23,23 +23,31 @@ use serde_json::Value;
 #[error("{0}")]
 pub struct LiveError(pub &'static str);
 
-const INVALID: LiveError = LiveError("Tjenesten returnerede ufuldstændige eller ugyldige data. Prøv igen; intet er overført.");
+const INVALID: LiveError = LiveError(
+    "Tjenesten returnerede ufuldstændige eller ugyldige data. Prøv igen; intet er overført.",
+);
 
 fn rows(value: &Value) -> Result<&[Value], LiveError> {
     value.as_array().map(Vec::as_slice).ok_or(INVALID)
 }
-fn text(value: &Value) -> Result<&str, LiveError> { value.as_str().ok_or(INVALID) }
+fn text(value: &Value) -> Result<&str, LiveError> {
+    value.as_str().ok_or(INVALID)
+}
 /// A `{id, name}` option as the setup document records it. Whitespace in the
 /// name is collapsed so a service's formatting cannot change a stored choice.
 pub(crate) fn choice(identifier: &Value, name: &Value) -> Result<Value, LiveError> {
     let name = text(name)?.split_whitespace().collect::<Vec<_>>().join(" ");
-    if name.is_empty() { return Err(INVALID); }
+    if name.is_empty() {
+        return Err(INVALID);
+    }
     Ok(serde_json::json!({"id": id(identifier)?, "name": name}))
 }
 /// The same, for a row whose display name is under one of several keys.
 pub(crate) fn named(value: &Value) -> Result<Value, LiveError> {
-    let name = ["name", "navn", "title", "description", "displayName"].iter()
-        .find_map(|key| value[*key].as_str().filter(|s| !s.is_empty())).ok_or(INVALID)?;
+    let name = ["name", "navn", "title", "description", "displayName"]
+        .iter()
+        .find_map(|key| value[*key].as_str().filter(|s| !s.is_empty()))
+        .ok_or(INVALID)?;
     choice(&value["id"], &serde_json::json!(name))
 }
 /// Collapse repeated ids, rejecting rows that disagree about the same id.
@@ -47,8 +55,12 @@ pub(crate) fn unique(values: Vec<Value>) -> Result<Value, LiveError> {
     let mut result: Vec<Value> = Vec::new();
     for value in values {
         if let Some(existing) = result.iter().find(|v| v["id"] == value["id"]) {
-            if *existing != value { return Err(INVALID); }
-        } else { result.push(value); }
+            if *existing != value {
+                return Err(INVALID);
+            }
+        } else {
+            result.push(value);
+        }
     }
     Ok(Value::Array(result))
 }
@@ -76,15 +88,24 @@ fn id(value: &Value) -> Result<String, LiveError> {
 }
 fn timestamp(value: &Value, zone: Tz) -> Result<DateTime<FixedOffset>, LiveError> {
     if let Some(number) = value.as_f64() {
-        if !number.is_finite() || number.abs() > 8_000_000_000_000.0 { return Err(INVALID); }
+        if !number.is_finite() || number.abs() > 8_000_000_000_000.0 {
+            return Err(INVALID);
+        }
         return DateTime::from_timestamp_micros((number * 1_000_000.0).round() as i64)
-            .map(|v| v.with_timezone(&zone).fixed_offset()).ok_or(INVALID);
+            .map(|v| v.with_timezone(&zone).fixed_offset())
+            .ok_or(INVALID);
     }
     let value = text(value)?;
-    if let Ok(date) = DateTime::parse_from_rfc3339(value) { return Ok(date); }
+    if let Ok(date) = DateTime::parse_from_rfc3339(value) {
+        return Ok(date);
+    }
     let local = NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.f")
         .or_else(|_| NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M"))
         .map_err(|_| INVALID)?;
-    zone.from_local_datetime(&local).single().map(|v| v.fixed_offset())
-        .ok_or(LiveError("Tjenesten returnerede et tvetydigt eller ugyldigt lokalt tidspunkt omkring sommertid."))
+    zone.from_local_datetime(&local)
+        .single()
+        .map(|v| v.fixed_offset())
+        .ok_or(LiveError(
+            "Tjenesten returnerede et tvetydigt eller ugyldigt lokalt tidspunkt omkring sommertid.",
+        ))
 }

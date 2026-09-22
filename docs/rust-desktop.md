@@ -70,8 +70,8 @@ counts and yes/no answers only, with no credential, cookie, calendar link,
 service identifier, name, shift text or raw service response, and it needs no
 service or confirmed account, so it also works while setup is stuck.
 
-Nothing is published by the app: there is no token and no API call, only a
-`…/issues/new?title=&body=` address that the browser opens. The person reads the
+The app does not publish the report: there is no token and no issues API
+call, only a `…/issues/new?title=&body=` address that the browser opens. The person reads the
 filled form and presses Submit themselves, and the screen says beforehand that
 the issue is public and needs a GitHub account. A report too long for an address
 is left out of it, and the form then asks for the saved file instead. If no
@@ -85,6 +85,13 @@ The native workflow uses the same separate browser profiles as the Rust CLI.
 Only one native browser owner can run at a time. Browsers belong to that
 window and close when it exits. Use `TEAMUP_BROWSER_PATH` if Chromium cannot
 be found; this mode does not download a browser.
+
+On startup the app asks GitHub for the latest dated release. A newer package
+shows a banner with **Hent opdatering**. Windows and Linux download and replace
+the running file, then reopen it. macOS downloads the `.pkg` and opens the
+installer. **Tjek for opdateringer** on Indstillinger runs the same check by
+hand. A development build (`0.1.0`) never offers an update. Failures on the
+automatic check stay silent.
 
 Operations run asynchronously. Controls are disabled while an operation is
 running, so the selected account and week cannot change during a transfer.

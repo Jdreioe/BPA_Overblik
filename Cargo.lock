@@ -4270,6 +4270,7 @@ dependencies = [
  "chrono-tz",
  "directories",
  "iced",
+ "reqwest",
  "serde",
  "serde_json",
  "teamup-shift-sync-core",

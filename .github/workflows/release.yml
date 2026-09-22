@@ -181,7 +181,8 @@ jobs:
           Pakkerne er endnu ikke signeret, så Windows og macOS spørger en ekstra
           gang, før de åbner dem; vejledningen viser hvad du skal klikke på.
 
-          Opdatering beholder dine logins, dine kobler og din synkroniseringshistorik.
+          Appen tilbyder selv opdateringen, når en nyere udgivelse er klar. Den
+          beholder dine logins, dine kobler og din synkroniseringshistorik.
           Afinstallation sletter dem heller ikke.
 
           Chromium skal være installeret på maskinen. Appen henter aldrig selv en browser.

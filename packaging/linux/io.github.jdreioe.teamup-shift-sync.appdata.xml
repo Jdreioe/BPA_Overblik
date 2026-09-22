@@ -14,8 +14,8 @@
     <p>
       Vagtplanlægning henter en uges vagter fra TeamUp, viser hvad der vil
       blive ændret, og overfører først noget når ugen er godkendt. Hver
-      overførsel læses tilbage og kontrolleres. Intet sker automatisk eller i
-      baggrunden.
+      overførsel læses tilbage og kontrolleres. Ingen vagter overføres
+      automatisk eller i baggrunden.
     </p>
   </description>
   <launchable type="desktop-id">io.github.jdreioe.teamup-shift-sync.desktop</launchable>

@@ -71,11 +71,13 @@ spørger installationen én gang. Den kører ikke noget i baggrunden.
 
 ## Opdatering
 
-Hent den nyeste fil. På Windows og Linux erstatter du den gamle fil med den
-nye. På macOS installerer du `.pkg`-filen oven i den gamle, præcis som første
-gang. Dine logins, dine kobler og din synkroniseringshistorik følger med over.
-Programmet opdaterer aldrig sig selv, og det synkroniserer aldrig noget af sig
-selv.
+Når en ny version er klar, viser appen det øverst i vinduet. Vælg **Hent
+opdatering**. På Windows og Linux erstatter appen filen og åbner den nye udgave.
+På macOS åbner den installationspakken, som du følger som første gang.
+
+Du kan også vælge **Tjek for opdateringer** under Indstillinger. Dine logins,
+dine kobler og din synkroniseringshistorik følger med over. Appen synkroniserer
+aldrig noget af sig selv.
 
 ## Hvis noget går galt
 

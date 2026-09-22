@@ -25,9 +25,10 @@ The build passes the same value in as an environment variable, so the redacted
 diagnostics report the installed release rather than `0.1.0`. A plain
 `cargo build` still reports the crate version.
 
-Windows is a portable `.exe` so an updater can replace the running file without
-administrator rights or Windows Installer. The file name carries the dated
-release; the app reports the same value.
+Windows is a portable `.exe` so the in-app updater can replace the running file
+without administrator rights. Linux does the same to the AppImage. macOS still
+opens the `.pkg`, because writing into `/Applications` needs administrator
+rights. The file name carries the dated release; the app reports the same value.
 
 ## Releasing
 
