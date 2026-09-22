@@ -56,6 +56,13 @@ const ENTER_CALENDAR: &str = r#"() => {
 const DUOS_SESSION: &str = r#"() => localStorage.getItem('role') === 'citizen'
   && !!localStorage.getItem('token')"#;
 
+/// Whether MitHF's calendar page has parsed the request token its own API
+/// calls carry. Navigation commits before the document finishes loading, so a
+/// matching URL alone does not mean a request can be served. Presence only:
+/// the token never leaves the page.
+const MITHF_SESSION: &str = r#"() => [...document.scripts].filter(s => !s.src)
+  .some(s => /var TOK=("[^"]*"|'[^']*')/.test(s.textContent))"#;
+
 /// Chromium visibility for a launch. Interactive login and its two-factor step
 /// need a window; every other launch reuses the saved profile without one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -259,13 +266,7 @@ impl BrowserSessions {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
             if let Ok(page) = self.page(Service::Duos, false).await {
-                let restored = cdp(
-                    &page,
-                    "Runtime.evaluate",
-                    json!({"expression": format!("({DUOS_SESSION})()"), "returnByValue": true}),
-                )
-                .await;
-                if restored.is_ok_and(|result| result["result"]["value"] == json!(true)) {
+                if present(&page, DUOS_SESSION).await {
                     return;
                 }
             }
@@ -378,8 +379,12 @@ impl BrowserSessions {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
         let mut entered_at: Option<tokio::time::Instant> = None;
         loop {
-            if self.page(Service::Mithf, true).await.is_ok() {
-                return Ok(());
+            // The calendar page has to be able to serve a request, not merely
+            // exist: it carries the token every MitHF call sends.
+            if let Ok(page) = self.page(Service::Mithf, true).await {
+                if present(&page, MITHF_SESSION).await {
+                    return Ok(());
+                }
             }
             if entered_at.is_none_or(|at| at.elapsed() >= Duration::from_secs(3)) {
                 if let Ok(page) = self.page(Service::Mithf, false).await {
@@ -437,6 +442,18 @@ impl BrowserSessions {
             Service::Duos => LiveError("DUOS kunne ikke læses. Log ind i DUOS igen, og prøv igen."),
         })
     }
+}
+
+/// Answer a page-side presence probe. Any failure counts as "not ready", so a
+/// caller can poll this without turning a slow page into an error of its own.
+async fn present(page: &str, probe: &str) -> bool {
+    cdp(
+        page,
+        "Runtime.evaluate",
+        json!({"expression": format!("({probe})()"), "returnByValue": true}),
+    )
+    .await
+    .is_ok_and(|result| result["result"]["value"] == json!(true))
 }
 
 async fn cdp(socket: &str, method: &str, params: Value) -> Result<Value, LiveError> {
