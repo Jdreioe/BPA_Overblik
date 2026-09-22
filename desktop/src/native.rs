@@ -972,10 +972,14 @@ impl std::fmt::Debug for Message {
         f.write_str("NativeMessage")
     }
 }
+/// The week is read from TeamUp, so the button that fetches it says where it
+/// comes from. It shows the plan; it does not propose anything on its own.
+const SHOW_WEEK: &str = "Se vagtplan fra TeamUp";
+
 /// Short Danish guidance for the Hjælp screen.
 const HELP: [&str; 6] = [
     "1. Log ind i MitHF og DUOS under Indstillinger. Login holder, indtil tjenesten selv logger dig ud.",
-    "2. Vælg ugen på forsiden, og vælg Se ændringer. Appen læser TeamUp, MitHF og DUOS og viser, hvad der mangler.",
+    "2. Vælg ugen på forsiden, og vælg Se vagtplan fra TeamUp. Appen læser TeamUp, MitHF og DUOS og viser, hvad der mangler.",
     "3. Løs først punkterne under Kræver opmærksomhed. Rettelser laves i TeamUp eller i tjenesten, ikke i appen.",
     "4. Vælg Overfør ændringer. Hver ændring læses tilbage og bekræftes, før den næste begynder.",
     "Appen sletter aldrig noget i MitHF eller DUOS, og den godkender ikke registreringer for hjælperen.",
@@ -1931,7 +1935,7 @@ impl NativeApp {
                 if self.needs_recheck {
                     "Kontrollér igen"
                 } else {
-                    "Se ændringer"
+                    SHOW_WEEK
                 },
                 Message::Preview,
             ));
@@ -1939,7 +1943,7 @@ impl NativeApp {
         } else if self.needs_recheck {
             actions = actions.push(self.primary("Kontrollér igen", Message::Preview));
         } else {
-            actions = actions.push(self.primary("Se ændringer", Message::Preview));
+            actions = actions.push(self.primary(SHOW_WEEK, Message::Preview));
         }
         actions.into()
     }

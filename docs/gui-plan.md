@@ -57,7 +57,7 @@ necessary, provide a guided one-time field and document the limitation clearly.
 
 The home screen shows service connection status, the last verified transfer,
 and the current Monday-to-Sunday week. Previous/next arrows and "Denne uge"
-cover normal navigation. The primary button is "Se ændringer".
+cover normal navigation. The primary button is "Se vagtplan fra TeamUp".
 
 The preview shows day, helper and shift time, followed by what will happen in
 MitHF and DUOS. Separate SPS intervals remain separate. Overnight shifts show
@@ -143,7 +143,7 @@ login. Recovery follows setup and transfer. Release validation covers all paths.
 Acceptance requires a person unfamiliar with the repository to install and
 reach a correct preview without a terminal or editing files. After setup, an
 ordinary unchanged-login week should take two primary actions from home:
-"Se ændringer" and "Overfør ændringer". Measure first-run friction and fix any
+"Se vagtplan fra TeamUp" and "Overfør ændringer". Measure first-run friction and fix any
 step requiring an explanation of API keys, CDP, TOML, hashes or employee IDs.
 If TeamUp provisioning cannot meet that target, record the precise exception.
 
