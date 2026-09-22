@@ -1,7 +1,8 @@
-//! Shared Danish week widgets: the hour grid and the day-by-day list.
+//! Shared Danish week widgets: the hour grid.
 //!
-//! Both render the same [`Week`] the core-based preview builds, so the grid
-//! and the text below it can never disagree about what the week contains.
+//! The grid renders the [`Week`] the core-based preview builds. One status
+//! line above it (in `native.rs`) carries the week's state, so neither the
+//! cells nor extra lists repeat it.
 
 use chrono::{Datelike, NaiveDate};
 use iced::widget::{column, container, row, space, text};
@@ -42,13 +43,6 @@ fn grid_lanes(blocks: &[Block]) -> Vec<Vec<&Block>> {
         }
     }
     lanes
-}
-
-fn detail_blocks(blocks: &[Block], first_day: bool) -> impl Iterator<Item = &Block> {
-    // A shift starting before Monday has no earlier visible piece.
-    blocks
-        .iter()
-        .filter(move |block| first_day || !block.continues_before)
 }
 
 /// Seven day columns with each shift drawn over the hours it covers.
@@ -114,54 +108,29 @@ pub fn week_grid<'a, M: 'a>(week: &'a Week) -> Element<'a, M> {
 }
 
 fn block_body<'a, M: 'a>(block: &'a Block) -> Element<'a, M> {
-    let mut body = column![
-        text(format!("{} {}", status_marker(&block.status), block.helper)).size(11),
-        text(&block.time_label).size(10),
-    ]
-    .spacing(0);
-    if !block.sps_label.is_empty() {
-        body = body.push(text(format!("◆ SPS {}", block.sps_label)).size(10));
-    }
-    if !block.part_label.is_empty() {
-        body = body.push(text(&block.part_label).size(9));
-    }
+    // The cell carries who and what-state. Time is the block's position on
+    // the clock; continuation and SPS are marks, with their times in the
+    // transfer summary and attention items instead of here.
+    let mut body =
+        column![text(format!("{} {}", status_marker(&block.status), block.helper)).size(11),]
+            .spacing(0);
+    let mut marks: Vec<&str> = Vec::new();
     if block.continues_before {
-        body = body.push(text("▲ fortsat fra dagen før").size(9));
+        marks.push("▲");
     }
     if block.continues_after {
-        body = body.push(text("▼ fortsætter i morgen").size(9));
+        marks.push("▼");
+    }
+    if !block.sps_label.is_empty() {
+        marks.push("◆ SPS");
+    }
+    if !block.part_label.is_empty() {
+        marks.push(&block.part_label);
+    }
+    if !marks.is_empty() {
+        body = body.push(text(marks.join(" ")).size(9));
     }
     body.into()
-}
-
-/// The same week as text, with the values the grid has no room for.
-pub fn day_details<'a, M: 'a>(week: &'a Week) -> Element<'a, M> {
-    let mut list = column![text("Dag for dag").size(16)].spacing(8);
-    for (index, day) in week.days.iter().enumerate() {
-        let mut blocks = detail_blocks(&day.blocks, index == 0).peekable();
-        if blocks.peek().is_none() {
-            continue;
-        }
-        let mut entry = column![text(&day.label).size(14)].spacing(2);
-        for block in blocks {
-            let mut heading = format!(
-                "{} {} · {} · {}",
-                status_marker(&block.status),
-                block.helper,
-                block.time_label,
-                block.status_label
-            );
-            if !block.part_label.is_empty() {
-                heading.push_str(&format!(" · {}", block.part_label));
-            }
-            entry = entry.push(text(heading).size(13));
-            for detail in &block.details {
-                entry = entry.push(text(format!("    {detail}")).size(13));
-            }
-        }
-        list = list.push(entry);
-    }
-    list.into()
 }
 
 /// Text cue beside every colour, so status never depends on colour alone.
@@ -178,7 +147,7 @@ fn status_marker(status: &str) -> &'static str {
 /// Fill the block with the helper's own Teamup colour, tinted so the text
 /// stays readable, and outline it in the status colour. Colour therefore
 /// carries who is on the shift, exactly as in Teamup, while status keeps the
-/// outline plus its text marker and the day-by-day list below the grid.
+/// outline plus its text marker.
 fn block_style(
     status: &str,
     helper_color: &str,
@@ -299,10 +268,8 @@ mod tests {
     fn week_widgets_render_without_panicking() {
         let week = test_week();
         let _ = week_grid::<()>(&week);
-        let _ = day_details::<()>(&week);
         let empty = Week::default();
         let _ = week_grid::<()>(&empty);
-        let _ = day_details::<()>(&empty);
     }
 
     /// A helper colour tints the fill; anything unusable falls back to a
@@ -348,18 +315,6 @@ mod tests {
                 .windows(2)
                 .all(|pair| pair[0].minutes_to <= pair[1].minutes_from));
         }
-    }
-
-    #[test]
-    fn monday_continuation_keeps_details_without_repeating_them_on_tuesday() {
-        let mut block = test_week().days[0].blocks[0].clone();
-        block.continues_before = true;
-        block.details = vec!["DUOS: registreringen ændres: 22:00–23:00 → 22:00–24:00.".into()];
-        let blocks = vec![block];
-        let visible: Vec<_> = detail_blocks(&blocks, true).collect();
-        assert_eq!(visible.len(), 1);
-        assert_eq!(visible[0].details, blocks[0].details);
-        assert_eq!(detail_blocks(&blocks, false).count(), 0);
     }
 
     #[test]

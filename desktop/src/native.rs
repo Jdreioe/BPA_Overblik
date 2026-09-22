@@ -1023,6 +1023,19 @@ impl NativeApp {
             }
             return iced::window::close(id);
         }
+        // Opening the TeamUp key form uses the person's own browser and
+        // touches neither the setup document nor the MitHF/DUOS profiles, so
+        // it is safe at any time, including mid-transfer.
+        if matches!(message, Message::Setup(setup::Message::OpenTeamupKeys)) {
+            open_in_browser(setup::TEAMUP_KEYS_URL);
+            return Task::none();
+        }
+        if matches!(message, Message::Setup(setup::Message::CopyOrganization)) {
+            return iced::clipboard::write(setup::TEAMUP_ORG_SUGGESTION.to_owned());
+        }
+        if matches!(message, Message::Setup(setup::Message::CopyPurpose)) {
+            return iced::clipboard::write(setup::TEAMUP_PURPOSE_SUGGESTION.to_owned());
+        }
         if self.activity != Activity::Idle && !completion {
             return Task::none();
         }
@@ -1087,6 +1100,18 @@ impl NativeApp {
             }
             Message::Setup(setup::Message::Link(link)) => self.setup.link = link,
             Message::Setup(setup::Message::Key(key)) => self.setup.key = key,
+            Message::Setup(setup::Message::ToggleEdit(source)) => {
+                self.setup.toggle_edit(&source);
+            }
+            Message::Setup(setup::Message::OpenTeamupKeys) => {
+                // Already handled before the busy guard; kept for exhaustiveness.
+            }
+            Message::Setup(setup::Message::CopyOrganization) => {
+                // Already handled before the busy guard; kept for exhaustiveness.
+            }
+            Message::Setup(setup::Message::CopyPurpose) => {
+                // Already handled before the busy guard; kept for exhaustiveness.
+            }
             Message::Setup(setup::Message::Connect) => {
                 self.invalidate();
                 self.activity = Activity::Setup;
@@ -1548,11 +1573,24 @@ impl NativeApp {
             .padding(12)
             .on_press_maybe((self.activity == Activity::Idle).then_some(message))
     }
+    /// Quiet chrome for secondary actions. Never the same size as the one
+    /// primary action on a screen, so the primary stays obvious.
+    fn quiet<'a>(&self, label: &'a str, message: Message) -> iced::widget::Button<'a, Message> {
+        button(text(label).size(13))
+            .padding(8)
+            .on_press_maybe((self.activity == Activity::Idle).then_some(message))
+    }
+    /// The single primary action on a screen.
+    fn primary<'a>(&self, label: &'a str, message: Message) -> iced::widget::Button<'a, Message> {
+        button(text(label))
+            .padding(14)
+            .on_press_maybe((self.activity == Activity::Idle).then_some(message))
+    }
     fn view(&self) -> Element<'_, Message> {
-        let mut content = column![text("Vagtplanlægning").size(28)]
-            .spacing(12)
-            .padding(20)
-            .max_width(1100);
+        // No app-name headline here: the window title already says
+        // Vagtplanlægning, and each screen brings its own heading. Stacking
+        // the app name above the week was headline number one of three.
+        let mut content = column![].spacing(12).padding(20).max_width(1100);
         if let Some(error) = &self.error {
             content = content.push(text(error));
         }
@@ -1638,9 +1676,11 @@ impl NativeApp {
         }
     }
 
-    /// The week, its changes and the two primary actions. Service connections,
-    /// mappings and diagnostics belong on the secondary screens.
+    /// The week: compact navigation chrome, one status line, the grid, and a
+    /// single primary action. Service connections, mappings and diagnostics
+    /// belong on the secondary screens, whose buttons stay quiet.
     fn home<'a>(&'a self, mut content: Column<'a, Message>) -> Column<'a, Message> {
+        let is_current = self.monday == self.monday();
         content = content
             .push(
                 text(super::widgets::format_week_da(
@@ -1651,23 +1691,30 @@ impl NativeApp {
             )
             .push(
                 row![
-                    self.action("‹ Forrige", Message::Navigate(-7)),
-                    self.action("Denne uge", Message::Current),
-                    self.action("Næste ›", Message::Navigate(7))
+                    self.quiet("‹ Forrige", Message::Navigate(-7)),
+                    button(text("Denne uge").size(13))
+                        .padding(8)
+                        .on_press_maybe(
+                            (self.activity == Activity::Idle && !is_current)
+                                .then_some(Message::Current)
+                        ),
+                    self.quiet("Næste ›", Message::Navigate(7))
                 ]
                 .spacing(8),
             );
         if self.activity != Activity::Apply {
             if let Some(stamp) = &self.last_verified {
-                content = content.push(text(format!("Sidst verificeret {stamp}.")));
+                content = content.push(text(format!("Sidst verificeret {stamp}.")).size(12));
             }
         }
+        // Whether the transfer itself is the primary action below.
+        let transferable = self
+            .preview
+            .as_ref()
+            .is_some_and(|preview| preview.week.can_apply);
         if let Some(preview) = &self.preview {
             let week = &preview.week;
             content = content.push(text(&week.headline).size(18));
-            if !week.notice.is_empty() {
-                content = content.push(text(&week.notice));
-            }
             if !week.attention.is_empty() {
                 content = content.push(text("Kræver opmærksomhed").size(18));
             }
@@ -1703,39 +1750,47 @@ impl NativeApp {
                 }
                 content = content.push(entry);
             }
+            // The grid is the week. Its cells carry helper and status; the
+            // headline above carries the week's state. No second prose list,
+            // no summary repeating either of them.
             if week.days.iter().any(|d| !d.blocks.is_empty()) {
-                content = content
-                    .push(super::widgets::week_grid(week))
-                    .push(super::widgets::day_details(week));
-            }
-            for line in &week.summary {
-                content = content.push(text(line));
+                content = content.push(super::widgets::week_grid(week));
             }
             if week.can_apply {
                 content = content
                     .push(text(&week.apply_summary))
-                    .push(self.action("Overfør ændringer", Message::Apply));
-            } else {
-                content = content
-                    .push(text(&week.blocked_reason))
-                    .push(button("Overfør ændringer").padding(12));
+                    .push(self.primary("Overfør ændringer", Message::Apply));
+            } else if !week.blocked_reason.is_empty() {
+                content = content.push(text(&week.blocked_reason));
             }
         }
-        content = if self.needs_recheck {
-            content.push(self.action("Kontrollér igen", Message::Preview))
+        // One primary action: the transfer when one is ready, otherwise the
+        // check itself. The other half stays available but quiet.
+        if transferable {
+            content = content.push(self.quiet(
+                if self.needs_recheck {
+                    "Kontrollér igen"
+                } else {
+                    "Se ændringer"
+                },
+                Message::Preview,
+            ));
+        } else if self.needs_recheck {
+            content = content.push(self.primary("Kontrollér igen", Message::Preview));
         } else {
-            content.push(self.action("Se ændringer", Message::Preview))
-        };
+            content = content.push(self.primary("Se ændringer", Message::Preview));
+        }
         content.push(
             row![
-                self.action("Indstillinger", Message::Open(Screen::Settings)),
-                self.action("Hjælp", Message::Open(Screen::Help))
+                self.quiet("Indstillinger", Message::Open(Screen::Settings)),
+                self.quiet("Hjælp", Message::Open(Screen::Help))
             ]
             .spacing(8),
         )
     }
 
-    /// Service connections, the calendar and the confirmed choices.
+    /// Service connections, the calendar and the confirmed choices. Every
+    /// button here is secondary to the setup screen's own confirm action.
     fn settings<'a>(&'a self, mut content: Column<'a, Message>) -> Column<'a, Message> {
         content = content
             .push(text("Indstillinger").size(22))
@@ -1744,22 +1799,22 @@ impl NativeApp {
             // read, so login stays available throughout setup.
             .push(
                 row![
-                    self.action("Log ind i MitHF", Message::Login(Service::Mithf)),
-                    self.action("Log ind i DUOS", Message::Login(Service::Duos)),
-                    self.action("Kontrollér login", Message::CheckLogin)
+                    self.quiet("Log ind i MitHF", Message::Login(Service::Mithf)),
+                    self.quiet("Log ind i DUOS", Message::Login(Service::Duos)),
+                    self.quiet("Kontrollér login", Message::CheckLogin)
                 ]
                 .spacing(8),
             )
             .push(text(
                 "Skifter du til en anden konto, så log ud her først. Appen lukker sine browservinduer og glemmer de gemte logins, så den nye konto ikke arver den gamles adgang. Overførselshistorikken bevares, og der slettes intet i MitHF eller DUOS.",
             ))
-            .push(self.action("Log ud af MitHF og DUOS", Message::ForgetLogins))
+            .push(self.quiet("Log ud af MitHF og DUOS", Message::ForgetLogins))
             .push(self.setup.view().map(Message::Setup))
-            .push(self.action("Genindlæs opsætning", Message::Reload))
-            .push(self.action("Tjek for opdateringer", Message::CheckUpdates));
-        content = content.push(self.action("Hjælp", Message::Open(Screen::Help)));
+            .push(self.quiet("Genindlæs opsætning", Message::Reload))
+            .push(self.quiet("Tjek for opdateringer", Message::CheckUpdates));
+        content = content.push(self.quiet("Hjælp", Message::Open(Screen::Help)));
         if self.account.is_some() {
-            content = content.push(self.action("Tilbage til ugen", Message::Open(Screen::Home)));
+            content = content.push(self.quiet("Tilbage til ugen", Message::Open(Screen::Home)));
         }
         content
     }
@@ -1775,14 +1830,14 @@ impl NativeApp {
             .push(text(
                 "Del hvad der gik galt åbner et opslag på GitHub i din browser. Opslaget er offentligt, og du skal have en GitHub-konto for at sende det. Du læser teksten igennem først, og der står hverken navne, vagttekst, adgangskoder, cookies eller kalenderlink i den.",
             ))
-            .push(self.action("Del hvad der gik galt", Message::ShareProblem));
+            .push(self.quiet("Del hvad der gik galt", Message::ShareProblem));
         if self.account.is_some() {
             content = content
-                .push(self.action("Gem en fejlrapport om MitHF og DUOS", Message::Capture))
-                .push(self.action("Tilbage til ugen", Message::Open(Screen::Home)))
+                .push(self.quiet("Gem en fejlrapport om MitHF og DUOS", Message::Capture))
+                .push(self.quiet("Tilbage til ugen", Message::Open(Screen::Home)))
         } else {
             content = content
-                .push(self.action("Tilbage til Indstillinger", Message::Open(Screen::Settings)))
+                .push(self.quiet("Tilbage til Indstillinger", Message::Open(Screen::Settings)))
         }
         content
     }
@@ -2314,5 +2369,63 @@ mod tests {
             ),
             "NativeMessage"
         );
+    }
+    /// A week with writes, an overnight continuation and SPS marks renders
+    /// its grid, the one status line and the attention items — and the same
+    /// week with nothing left renders its blocked reason instead of a
+    /// transfer button.
+    #[test]
+    fn full_and_empty_weeks_render_their_single_status() {
+        let week: Week = serde_json::from_value(json!({
+            "days": [
+                {"date": "2026-09-14", "label": "man 14. sep", "blocks": [
+                    {"helper": "Zain Alnemr", "helper_color": "#4770d8",
+                     "status": "create", "status_label": "Oprettes",
+                     "minutes_from": 780, "minutes_to": 1440,
+                     "time_label": "13:00–24:00", "sps_label": "13:00–14:00",
+                     "part_label": "Del 1 af 2",
+                     "continues_before": false, "continues_after": true,
+                     "details": ["Vagten oprettes i MitHF."]},
+                ]},
+                {"date": "2026-09-15", "label": "tir 15. sep", "blocks": [
+                    {"helper": "Zain Alnemr", "helper_color": "#4770d8",
+                     "status": "create", "status_label": "Oprettes",
+                     "minutes_from": 0, "minutes_to": 420,
+                     "time_label": "13:00 14. sep – 07:00 15. sep",
+                     "sps_label": "", "part_label": "Del 2 af 2",
+                     "continues_before": true, "continues_after": false,
+                     "details": []},
+                    {"helper": "Vikar", "helper_color": "",
+                     "status": "attention", "status_label": "Kræver opmærksomhed",
+                     "minutes_from": 480, "minutes_to": 720,
+                     "time_label": "08:00–12:00",
+                     "sps_label": "", "part_label": "",
+                     "continues_before": false, "continues_after": false,
+                     "details": []},
+                ]},
+            ],
+            "attention": [{"when": "tir 15. sep 08:00", "who": "Vikar",
+                           "explanation": "Flere vagter matcher.",
+                           "action": "Ret konflikten i MitHF.",
+                           "source_key": "shift-b",
+                           "can_allow_retransfer": false}],
+            "headline": "1 punkt kræver opmærksomhed, før ugen kan overføres.",
+            "notice": "", "summary": [],
+            "apply_summary": "Der er ingen ændringer at overføre.",
+            "can_apply": false, "blocked_reason": "Løs punkterne under Kræver opmærksomhed først.",
+            "destination_read": true,
+        }))
+        .expect("week");
+        let mut app = app();
+        app.preview = Some(Preview {
+            week,
+            digest: "reviewed-digest".into(),
+            from: app.monday,
+            state_path: "synthetic-account.sqlite3".into(),
+            items: vec![],
+        });
+        let _ = app.view();
+        // Dette uge-knappen bærer ingen vægt, når ugen allerede er valgt.
+        let _ = app.update(Message::Current);
     }
 }
