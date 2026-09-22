@@ -4,6 +4,7 @@ use chrono::{DateTime, FixedOffset, NaiveDate};
 use chrono_tz::Tz;
 use futures_util::{stream, StreamExt, TryStreamExt};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use super::{
     choice, config::selected, id, named, rows, text, timestamp, timing::Stage, truthy, unique,
@@ -35,7 +36,7 @@ pub(crate) async fn read_before_range(
 ) -> Result<DestinationPrelude, LiveError> {
     let today = now.with_timezone(&config.planning.timezone).date_naive();
     let (_, duos_registrations) = futures_util::try_join!(
-        validate_catalog(browser, config, today),
+        validate_catalog_once(browser, config, today),
         read_duos(browser, config)
     )?;
     Ok(DestinationPrelude { duos_registrations })
@@ -204,6 +205,43 @@ pub(crate) async fn build_catalog(
         "account": format!("MitHF: {} · {}", text(&customer["name"])?, text(&grant["name"])?),
         "account_ids": {"customer": customer["id"], "grant": grant["id"]}}),
     )
+}
+
+/// Validate the catalog unless this browser session already validated exactly
+/// this setup today.
+///
+/// Reading is the only thing that depends on it here, and a read changes
+/// nothing, so a catalog that changes mid-session costs a preview that is out
+/// of date rather than a wrong transfer: `LiveDestinations::connect` always
+/// validates in full, so a changed catalog still invalidates the approval
+/// before anything is written.
+async fn validate_catalog_once(
+    browser: &BrowserSessions,
+    config: &LiveConfig,
+    today: NaiveDate,
+) -> Result<(), LiveError> {
+    let stamp = catalog_stamp(config, today);
+    if browser.catalog_validated(&stamp) {
+        Stage::start("destination.catalog").done(0);
+        return Ok(());
+    }
+    validate_catalog(browser, config, today).await?;
+    browser.remember_catalog(stamp);
+    Ok(())
+}
+
+/// What a catalog check covered, as a digest: the day it was checked for, the
+/// chosen arrangement and the confirmed setup it was compared against. A
+/// digest rather than the values themselves, so no account or helper name is
+/// held for the session beyond the configuration itself.
+fn catalog_stamp(config: &LiveConfig, today: NaiveDate) -> [u8; 32] {
+    let scope = json!([
+        today.to_string(),
+        config.planning.duos_arrangement_id,
+        config.planning.duos_registration_type,
+        config.setup,
+    ]);
+    Sha256::digest(scope.to_string().as_bytes()).into()
 }
 
 async fn validate_catalog(
@@ -481,7 +519,9 @@ impl<'a> LiveDestinations<'a> {
         now: DateTime<FixedOffset>,
     ) -> Result<Self, LiveError> {
         let today = now.with_timezone(&config.planning.timezone).date_naive();
+        // A transfer always validates in full, whatever a preview cached.
         let identities = validate_catalog(browser, config, today).await?;
+        browser.remember_catalog(catalog_stamp(config, today));
         Ok(Self {
             browser,
             config,
@@ -866,6 +906,56 @@ mod tests {
         system: String,
         action: String,
         payload: Value,
+    }
+
+    fn config(arrangement: &str, setup: Value) -> LiveConfig {
+        LiveConfig {
+            planning: crate::PlanningConfig {
+                timezone: chrono_tz::Europe::Copenhagen,
+                default_helper_count: 1,
+                duos_arrangement_id: arrangement.into(),
+                duos_registration_type: "type-1".into(),
+                helpers: BTreeMap::new(),
+            },
+            calendar: "cal".into(),
+            api_key: "key".into(),
+            bearer: String::new(),
+            setup,
+            lookback_days: 7,
+            state_path: "state.sqlite3".into(),
+            helper_names: BTreeMap::new(),
+            helper_colors: BTreeMap::new(),
+        }
+    }
+
+    /// A session skips the catalog check only for exactly what it validated:
+    /// a different day, arrangement or confirmed setup has to be checked again
+    /// before the preview it feeds can be trusted.
+    #[test]
+    fn a_remembered_catalog_check_covers_only_what_it_validated() {
+        let day = NaiveDate::from_ymd_opt(2026, 9, 14).expect("date");
+        let setup = json!({"catalog": {"mithf": [{"id": "va-1", "name": "Anna Hansen"}]}});
+        let stamp = catalog_stamp(&config("ord-1", setup.clone()), day);
+
+        assert_eq!(stamp, catalog_stamp(&config("ord-1", setup.clone()), day));
+        assert_ne!(
+            stamp,
+            catalog_stamp(
+                &config("ord-1", setup.clone()),
+                day.succ_opt().expect("next day")
+            )
+        );
+        assert_ne!(stamp, catalog_stamp(&config("ord-2", setup), day));
+        assert_ne!(
+            stamp,
+            catalog_stamp(
+                &config(
+                    "ord-1",
+                    json!({"catalog": {"mithf": [{"id": "va-1", "name": "Anna Hansen Nielsen"}]}})
+                ),
+                day,
+            )
+        );
     }
 
     #[test]

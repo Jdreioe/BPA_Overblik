@@ -102,6 +102,10 @@ pub struct BrowserSessions {
     data_dir: PathBuf,
     sessions: BTreeMap<Service, Session>,
     client: reqwest::Client,
+    /// The destination catalog check this session has already passed, as an
+    /// opaque digest of what was checked. It lives and dies with the session,
+    /// so a new login always checks again.
+    catalog: std::sync::Mutex<Option<[u8; 32]>>,
     _lock: std::fs::File,
 }
 
@@ -128,6 +132,7 @@ impl BrowserSessions {
             data_dir,
             sessions: BTreeMap::new(),
             client,
+            catalog: std::sync::Mutex::new(None),
             _lock: lock,
         })
     }
@@ -216,6 +221,19 @@ impl BrowserSessions {
                 }
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Whether this session already validated exactly this catalog check.
+    pub(crate) fn catalog_validated(&self, stamp: &[u8; 32]) -> bool {
+        self.catalog
+            .lock()
+            .is_ok_and(|remembered| remembered.as_ref() == Some(stamp))
+    }
+    /// Record a passed catalog check, so a repeated read can skip it.
+    pub(crate) fn remember_catalog(&self, stamp: [u8; 32]) {
+        if let Ok(mut remembered) = self.catalog.lock() {
+            *remembered = Some(stamp);
         }
     }
 
