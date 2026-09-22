@@ -71,13 +71,14 @@ spørger installationen én gang. Den kører ikke noget i baggrunden.
 
 ## Opdatering
 
-Når en ny version er klar, viser appen det øverst i vinduet. Vælg **Hent
-opdatering**. På Windows og Linux erstatter appen filen og åbner den nye udgave.
-På macOS åbner den installationspakken, som du følger som første gang.
+Appen søger selv efter en nyere udgivelse, mens den er åbnet. Når en ny version
+er klar, viser den det øverst i vinduet. Vælg **Hent opdatering**. På Windows
+og Linux erstatter appen filen og åbner den nye udgave. På macOS åbner den
+installationspakken, som du følger som første gang.
 
 Du kan også vælge **Tjek for opdateringer** under Indstillinger. Dine logins,
-dine kobler og din synkroniseringshistorik følger med over. Appen synkroniserer
-aldrig noget af sig selv.
+dine kobler og din synkroniseringshistorik følger med over. Appen henter aldrig
+vagter af sig selv.
 
 ## Hvis noget går galt
 

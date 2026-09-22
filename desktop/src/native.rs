@@ -855,6 +855,7 @@ enum Message {
     Applied(ApplyResult),
     CloseRequested(iced::window::Id),
     CheckUpdates,
+    PeriodicUpdateCheck,
     UpdateChecked(Result<Option<update::Offer>>),
     InstallUpdate,
     DismissUpdate,
@@ -925,7 +926,11 @@ struct NativeApp {
     update_offer: Option<update::Offer>,
     update_manual: bool,
 }
+
 impl NativeApp {
+    /// Silent GitHub check while the window stays open. Startup already ran one.
+    const UPDATE_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
+
     fn new() -> (Self, Task<Message>) {
         let mut app = Self {
             engine: Engine::new(app_data_dir()),
@@ -1430,6 +1435,12 @@ impl NativeApp {
                 self.update_manual = true;
                 return Task::perform(update::check_latest(), Message::UpdateChecked);
             }
+            Message::PeriodicUpdateCheck => {
+                if self.update_offer.is_some() || self.update_manual {
+                    return Task::none();
+                }
+                return Task::perform(update::check_latest(), Message::UpdateChecked);
+            }
             Message::UpdateChecked(result) => {
                 let manual = std::mem::take(&mut self.update_manual);
                 match result {
@@ -1529,6 +1540,7 @@ impl NativeApp {
         Subscription::batch([
             ticks,
             iced::window::close_requests().map(Message::CloseRequested),
+            iced::time::every(Self::UPDATE_CHECK_INTERVAL).map(|_| Message::PeriodicUpdateCheck),
         ])
     }
     fn action<'a>(&self, label: &'a str, message: Message) -> iced::widget::Button<'a, Message> {
@@ -2154,6 +2166,23 @@ mod tests {
         app.activity = Activity::Apply;
         let _ = app.update(Message::InstallUpdate);
         assert_eq!(app.activity, Activity::Apply);
+    }
+    #[test]
+    fn a_periodic_check_stays_silent_and_waits_while_busy() {
+        let mut app = app();
+        app.activity = Activity::Apply;
+        let _ = app.update(Message::PeriodicUpdateCheck);
+        assert!(app.notice.is_empty());
+
+        app.activity = Activity::Idle;
+        let _ = app.update(Message::PeriodicUpdateCheck);
+        assert!(app.notice.is_empty());
+        assert!(!app.update_manual);
+
+        app.update_offer = Some(newer_offer());
+        let _ = app.update(Message::PeriodicUpdateCheck);
+        assert!(app.notice.is_empty());
+        assert!(app.update_offer.is_some());
     }
     #[test]
     fn the_shared_issue_is_prefilled_and_falls_back_to_the_saved_file() {

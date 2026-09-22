@@ -86,12 +86,13 @@ Only one native browser owner can run at a time. Browsers belong to that
 window and close when it exits. Use `TEAMUP_BROWSER_PATH` if Chromium cannot
 be found; this mode does not download a browser.
 
-On startup the app asks GitHub for the latest dated release. A newer package
-shows a banner with **Hent opdatering**. Windows and Linux download and replace
-the running file, then reopen it. macOS downloads the `.pkg` and opens the
-installer. **Tjek for opdateringer** on Indstillinger runs the same check by
-hand. A development build (`0.1.0`) never offers an update. Failures on the
-automatic check stay silent.
+On startup the app asks GitHub for the latest dated release, and while the
+window stays open it asks again every six hours. A newer package shows a banner
+with **Hent opdatering**. Windows and Linux download and replace the running
+file, then reopen it. macOS downloads the `.pkg` and opens the installer.
+**Tjek for opdateringer** on Indstillinger runs the same check by hand. A
+development build (`0.1.0`) never offers an update. Failures on the automatic
+check stay silent.
 
 Operations run asynchronously. Controls are disabled while an operation is
 running, so the selected account and week cannot change during a transfer.
