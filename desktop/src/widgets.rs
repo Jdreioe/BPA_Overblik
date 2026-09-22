@@ -1,11 +1,11 @@
-//! Shared Danish week widgets: the hour grid.
+//! Shared Danish week widgets: the hour grid and the quiet button style.
 //!
 //! The grid renders the [`Week`] the core-based preview builds. One status
 //! line above it (in `native.rs`) carries the week's state, so neither the
 //! cells nor extra lists repeat it.
 
 use chrono::{Datelike, NaiveDate};
-use iced::widget::{column, container, row, space, text};
+use iced::widget::{button, column, container, row, space, text};
 use iced::{Color, Element, Length};
 use teamup_shift_sync_gui::protocol::{Block, Week};
 
@@ -25,6 +25,45 @@ pub const DANISH_MONTHS: [&str; 12] = [
 ];
 
 const GRID_HEIGHT: f32 = 520.0;
+
+/// Style for every low-emphasis action. Iced's `button::text` style draws
+/// nothing but a label, which reads as running text rather than as something
+/// to press; this keeps the same quiet weight but gives the button an outline
+/// and a hover fill, so it is unmistakably clickable. Filled `primary` and
+/// `secondary` buttons still carry the loud actions.
+pub fn outlined(theme: &iced::Theme, status: button::Status) -> button::Style {
+    let palette = theme.extended_palette();
+    let base = button::Style {
+        background: Some(palette.background.weakest.color.into()),
+        text_color: palette.background.base.text,
+        border: iced::Border {
+            color: palette.background.strong.color,
+            width: 1.0,
+            radius: 2.0.into(),
+        },
+        ..button::Style::default()
+    };
+    match status {
+        button::Status::Active => base,
+        button::Status::Hovered => button::Style {
+            background: Some(palette.background.weak.color.into()),
+            ..base
+        },
+        button::Status::Pressed => button::Style {
+            background: Some(palette.background.strong.color.into()),
+            ..base
+        },
+        // A disabled action stays legible as a button, just visibly inactive.
+        button::Status::Disabled => button::Style {
+            text_color: palette.background.base.text.scale_alpha(0.4),
+            border: iced::Border {
+                color: palette.background.strong.color.scale_alpha(0.4),
+                ..base.border
+            },
+            ..base
+        },
+    }
+}
 
 /// Vagtmøde participants share clock times, so overlapping blocks need
 /// separate lanes. Later shifts reuse the first available lane.

@@ -82,7 +82,7 @@ pub struct SetupUi {
 }
 impl SetupUi {
     pub fn view(&self) -> Element<'_, Message> {
-        let mut content = column![text("Opsætning").size(24)].spacing(12);
+        let mut content = column![].spacing(8);
         if let Some(error) = &self.error {
             content = content.push(text(error));
         }
@@ -91,85 +91,92 @@ impl SetupUi {
         }
         let Some(state) = &self.state else {
             return content
-                .push(
-                    button("Hent opsætning")
-                        .padding(14)
-                        .on_press(Message::Action("status", json!({}))),
-                )
+                .push(primary_button(
+                    "Hent opsætning",
+                    Message::Action("status", json!({})),
+                ))
                 .into();
         };
         if !state.notice.is_empty() {
             content = content.push(text(&state.notice));
         }
         if state.stage == "source" {
-            content = content.push(text("1. Tilslut TeamUp"))
-                .push(text_input("TeamUp-kalenderlink", &self.link).on_input(Message::Link).secure(true).padding(12))
-                .push(text("TeamUp kræver en API-nøgle én gang. Nøglen gemmes i computerens nøglering."))
-                .push(button("Anmod om API-nøgle hos TeamUp").padding(12).on_press(Message::OpenTeamupKeys))
-                .push(text("I formularen: brug din egen mail. Under Organisation kan du skrive hvad som helst over 5 bogstaver, f.eks.:"))
-                .push(row![
-                    text(TEAMUP_ORG_SUGGESTION),
-                    button("Kopiér").padding(8).on_press(Message::CopyOrganization)
-                ].spacing(8))
-                .push(text("Under Formål (valgfrit) kan du f.eks. skrive:"))
-                .push(row![
-                    text(TEAMUP_PURPOSE_SUGGESTION),
-                    button("Kopiér").padding(8).on_press(Message::CopyPurpose)
-                ].spacing(8))
-                .push(text_input("TeamUp API-nøgle", &self.key).on_input(Message::Key).secure(true).padding(12))
-                .push(button("Tilslut kalender").padding(14).on_press(Message::Connect));
-            if state.has_credentials {
-                content = content.push(
-                    button("Prøv den gemte forbindelse igen")
-                        .padding(12)
-                        .on_press(Message::Action("retry_source", json!({}))),
-                );
-            }
-            if state.can_import {
-                content = content.push(
-                    button("Importér tidligere opsætning til gennemgang")
-                        .padding(12)
-                        .on_press(Message::Action("import", json!({}))),
-                );
+            content = content
+                .push(
+                    text_input("TeamUp-kalenderlink", &self.link)
+                        .on_input(Message::Link)
+                        .secure(true)
+                        .padding(12),
+                )
+                .push(
+                    text_input("TeamUp API-nøgle", &self.key)
+                        .on_input(Message::Key)
+                        .secure(true)
+                        .padding(12),
+                )
+                .push(
+                    text("Brug din egen mail hos TeamUp. Organisation skal være over 5 bogstaver. Nøglen gemmes i nøgleringen.").size(12),
+                )
+                .push(
+                    row![
+                        text(TEAMUP_ORG_SUGGESTION).size(13),
+                        quiet_button("Kopiér", Message::CopyOrganization),
+                        quiet_button("Kopiér formål", Message::CopyPurpose),
+                        quiet_button("Anmod om API-nøgle", Message::OpenTeamupKeys),
+                    ]
+                    .spacing(8),
+                )
+                .push(primary_button("Tilslut kalender", Message::Connect));
+            if state.has_credentials || state.can_import {
+                let mut extra = row![].spacing(8);
+                if state.has_credentials {
+                    extra = extra.push(quiet_button(
+                        "Prøv den gemte forbindelse igen",
+                        Message::Action("retry_source", json!({})),
+                    ));
+                }
+                if state.can_import {
+                    extra = extra.push(quiet_button(
+                        "Importér tidligere opsætning",
+                        Message::Action("import", json!({})),
+                    ));
+                }
+                content = content.push(extra);
             }
         } else {
-            content = content
-                .push(text(
-                    "2. Log ind i MitHF og DUOS nedenfor, og hent mulighederne.",
-                ))
-                .push(
-                    button("Hent hjælpere og ordninger")
-                        .padding(14)
-                        .on_press(Message::Action("discover", json!({}))),
-                );
             if !state.account.is_empty() {
                 content = content.push(text(&state.account));
             }
             if !state.arrangements.is_empty() {
-                content = content.push(text("DUOS SPS-ordning")).push(
+                content = content.push(text("DUOS SPS-ordning").size(13)).push(
                     pick_list(
                         state.arrangements.clone(),
                         find(&state.arrangements, &state.arrangement),
-                        |c: Choice| Message::Action("discover", json!({"arrangement":c.id})),
+                        |c: Choice| Message::Action("discover", json!({"arrangement": c.id})),
                     )
                     .placeholder("Vælg ordning")
-                    .padding(12),
+                    .padding(8)
+                    .width(Length::Fixed(280.0)),
                 );
             }
             if !state.types.is_empty() {
-                content = content.push(text("Registreringstype")).push(
+                content = content.push(text("Registreringstype").size(13)).push(
                     pick_list(
                         state.types.clone(),
                         find(&state.types, &state.registration_type),
-                        |c: Choice| Message::Action("edit", json!({"registration_type":c.id})),
+                        |c: Choice| Message::Action("edit", json!({"registration_type": c.id})),
                     )
                     .placeholder("Vælg registreringstype")
-                    .padding(12),
+                    .padding(8)
+                    .width(Length::Fixed(280.0)),
                 );
             }
-            if !state.mappings.is_empty() {
-                content = content.push(text("3. Bekræft hjælpere").size(20))
-                    .push(text("Kontrollér, at de tre navne er samme hjælper. Tryk Bekræft, når alle rækker stemmer."));
+            if state.mappings.is_empty() {
+                content = content.push(primary_button(
+                    "Hent hjælpere og ordninger",
+                    Message::Action("discover", json!({})),
+                ));
+            } else {
                 content = content.push(
                     row![
                         text("TeamUp").width(Length::FillPortion(2)),
@@ -181,19 +188,23 @@ impl SetupUi {
                 for mapping in &state.mappings {
                     content = content.push(self.mapping_row(state, mapping));
                 }
-                content = content.push(
-                    button("Bekræft og se denne uge")
-                        .padding(14)
-                        .on_press(Message::Action("confirm", json!({}))),
-                );
+                content = content.push(primary_button(
+                    "Bekræft og se denne uge",
+                    Message::Action("confirm", json!({})),
+                ));
             }
-        }
-        if state.stage != "source" {
-            content = content.push(
-                button(text("Ret kalenderforbindelsen").size(13))
-                    .padding(8)
-                    .on_press(Message::Action("source", json!({}))),
-            );
+            let mut extra = row![quiet_button(
+                "Ret kalenderforbindelsen",
+                Message::Action("source", json!({})),
+            )]
+            .spacing(8);
+            if !state.mappings.is_empty() {
+                extra = extra.push(quiet_button(
+                    "Hent hjælpere og ordninger",
+                    Message::Action("discover", json!({})),
+                ));
+            }
+            content = content.push(extra);
         }
         content.into()
     }
@@ -215,13 +226,11 @@ impl SetupUi {
             return row![
                 text(name).width(Length::FillPortion(2)),
                 text("Udeladt").size(13).width(Length::FillPortion(2)),
-                button(text("Fortryd").size(13))
-                    .padding(8)
-                    .on_press(Message::Action(
-                        "edit",
-                        json!({"source":source_id,"excluded":false})
-                    ))
-                    .width(Length::FillPortion(2)),
+                row![quiet_button(
+                    "Fortryd",
+                    Message::Action("edit", json!({"source": source_id, "excluded": false})),
+                )]
+                .width(Length::FillPortion(2)),
             ]
             .spacing(8)
             .into();
@@ -229,12 +238,10 @@ impl SetupUi {
         let source_id = mapping.source.clone();
         let teamup = column![
             text(name),
-            button(text("Udelad").size(13))
-                .padding(8)
-                .on_press(Message::Action(
-                    "edit",
-                    json!({"source":source_id,"excluded":true})
-                )),
+            quiet_button(
+                "Udelad",
+                Message::Action("edit", json!({"source": source_id, "excluded": true})),
+            ),
         ]
         .spacing(4)
         .width(Length::FillPortion(2));
@@ -291,9 +298,7 @@ impl SetupUi {
         };
         row![
             text(label).size(13).width(Length::Fill),
-            button(text(reopen).size(13))
-                .padding(8)
-                .on_press(Message::ToggleEdit(source.to_owned())),
+            quiet_button(reopen, Message::ToggleEdit(source.to_owned())),
         ]
         .spacing(8)
         .width(Length::FillPortion(2))
@@ -305,6 +310,22 @@ impl SetupUi {
             self.editing.insert(source.to_owned());
         }
     }
+}
+
+fn primary_button<'a>(label: &'a str, message: Message) -> iced::widget::Button<'a, Message> {
+    button(text(label))
+        .style(iced::widget::button::primary)
+        .padding([8, 14])
+        .on_press(message)
+}
+
+/// Low-emphasis setup action. Outlined like the quiet buttons in `native.rs`,
+/// so a row of them reads as buttons rather than as labels.
+fn quiet_button<'a>(label: &'a str, message: Message) -> iced::widget::Button<'a, Message> {
+    button(text(label).size(14))
+        .style(crate::widgets::outlined)
+        .padding([7, 12])
+        .on_press(message)
 }
 
 fn find(choices: &[Choice], id: &str) -> Option<Choice> {

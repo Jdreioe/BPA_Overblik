@@ -2,7 +2,7 @@
 //! Setup editing remains in the existing application during migration.
 use crate::{setup, update};
 use chrono::{DateTime, Datelike, Duration, FixedOffset, NaiveDate, TimeZone, Timelike, Utc};
-use iced::widget::{button, column, container, progress_bar, row, scrollable, text, Column};
+use iced::widget::{button, column, container, progress_bar, row, scrollable, space, text, Column};
 use iced::{Element, Length, Subscription, Task};
 use serde_json::Value;
 use std::{
@@ -222,6 +222,103 @@ fn progress_line(verified: usize, total: usize) -> String {
     } else {
         format!("{verified} af {total} ændringer overført.")
     }
+}
+
+/// What a week fetch is doing right now. `Engine::preview` moves through
+/// these in order, so both the bar and the line on screen follow real work.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum FetchStage {
+    #[default]
+    Sessions,
+    Teamup,
+    Destinations,
+    Planning,
+}
+
+/// The four stages are the whole fetch, so they are also the bar's scale.
+const FETCH_STAGES: f32 = 4.0;
+
+impl FetchStage {
+    /// Stages completed before this one: where the bar stands when it begins.
+    fn done(self) -> f32 {
+        match self {
+            FetchStage::Sessions => 0.0,
+            FetchStage::Teamup => 1.0,
+            FetchStage::Destinations => 2.0,
+            FetchStage::Planning => 3.0,
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            FetchStage::Sessions => "Åbner MitHF og DUOS",
+            FetchStage::Teamup => "Læser vagter i TeamUp",
+            FetchStage::Destinations => "Læser MitHF og DUOS",
+            FetchStage::Planning => "Beregner ugens ændringer",
+        }
+    }
+}
+
+/// How long a stage takes to creep most of the way across its own quarter.
+/// A read that finishes quickly barely creeps; a slow one keeps moving.
+const FETCH_CREEP_SECONDS: f32 = 10.0;
+
+/// A running fetch, as the screen shows it. The task owns the same `stage`
+/// and sets it as it goes; the rest is what the last tick read.
+struct Fetch {
+    stage: Arc<StdMutex<FetchStage>>,
+    started: std::time::Instant,
+    /// When `shown` last changed, so the creep restarts with every stage.
+    entered: std::time::Instant,
+    shown: FetchStage,
+    seconds: u64,
+}
+
+impl Fetch {
+    fn new() -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            stage: Arc::new(StdMutex::new(FetchStage::default())),
+            started: now,
+            entered: now,
+            shown: FetchStage::default(),
+            seconds: 0,
+        }
+    }
+    /// Where the bar stands, on a scale of one unit per stage. Finishing a
+    /// stage is the only thing that moves it a whole step; inside a stage it
+    /// creeps across that stage's own quarter, slower the longer the stage
+    /// lasts, and never into the next one. So the bar always says which of
+    /// the four steps is running, and it keeps moving while a read is slow.
+    fn bar(&self) -> f32 {
+        let within = 1.0 - (-self.entered.elapsed().as_secs_f32() / FETCH_CREEP_SECONDS).exp();
+        self.shown.done() + 0.9 * within
+    }
+    /// The elapsed seconds keep counting inside a long read, so a slow MitHF
+    /// still looks like work in progress rather than a frozen window.
+    fn line(&self) -> String {
+        format!("{} … {} s", self.shown.label(), self.seconds)
+    }
+}
+
+fn mark(stage: &StdMutex<FetchStage>, value: FetchStage) {
+    if let Ok(mut current) = stage.lock() {
+        *current = value;
+    }
+}
+
+/// A bar with its own explanation beside it. The bar keeps a fixed width so
+/// the label always has room: full-width bars pushed it off the screen edge.
+fn moving_bar<'a>(value: f32, end: f32, label: String) -> Element<'a, Message> {
+    row![
+        progress_bar(0.0..=end, value)
+            .girth(10)
+            .length(Length::Fixed(240.0)),
+        text(label)
+    ]
+    .spacing(12)
+    .align_y(iced::alignment::Vertical::Center)
+    .width(Length::Fill)
+    .into()
 }
 
 fn completion_summary(done: &ApplyDone) -> String {
@@ -520,18 +617,26 @@ impl Engine {
         .await
         .map_err(|_| "Fejlrapporten kunne ikke gemmes.".to_owned())?
     }
-    async fn preview(&self, account: Arc<LiveConfig>, from: NaiveDate) -> Result<Preview> {
+    async fn preview(
+        &self,
+        account: Arc<LiveConfig>,
+        from: NaiveDate,
+        stage: Arc<StdMutex<FetchStage>>,
+    ) -> Result<Preview> {
         let guard = self.sessions().await?;
         let browser = guard.as_ref().ok_or("Log ind i MitHF og DUOS først.")?;
         let (to, start, end) = range(&account, from)?;
+        mark(&stage, FetchStage::Teamup);
         let shifts = read_teamup(&account, from, to)
             .await
             .map_err(|e| e.to_string())?;
         let now = Utc::now().fixed_offset();
         let (read_start, read_end) = reconciliation_range(&shifts, start, end);
+        mark(&stage, FetchStage::Destinations);
         let destination = read_destinations(browser, &account, read_start, read_end, now)
             .await
             .map_err(|e| e.to_string())?;
+        mark(&stage, FetchStage::Planning);
         tokio::task::spawn_blocking(move || {
             let state = SyncState::open(&account.state_path)
                 .map_err(|_| "Den lokale overførselshistorik kunne ikke læses.".to_owned())?;
@@ -915,6 +1020,8 @@ struct NativeApp {
     apply_write_total: usize,
     apply_write_verified: usize,
     apply_bar: f32,
+    /// Set for exactly as long as a week fetch runs.
+    fetch: Option<Fetch>,
     apply_current: String,
     apply_summary: String,
     apply_stopping: bool,
@@ -950,6 +1057,7 @@ impl NativeApp {
             apply_write_total: 0,
             apply_write_verified: 0,
             apply_bar: 0.0,
+            fetch: None,
             apply_current: String::new(),
             apply_summary: String::new(),
             apply_stopping: false,
@@ -996,10 +1104,13 @@ impl NativeApp {
                 | Message::UpdateChecked(_)
                 | Message::UpdateApplied(_)
         );
-        // Progress ticks only run during a transfer. They never start work.
+        // Ticks only refresh what a running transfer or fetch shows. They
+        // never start work.
         if matches!(message, Message::ApplyTick) {
-            if self.activity == Activity::Apply {
-                self.refresh_progress();
+            match self.activity {
+                Activity::Apply => self.refresh_progress(),
+                Activity::Preview => self.refresh_fetch(),
+                _ => {}
             }
             return Task::none();
         }
@@ -1308,10 +1419,13 @@ impl NativeApp {
                 };
                 self.invalidate();
                 self.activity = Activity::Preview;
+                let fetch = Fetch::new();
+                let stage = fetch.stage.clone();
+                self.fetch = Some(fetch);
                 let engine = self.engine.clone();
                 let from = self.monday;
                 return Task::perform(
-                    async move { engine.preview(account, from).await.map(Box::new) },
+                    async move { engine.preview(account, from, stage).await.map(Box::new) },
                     Message::PreviewLoaded,
                 );
             }
@@ -1319,6 +1433,7 @@ impl NativeApp {
                 if self.activity != Activity::Preview {
                     return Task::none();
                 }
+                self.fetch = None;
                 self.activity = Activity::Idle;
                 match result {
                     Ok(preview) if preview.from == self.monday => self.preview = Some(*preview),
@@ -1556,11 +1671,29 @@ impl NativeApp {
         self.apply_verified = state.verified_units();
         self.apply_current = state.current.clone();
     }
+    fn refresh_fetch(&mut self) {
+        let Some(fetch) = &mut self.fetch else {
+            return;
+        };
+        if let Ok(stage) = fetch.stage.lock() {
+            if *stage != fetch.shown {
+                fetch.shown = *stage;
+                fetch.entered = std::time::Instant::now();
+            }
+        }
+        fetch.seconds = fetch.started.elapsed().as_secs();
+    }
     fn subscription(&self) -> Subscription<Message> {
-        let ticks = if self.activity == Activity::Apply {
-            iced::time::every(std::time::Duration::from_millis(50)).map(|_| Message::ApplyTick)
-        } else {
-            Subscription::none()
+        // The transfer bar glides, so it needs frames; the fetch line only
+        // counts whole seconds.
+        let ticks = match self.activity {
+            Activity::Apply => Some(std::time::Duration::from_millis(50)),
+            Activity::Preview => Some(std::time::Duration::from_millis(250)),
+            _ => None,
+        };
+        let ticks = match ticks {
+            Some(every) => iced::time::every(every).map(|_| Message::ApplyTick),
+            None => Subscription::none(),
         };
         Subscription::batch([
             ticks,
@@ -1570,35 +1703,41 @@ impl NativeApp {
     }
     fn action<'a>(&self, label: &'a str, message: Message) -> iced::widget::Button<'a, Message> {
         button(text(label))
-            .padding(12)
+            .style(iced::widget::button::secondary)
+            .padding([8, 12])
             .on_press_maybe((self.activity == Activity::Idle).then_some(message))
     }
-    /// Quiet chrome for secondary actions. Never the same size as the one
-    /// primary action on a screen, so the primary stays obvious.
+    /// Outlined chrome: clearly a button, but not a second primary.
     fn quiet<'a>(&self, label: &'a str, message: Message) -> iced::widget::Button<'a, Message> {
-        button(text(label).size(13))
-            .padding(8)
+        button(text(label).size(14))
+            .style(super::widgets::outlined)
+            .padding([7, 12])
             .on_press_maybe((self.activity == Activity::Idle).then_some(message))
     }
-    /// The single primary action on a screen.
+    /// The single filled action on a screen.
     fn primary<'a>(&self, label: &'a str, message: Message) -> iced::widget::Button<'a, Message> {
         button(text(label))
-            .padding(14)
+            .style(iced::widget::button::primary)
+            .padding([8, 14])
             .on_press_maybe((self.activity == Activity::Idle).then_some(message))
     }
     fn view(&self) -> Element<'_, Message> {
         // No app-name headline here: the window title already says
-        // Vagtplanlægning, and each screen brings its own heading. Stacking
-        // the app name above the week was headline number one of three.
-        let mut content = column![].spacing(12).padding(20).max_width(1100);
+        // Vagtplanlægning, and each screen brings its own heading.
+        let mut page = column![]
+            .spacing(12)
+            .padding(20)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .max_width(1100);
         if let Some(error) = &self.error {
-            content = content.push(text(error));
+            page = page.push(text(error));
         }
         if !self.notice.is_empty() {
-            content = content.push(text(&self.notice));
+            page = page.push(text(&self.notice));
         }
         if let Some(offer) = &self.update_offer {
-            content = content
+            page = page
                 .push(text(format!("En ny version ({}) er klar.", offer.version)))
                 .push(
                     row![
@@ -1608,63 +1747,73 @@ impl NativeApp {
                     .spacing(8),
                 );
         }
-        content = match self.visible_screen() {
-            Screen::Home => self.home(content),
-            Screen::Settings => self.settings(content),
-            Screen::Help => self.help(content),
+        page = match self.visible_screen() {
+            Screen::Home => self.home(page),
+            Screen::Settings => page.push(
+                scrollable(self.settings(column![].spacing(12)))
+                    .height(Length::Fill)
+                    .width(Length::Fill),
+            ),
+            Screen::Help => page.push(
+                scrollable(self.help(column![].spacing(12)))
+                    .height(Length::Fill)
+                    .width(Length::Fill),
+            ),
         };
         if self.activity == Activity::Apply {
-            if !self.apply_summary.is_empty() {
-                content = content.push(text(&self.apply_summary));
-            }
-            let bar_total = self.apply_write_total.max(1);
-            content = content.push(
-                row![
-                    progress_bar(0.0..=bar_total as f32, self.apply_bar).girth(16),
-                    text(progress_line(self.apply_verified, self.apply_total))
-                ]
-                .spacing(8),
-            );
-            if self.apply_current.is_empty() {
-                content = content.push(text(
-                    "Begynder. Hver ændring læses tilbage, før den næste begynder.",
-                ));
-            } else {
-                content = content.push(text(format!("{}.", self.apply_current)));
-            }
-            content = content.push(text(
-                "Hvis du stopper eller lukker, afslutter appen den igangværende ændring og kontrollerer den, før den standser.",
-            ));
-            if self.apply_stopping {
-                content = content.push(text(
-                    "Stopper sikkert efter den igangværende ændring er kontrolleret …",
-                ));
-            } else {
-                content = content.push(
-                    button("Stop efter denne ændring")
-                        .padding(12)
-                        .on_press(Message::StopApply),
-                );
-            }
-        } else {
+            page = self.apply_status(page);
+        } else if self.activity != Activity::Preview {
             let busy = match self.activity {
-                Activity::Idle => "",
+                Activity::Idle | Activity::Apply | Activity::Preview => "",
                 Activity::Setup => "Indlæser opsætning …",
                 Activity::Login => "Kontakter browseren …",
                 Activity::Capture => "Forbereder fejlrapporten …",
-                Activity::Preview => "Henter ugens ændringer …",
                 Activity::Recover => "Glemmer lokale registreringer …",
-                Activity::Apply => "",
                 Activity::Update => "Henter opdatering …",
             };
             if !busy.is_empty() {
-                content = content.push(text(busy));
+                page = page.push(text(busy));
             }
         }
-        container(scrollable(content))
+        container(page)
             .center_x(Length::Fill)
+            .width(Length::Fill)
             .height(Length::Fill)
             .into()
+    }
+
+    fn apply_status<'a>(&'a self, mut page: Column<'a, Message>) -> Column<'a, Message> {
+        if !self.apply_summary.is_empty() {
+            page = page.push(text(&self.apply_summary));
+        }
+        let bar_total = self.apply_write_total.max(1) as f32;
+        page = page.push(moving_bar(
+            self.apply_bar,
+            bar_total,
+            progress_line(self.apply_verified, self.apply_total),
+        ));
+        page = if self.apply_current.is_empty() {
+            page.push(text(
+                "Begynder. Hver ændring læses tilbage, før den næste begynder.",
+            ))
+        } else {
+            page.push(text(format!("{}.", self.apply_current)))
+        };
+        page = page.push(text(
+            "Hvis du stopper eller lukker, afslutter appen den igangværende ændring og kontrollerer den, før den standser.",
+        ));
+        if self.apply_stopping {
+            page.push(text(
+                "Stopper sikkert efter den igangværende ændring er kontrolleret …",
+            ))
+        } else {
+            page.push(
+                button(text("Stop efter denne ændring"))
+                    .style(iced::widget::button::secondary)
+                    .padding([8, 12])
+                    .on_press(Message::StopApply),
+            )
+        }
     }
 
     /// There is no week to show before an account is confirmed, but help and
@@ -1676,47 +1825,61 @@ impl NativeApp {
         }
     }
 
-    /// The week: compact navigation chrome, one status line, the grid, and a
-    /// single primary action. Service connections, mappings and diagnostics
-    /// belong on the secondary screens, whose buttons stay quiet.
+    /// Week title on the left, the one primary action fixed on the right.
+    /// The grid scrolls under that chrome.
     fn home<'a>(&'a self, mut content: Column<'a, Message>) -> Column<'a, Message> {
         let is_current = self.monday == self.monday();
         content = content
             .push(
-                text(super::widgets::format_week_da(
-                    self.monday,
-                    self.monday + Duration::days(6),
-                ))
-                .size(20),
+                row![
+                    text(super::widgets::format_week_da(
+                        self.monday,
+                        self.monday + Duration::days(6),
+                    ))
+                    .size(20),
+                    space::horizontal(),
+                    self.week_action(),
+                ]
+                .align_y(iced::alignment::Vertical::Center)
+                .width(Length::Fill),
             )
             .push(
                 row![
                     self.quiet("‹ Forrige", Message::Navigate(-7)),
-                    button(text("Denne uge").size(13))
-                        .padding(8)
-                        .on_press_maybe(
-                            (self.activity == Activity::Idle && !is_current)
-                                .then_some(Message::Current)
-                        ),
-                    self.quiet("Næste ›", Message::Navigate(7))
+                    // Same quiet button, additionally disabled on the week
+                    // that is already shown.
+                    self.quiet("Denne uge", Message::Current).on_press_maybe(
+                        (self.activity == Activity::Idle && !is_current)
+                            .then_some(Message::Current),
+                    ),
+                    self.quiet("Næste ›", Message::Navigate(7)),
+                    space::horizontal(),
+                    self.quiet("Indstillinger", Message::Open(Screen::Settings)),
+                    self.quiet("Hjælp", Message::Open(Screen::Help)),
                 ]
-                .spacing(8),
+                .spacing(8)
+                .align_y(iced::alignment::Vertical::Center)
+                .width(Length::Fill),
             );
         if self.activity != Activity::Apply {
             if let Some(stamp) = &self.last_verified {
                 content = content.push(text(format!("Sidst verificeret {stamp}.")).size(12));
             }
         }
-        // Whether the transfer itself is the primary action below.
-        let transferable = self
-            .preview
-            .as_ref()
-            .is_some_and(|preview| preview.week.can_apply);
+        if let Some(fetch) = &self.fetch {
+            content = content.push(moving_bar(fetch.bar(), FETCH_STAGES, fetch.line()));
+        }
+        let mut body = column![].spacing(12).width(Length::Fill);
         if let Some(preview) = &self.preview {
             let week = &preview.week;
-            content = content.push(text(&week.headline).size(18));
+            body = body.push(text(&week.headline).size(18));
+            if week.can_apply {
+                body = body.push(text(&week.apply_summary));
+            } else if !week.blocked_reason.is_empty() {
+                body = body.push(text(&week.blocked_reason));
+            }
             if !week.attention.is_empty() {
-                content = content.push(text("Kræver opmærksomhed").size(18));
+                body = body.push(text("Kræver opmærksomhed").size(18));
             }
             for item in &week.attention {
                 let mut entry = column![
@@ -1748,26 +1911,23 @@ impl NativeApp {
                         ))
                     };
                 }
-                content = content.push(entry);
+                body = body.push(entry);
             }
-            // The grid is the week. Its cells carry helper and status; the
-            // headline above carries the week's state. No second prose list,
-            // no summary repeating either of them.
             if week.days.iter().any(|d| !d.blocks.is_empty()) {
-                content = content.push(super::widgets::week_grid(week));
-            }
-            if week.can_apply {
-                content = content
-                    .push(text(&week.apply_summary))
-                    .push(self.primary("Overfør ændringer", Message::Apply));
-            } else if !week.blocked_reason.is_empty() {
-                content = content.push(text(&week.blocked_reason));
+                body = body.push(super::widgets::week_grid(week));
             }
         }
-        // One primary action: the transfer when one is ready, otherwise the
-        // check itself. The other half stays available but quiet.
+        content.push(scrollable(body).height(Length::Fill).width(Length::Fill))
+    }
+
+    fn week_action<'a>(&'a self) -> Element<'a, Message> {
+        let transferable = self
+            .preview
+            .as_ref()
+            .is_some_and(|preview| preview.week.can_apply);
+        let mut actions = row![].spacing(8);
         if transferable {
-            content = content.push(self.quiet(
+            actions = actions.push(self.quiet(
                 if self.needs_recheck {
                     "Kontrollér igen"
                 } else {
@@ -1775,48 +1935,43 @@ impl NativeApp {
                 },
                 Message::Preview,
             ));
+            actions = actions.push(self.primary("Overfør ændringer", Message::Apply));
         } else if self.needs_recheck {
-            content = content.push(self.primary("Kontrollér igen", Message::Preview));
+            actions = actions.push(self.primary("Kontrollér igen", Message::Preview));
         } else {
-            content = content.push(self.primary("Se ændringer", Message::Preview));
+            actions = actions.push(self.primary("Se ændringer", Message::Preview));
         }
-        content.push(
-            row![
-                self.quiet("Indstillinger", Message::Open(Screen::Settings)),
-                self.quiet("Hjælp", Message::Open(Screen::Help))
-            ]
-            .spacing(8),
-        )
+        actions.into()
     }
 
-    /// Service connections, the calendar and the confirmed choices. Every
-    /// button here is secondary to the setup screen's own confirm action.
+    /// Tjenester, the current calendar step, and program actions. One filled
+    /// button lives in the calendar step; the rest are a row of text buttons.
     fn settings<'a>(&'a self, mut content: Column<'a, Message>) -> Column<'a, Message> {
         content = content
-            .push(text("Indstillinger").size(22))
-            .push(text("Tjenester"))
-            // Both services have to be reachable before the catalog can be
-            // read, so login stays available throughout setup.
+            .push(text("Indstillinger").size(20))
+            .push(text("Tjenester").size(14))
             .push(
                 row![
                     self.quiet("Log ind i MitHF", Message::Login(Service::Mithf)),
                     self.quiet("Log ind i DUOS", Message::Login(Service::Duos)),
-                    self.quiet("Kontrollér login", Message::CheckLogin)
+                    self.quiet("Kontrollér login", Message::CheckLogin),
+                    self.quiet("Log ud af MitHF og DUOS", Message::ForgetLogins),
                 ]
                 .spacing(8),
             )
-            .push(text(
-                "Skifter du til en anden konto, så log ud her først. Appen lukker sine browservinduer og glemmer de gemte logins, så den nye konto ikke arver den gamles adgang. Overførselshistorikken bevares, og der slettes intet i MitHF eller DUOS.",
-            ))
-            .push(self.quiet("Log ud af MitHF og DUOS", Message::ForgetLogins))
+            .push(text("Kalender").size(14))
             .push(self.setup.view().map(Message::Setup))
-            .push(self.quiet("Genindlæs opsætning", Message::Reload))
-            .push(self.quiet("Tjek for opdateringer", Message::CheckUpdates));
-        content = content.push(self.quiet("Hjælp", Message::Open(Screen::Help)));
+            .push(text("Program").size(14));
+        let mut program = row![
+            self.quiet("Genindlæs opsætning", Message::Reload),
+            self.quiet("Tjek for opdateringer", Message::CheckUpdates),
+            self.quiet("Hjælp", Message::Open(Screen::Help)),
+        ]
+        .spacing(8);
         if self.account.is_some() {
-            content = content.push(self.quiet("Tilbage til ugen", Message::Open(Screen::Home)));
+            program = program.push(self.quiet("Tilbage til ugen", Message::Open(Screen::Home)));
         }
-        content
+        content.push(program)
     }
 
     /// Short guidance and the diagnostics the maintainer may ask for.
@@ -1916,6 +2071,35 @@ mod tests {
         assert_eq!(app.activity, Activity::Apply);
     }
 
+    /// The fetch line follows what the task reports and disappears with the
+    /// fetch, so the screen never keeps a stale stage.
+    #[test]
+    fn a_fetch_shows_the_stage_the_task_has_reached() {
+        let mut app = app();
+        app.activity = Activity::Preview;
+        let fetch = Fetch::new();
+        let stage = fetch.stage.clone();
+        app.fetch = Some(fetch);
+        let _ = app.update(Message::ApplyTick);
+        let first = app.fetch.as_ref().expect("fetch");
+        assert_eq!(first.shown, FetchStage::Sessions);
+        // The first stage creeps inside its own quarter and no further.
+        assert!(first.bar() >= 0.0 && first.bar() < 1.0);
+        mark(&stage, FetchStage::Destinations);
+        let _ = app.update(Message::ApplyTick);
+        let shown = app.fetch.as_ref().expect("fetch");
+        assert_eq!(shown.shown, FetchStage::Destinations);
+        assert!(shown.line().starts_with("Læser MitHF og DUOS …"));
+        // Two stages are done, so the bar stands in the third quarter.
+        assert!(shown.bar() >= 2.0 && shown.bar() < 3.0);
+        let _ = app.view();
+        let _ = app.update(Message::PreviewLoaded(
+            Err("Ugen kunne ikke hentes.".into()),
+        ));
+        assert!(app.fetch.is_none());
+        assert_eq!(app.activity, Activity::Idle);
+    }
+
     fn app() -> NativeApp {
         NativeApp {
             engine: Engine::new("unused-test-directory".into()),
@@ -1935,6 +2119,7 @@ mod tests {
             apply_write_total: 0,
             apply_write_verified: 0,
             apply_bar: 0.0,
+            fetch: None,
             apply_current: String::new(),
             apply_summary: String::new(),
             apply_stopping: false,
