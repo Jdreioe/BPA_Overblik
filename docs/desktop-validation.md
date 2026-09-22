@@ -51,7 +51,8 @@ Colour is appearance, not identity: it is kept out of the sub-calendar
 comparison in `Setup.revalidate`, so recolouring a calendar in TeamUp adopts
 the new colour without discarding confirmed mappings or an approval.
 
-Frozen golden files cover the split, overnight days, future DUOS hours, changed
+Frozen golden files cover the split, overnight days, DUOS hours later the same
+day, changed
 values, empty and unchanged weeks and an unread destination. Rust tests cover
 approval requiring an unchanged re-read, a changed or newly blocked plan
 returning to review, and revocation on week, setup or retry changes.

@@ -40,7 +40,7 @@ pub struct ApplyRequest {
     pub shifts: Vec<SourceShift>,
     pub range_start: DateTime<FixedOffset>,
     pub range_end: DateTime<FixedOffset>,
-    /// Fixed throughout this run, including DUOS retrospective checks.
+    /// Fixed throughout this run.
     pub now: DateTime<FixedOffset>,
     pub expected_digest: String,
 }

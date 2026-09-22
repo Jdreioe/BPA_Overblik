@@ -62,8 +62,7 @@ cover normal navigation. The primary button is "Se ændringer".
 The preview shows day, helper and shift time, followed by what will happen in
 MitHF and DUOS. Separate SPS intervals remain separate. Overnight shifts show
 both dates. Updates show old and new values. Count user-visible shifts and
-registrations, not internal API calls. Explain future DUOS intervals as
-"Kan overføres, når timerne er afsluttet".
+registrations, not internal API calls.
 
 Put items requiring attention first. Each explains the problem and the next
 action, such as correcting an instruction in TeamUp or reconnecting a service.

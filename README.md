@@ -159,7 +159,8 @@ local date. For a shift spanning multiple local dates, name a day or the item
 is flagged for review. Unsupported syntax, overlaps, times outside the source
 shift, and ambiguous/nonexistent DST clock times are never guessed.
 
-DUOS entries are planned only after their interval has ended. Multiple SPS
+DUOS entries are planned for past, ongoing and future intervals; only the
+service's 26-hour limit is enforced at submission. Multiple SPS
 intervals remain independent DUOS steps; they are never merged into one
 interval.
 
