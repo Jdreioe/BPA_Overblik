@@ -796,6 +796,16 @@ fn category_request(
     } else {
         &existing.sps_record_ids
     };
+    if !meeting && !existing.sps_intervals.is_empty() && records.is_empty() {
+        return Err(LiveError(
+            "MitHF bekræftede ikke ID for det eksisterende SPS-tidsrum.",
+        ));
+    }
+    if end <= start || start < existing.starts_at || end > existing.ends_at {
+        return Err(LiveError(
+            "Kategoriens tidsrum skal ligge inden for MitHF-vagten.",
+        ));
+    }
     if records.len() > 1 {
         return Err(LiveError(
             "Eksisterende kategoriintervaller lægges ikke sammen.",
@@ -1116,6 +1126,55 @@ mod tests {
         );
         let snapshot = parent(&["r-11", "r-12"]);
         assert!(category_request(zone(), &sps, &snapshot.mithf_shifts[0], false).is_err());
+    }
+
+    #[test]
+    fn sps_edit_uses_the_existing_record_and_stays_in_its_part() {
+        let mut snapshot = parent(&["r-11"]);
+        let shift = &mut snapshot.mithf_shifts[0];
+        shift.sps_intervals = vec![crate::TimeInterval {
+            starts_at: DateTime::parse_from_rfc3339("2024-03-04T09:00:00+01:00").unwrap(),
+            ends_at: DateTime::parse_from_rfc3339("2024-03-04T10:00:00+01:00").unwrap(),
+        }];
+        let edit = item(
+            PlanSystem::Mithf,
+            "mithf.set_sps#1",
+            json!({"intervals": [{"starts_at": "2024-03-04T09:00:00+01:00", "ends_at": "2024-03-04T11:00:00+01:00"}]}),
+            Some("7001"),
+        );
+        let request = category_request(zone(), &edit, shift, false).unwrap();
+        assert_eq!(request.action, "retreg");
+        assert_eq!(request.body["rid"], "r-11");
+        assert_eq!(request.body["fradato"], "2024-03-04");
+        assert_eq!(request.body["tildato"], "2024-03-04");
+        assert_eq!(request.body["start"], "09:00");
+        assert_eq!(request.body["slut"], "11:00");
+
+        shift.sps_record_ids.clear();
+        assert!(category_request(zone(), &edit, shift, false).is_err());
+        shift.sps_record_ids.push("r-11".into());
+        shift.ends_at = DateTime::parse_from_rfc3339("2024-03-04T10:30:00+01:00").unwrap();
+        assert!(category_request(zone(), &edit, shift, false).is_err());
+    }
+
+    #[test]
+    fn overnight_time_edit_sends_both_dates_to_rettid() {
+        let mut snapshot = parent(&[]);
+        snapshot.mithf_shifts[0].starts_at =
+            DateTime::parse_from_rfc3339("2024-03-04T22:00:00+01:00").unwrap();
+        snapshot.mithf_shifts[0].ends_at =
+            DateTime::parse_from_rfc3339("2024-03-05T06:00:00+01:00").unwrap();
+        let edit = item(
+            PlanSystem::Mithf,
+            "mithf.create_shift",
+            json!({"starts_at": "2024-03-05T00:00:00+01:00", "ends_at": "2024-03-05T07:00:00+01:00", "helper_count": 1}),
+            Some("7001"),
+        );
+        let request = shift_request(&identities(), zone(), &edit, &snapshot).unwrap();
+        assert_eq!(request.action, "rettid");
+        assert_eq!(request.body["gammeldato"], "2024-03-04");
+        assert_eq!(request.body["dato"], "2024-03-05");
+        assert_eq!(request.body["slutdato"], "2024-03-05");
     }
 
     /// The planner gives a meeting the segment's own bounds, not an interval
