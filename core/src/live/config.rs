@@ -3,7 +3,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use super::{id, rows, text, LiveError, INVALID};
+use super::{
+    id, rows,
+    sheets::{parse_link, SheetAccess},
+    text, LiveError, INVALID,
+};
 use crate::{HelperMapping, PlanningConfig};
 use serde_json::{json, Value};
 
@@ -14,11 +18,18 @@ pub struct LiveConfig {
     pub(crate) calendar: String,
     pub(crate) api_key: String,
     pub(crate) bearer: String,
+    pub(crate) sheet: Option<SheetAccess>,
     pub(crate) setup: Value,
     pub(crate) lookback_days: i64,
     pub state_path: PathBuf,
     pub helper_names: BTreeMap<String, String>,
     pub helper_colors: BTreeMap<String, String>,
+}
+
+impl LiveConfig {
+    pub fn source_is_sheets(&self) -> bool {
+        self.sheet.is_some()
+    }
 }
 
 /// Read the established desktop setup and OS vault without changing either.
@@ -92,13 +103,18 @@ fn config_from_setup(
 ) -> Result<LiveConfig, LiveError> {
     let mut helpers = BTreeMap::new();
     let mut names = BTreeMap::new();
+    let duos_enabled = setup["duos_enabled"].as_bool().unwrap_or(true);
     for mapping in rows(&setup["mappings"])? {
         if mapping["excluded"].as_bool().ok_or(INVALID)? {
             continue;
         }
         let source = selected(&setup["calendars"], &mapping["source"])?;
         let mithf = selected(&setup["mithf"], &mapping["mithf"])?;
-        let duos = selected(&setup["duos"], &mapping["duos"])?;
+        let duos = if duos_enabled {
+            Some(selected(&setup["duos"], &mapping["duos"])?)
+        } else {
+            None
+        };
         let key = id(&source["id"])?;
         if helpers.contains_key(&key) {
             return Err(INVALID);
@@ -108,19 +124,48 @@ fn config_from_setup(
             key,
             HelperMapping {
                 mithf_name: text(&mithf["name"])?.into(),
-                duos_employee_number: id(&duos["id"])?,
+                duos_employee_number: duos
+                    .map(|duos| id(&duos["id"]))
+                    .transpose()?
+                    .unwrap_or_default(),
             },
         );
     }
     if helpers.is_empty() {
         return Err(LiveError("Opsætningen mangler bekræftede hjælpere."));
     }
-    let calendar = text(&secret["calendar"])?.to_owned();
-    let api_key = text(&secret["api_key"])?.to_owned();
-    if calendar.is_empty() || api_key.is_empty() {
-        return Err(LiveError("TeamUp-forbindelsen mangler en nøgle."));
-    }
-    let hash = account_scope(&setup, &calendar)?;
+    let sheet = match setup["source"].as_str().unwrap_or("teamup") {
+        "teamup" => None,
+        "sheets" => {
+            let layout: crate::sheets::SheetLayout =
+                serde_json::from_value(setup["sheet_layout"].clone())
+                    .map_err(|_| LiveError("Regnearkets gemte opsætning er ugyldig."))?;
+            let link = text(&secret["link"])?;
+            Some(parse_link(link, layout)?)
+        }
+        _ => return Err(LiveError("Ukendt kilde i opsætningen.")),
+    };
+    let (calendar, api_key, bearer, scope_source) = if let Some(sheet) = &sheet {
+        (
+            String::new(),
+            String::new(),
+            String::new(),
+            sheet.source_id(),
+        )
+    } else {
+        let calendar = text(&secret["calendar"])?.to_owned();
+        let api_key = text(&secret["api_key"])?.to_owned();
+        if calendar.is_empty() || api_key.is_empty() {
+            return Err(LiveError("TeamUp-forbindelsen mangler en nøgle."));
+        }
+        (
+            calendar.clone(),
+            api_key,
+            secret["bearer"].as_str().unwrap_or("").into(),
+            calendar,
+        )
+    };
+    let hash = account_scope(&setup, &scope_source)?;
     let planning = PlanningConfig {
         timezone: setup["timezone"]
             .as_str()
@@ -128,8 +173,17 @@ fn config_from_setup(
             .parse()
             .map_err(|_| INVALID)?,
         default_helper_count: 1,
-        duos_arrangement_id: id(&setup["arrangement"])?,
-        duos_registration_type: id(&setup["registration_type"])?,
+        duos_arrangement_id: if duos_enabled {
+            id(&setup["arrangement"])?
+        } else {
+            String::new()
+        },
+        duos_registration_type: if duos_enabled {
+            id(&setup["registration_type"])?
+        } else {
+            String::new()
+        },
+        duos_enabled,
         helpers,
     };
     let lookback_days = setup["lookback_days"].as_i64().unwrap_or(7);
@@ -153,7 +207,8 @@ fn config_from_setup(
         planning,
         calendar,
         api_key,
-        bearer: secret["bearer"].as_str().unwrap_or("").into(),
+        bearer,
+        sheet,
         lookback_days,
         setup,
         helper_names: names,

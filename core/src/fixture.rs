@@ -43,6 +43,8 @@ struct Config {
     timezone: Tz,
     #[serde(default = "one")]
     default_helper_count: i64,
+    #[serde(default = "enabled")]
+    duos_enabled: bool,
     duos: Duos,
     helpers: Vec<Helper>,
 }
@@ -62,6 +64,9 @@ fn timezone() -> Tz {
 }
 fn one() -> i64 {
     1
+}
+fn enabled() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -117,6 +122,7 @@ pub fn preview(
         default_helper_count: config.default_helper_count,
         duos_arrangement_id: config.duos.arrangement_id,
         duos_registration_type: config.duos.registration_type,
+        duos_enabled: config.duos_enabled,
         helpers,
     };
     let (range_start, range_end) = resolve_range(config.timezone, from, to, now)?;

@@ -37,14 +37,14 @@ The app uses `TEAMUP_SHIFT_SYNC_DATA_DIR` when set; otherwise it uses
 `$XDG_DATA_HOME/teamup-shift-sync` on Linux, falling back to
 `~/.local/share/teamup-shift-sync`, `~/Library/Application Support/teamup-shift-sync`
 on macOS, or `%APPDATA%/teamup-shift-sync` on Windows. It must contain `setup.json`;
-TeamUp credentials stay in the OS vault. Live commands derive the database path
+TeamUp credentials or the Google Sheets capability link stay in the OS vault. Live commands derive the database path
 from the saved account choices and mappings.
 
 ```sh
 cargo run -p teamup-shift-sync-cli -- login --data-dir /path/to/app-data
 ```
 
-Log in through both opened browser windows, then press Enter in the terminal.
+Log in through the opened browser window or windows, then press Enter in the terminal. DUOS opens only when enabled in setup.
 The command checks read access and closes its browsers. `login` is the only
 command that opens a window; every other command runs Chromium headless
 against these separate Rust profiles, which preserve the login. MitHF's shift
@@ -57,7 +57,7 @@ cargo run -p teamup-shift-sync-cli -- capture \
   --data-dir /path/to/app-data --out docs/service-shapes.json
 ```
 
-`capture` issues every MitHF and DUOS read the native adapters depend on and
+`capture` issues every enabled MitHF and DUOS read the native adapters depend on and
 records the JSON structure it gets back: object keys and leaf types only, never
 a value. Strings are reduced to a form tag (`text`, `digits`, `date-iso`,
 `date-dk`, `time`, `datetime-iso`, `empty`), and object keys that are data
@@ -101,7 +101,7 @@ cargo run -p teamup-shift-sync-cli -- apply \
   --approve YOUR_REVIEWED_64_CHARACTER_DIGEST
 ```
 
-`apply` makes real MitHF and DUOS changes. It rereads TeamUp and destinations,
+`apply` makes real changes to enabled destinations. It rereads the selected source and destinations,
 rejects a changed approval, and verifies every submitted step through read-back.
 If it fails after submission, keep the database: the uncertain records support
 recovery. Run a fresh preview before deciding what to do next.

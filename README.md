@@ -1,7 +1,7 @@
 # TeamUp shift sync
 
-A local, manually triggered weekly importer for planning TeamUp helper shifts in
-MitHF and registering completed SPS intervals in DUOS.
+A local, manually triggered weekly importer for planning helper shifts from
+TeamUp or a shared Google Sheet in MitHF. SPS registration in DUOS is optional.
 
 One pure Rust core owns parsing, planning, approval, transfers and sync state.
 The Iced desktop app and a small CLI both use it. There is no Python
@@ -37,8 +37,8 @@ First-time setup happens in the desktop app, not in a config file:
 cargo run -p teamup-shift-sync-gui
 ```
 
-Connect TeamUp once, log in to MitHF and DUOS, confirm helpers and
-arrangement, and review the week. Credentials live in the OS credential store;
+Connect TeamUp or Google Sheets, log in to MitHF, optionally enable DUOS,
+confirm helpers, and review the week. Credentials live in the OS credential store;
 setup and sync history live in the per-user application data directory
 (`TEAMUP_SHIFT_SYNC_DATA_DIR` overrides it). Do not commit API keys, `setup.json`
 or browser session data.
@@ -91,7 +91,7 @@ cargo run -p teamup-shift-sync-cli -- apply \
   --approve YOUR_REVIEWED_64_CHARACTER_DIGEST
 ```
 
-`apply` rereads TeamUp and both destinations, rejects a changed approval, and
+`apply` rereads the selected source and enabled destinations, rejects a changed approval, and
 verifies every submitted step through read-back. If it fails after submission,
 keep the database: the uncertain records support recovery. See the
 [native Rust CLI](docs/rust-cli.md) for login, shape capture and exit codes.
@@ -202,18 +202,18 @@ built by `scripts/package-*` from a dated tag. For a plain local build, use
 
 ## The weekly preview
 
-"Se vagtplan fra TeamUp" shows the selected Monday-to-Sunday week as a grid of seven day
+The weekly preview shows the selected Monday-to-Sunday week as a grid of seven day
 columns, one block per MitHF shift over the hours it covers. A shift crossing
 midnight appears in both days, marked as continuing, and keeps both dates in
 its label. A shift split for several SPS intervals shows its parts. Under the
 grid, the same week is repeated as text with the values the grid has no room
 for, including old and new values for changes and the affected destination.
 
-Blocks are filled with the helper's own TeamUp calendar colour, so the week
-reads the way it does in TeamUp, and outlined in a status colour: new,
+For TeamUp, blocks use the helper's calendar colour. For Sheets, blocks
+use a neutral fill. Both have a status outline: new,
 changed, unchanged or needs attention. Status never depends on colour alone —
 each block also carries a text marker, and the day-by-day list below spells it
-out. The guided setup reads colours from TeamUp automatically; a
+out. The guided setup reads TeamUp colours automatically; a
 fixture run can set `teamup_color` per helper.
 
 Items needing attention come first, each with a plain-language cause and the
@@ -222,7 +222,7 @@ differently, and an unread destination is never shown as empty.
 
 "Overfør ændringer" is enabled only for a fully reconciled week with no
 unresolved items and at least one write. Clicking it re-reads the source and
-both destinations; only an unchanged plan counts as approved. Changing the
+enabled destinations; only an unchanged plan counts as approved. Changing the
 week, the setup or the plan revokes an approval. The transfer verifies every
 step through read-back and keeps recovery records for anything uncertain.
 

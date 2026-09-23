@@ -8,6 +8,7 @@
 mod native;
 mod selfcheck;
 mod setup;
+mod template;
 mod update;
 mod widgets;
 

@@ -1,7 +1,7 @@
 # Desktop app
 
 The Iced binary runs the native workflow directly on the Rust core. It reads
-TeamUp, builds the Danish week view, and applies reviewed changes without any
+the selected TeamUp or Google Sheets source, builds the Danish week view, and applies reviewed changes without any
 worker process.
 
 ```sh
@@ -9,8 +9,7 @@ cargo run -p teamup-shift-sync-gui
 ```
 
 It uses the per-user application data directory, or `TEAMUP_SHIFT_SYNC_DATA_DIR`
-when set, for `setup.json`, browser profiles and sync history. TeamUp
-credentials are read from and written to the OS vault.
+when set, for `setup.json`, browser profiles and sync history. Source credentials or a Google Sheets capability link are read from and written to the OS vault.
 
 The home screen shows only the week, its changes and the two primary actions.
 Everything technical lives on **Indstillinger** and **Hjælp**. Setup runs on
@@ -18,17 +17,17 @@ Indstillinger: until a setup is confirmed that is the screen the app opens, and
 confirming revalidates both services and returns to the week. Importing a legacy
 TOML configuration is the one setup feature not carried over from the old engine.
 
-1. On **Indstillinger**, choose **Log ind i MitHF** and **Log ind i DUOS**.
+1. On **Indstillinger**, connect a source, then choose **Log ind i MitHF** and, if enabled, **Log ind i DUOS**.
    Complete authentication in each browser. These two buttons are the only thing
    that opens a browser window; reads reuse the saved profile headless, and
    MitHF's shift calendar is entered through the site's own "Åbn din vagtplan"
    action. Login lives beside setup because reading the catalog needs both
    services.
-2. Choose **Kontrollér login**, then return to the week and **Se vagtplan fra TeamUp**.
+2. Choose **Kontrollér login**, then return to the week and **Se vagtplan**.
 3. Review the split shifts, times, helper assignments, SPS and DUOS values.
    Resolve any points under **Kræver opmærksomhed** before proceeding.
 4. **Overfør ændringer** approves exactly the displayed plan and submits it.
-   The app reloads saved setup and TeamUp, checks the account database scope,
+   The app reloads saved setup and the selected source, checks the account database scope,
    and invokes the core's locked destination revalidation and verified transfer.
 
 Opening Indstillinger revokes a shown approval, because editing settings can
@@ -37,8 +36,8 @@ change the account behind it.
 ## Switching accounts
 
 Synchronization history is stored per account in `sync-<scope>.sqlite3`, where
-the scope covers the calendar, the MitHF customer and grant, the DUOS
-arrangement and registration type, and the confirmed helper mappings. Every
+the scope covers the source, the MitHF customer and grant, the enabled DUOS
+choices, and the confirmed helper mappings. Every
 preview and every transfer rereads both destinations and refuses to continue
 unless the catalog still matches the confirmed one, so one account can never
 plan against another's history. The first preview of a login builds the

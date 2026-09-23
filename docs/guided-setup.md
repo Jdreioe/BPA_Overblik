@@ -5,29 +5,79 @@ Fixture previews are CLI-only; the desktop app never opens example data.
 
 ## First run
 
-1. Paste a shared `https://teamup.com/ks…` calendar link and the one-time API
+1. Choose TeamUp or Google Sheets. For TeamUp, paste a shared `https://teamup.com/ks…` calendar link and the one-time API
    key. The app reads calendar configuration and the current week's events,
    including each event's comments. Account-only, password-protected and
    restricted links need a shared link with suitable access from the calendar
    owner. Empty weeks cannot prove comment visibility; later previews check it.
-2. Sign in to MitHF and DUOS in their app-managed browsers. Fetch helpers and
+2. Sign in to MitHF and, if SPS registration is enabled, DUOS in their app-managed browsers. Fetch helpers and
    arrangements after login completes.
-3. Choose an active DUOS SPS arrangement and registration type. A unique choice
+3. If DUOS is enabled, choose an active SPS arrangement and registration type. A unique choice
    is a proposal requiring confirmation. Multiple MitHF customers or selectable
    grants block setup because the existing adapter does not validate arbitrary
    customer/grant combinations.
-4. Review TeamUp, MitHF and DUOS names together. Unique exact names are proposed;
+4. Review source, MitHF and, when enabled, DUOS names together. Unique exact names are proposed;
    other matches require dropdown selections. Exclude calendars that are not
    helper calendars. DUOS duplicate names have identifying numbers in the
    dropdown; users select an existing entry and never type an employee number.
    MitHF duplicate names block confirmation because its current assignment
    read-back cannot distinguish them safely.
-5. Confirm the customer, grant, arrangement, registration type and helpers.
+5. Confirm the customer, grant, enabled DUOS choices and helpers.
    The app re-reads discovery before saving confirmation and opens this week's
    live preview. This flow does not create or approve registrations.
 
 Closing the app preserves submitted credentials, discovery and each dropdown
 or exclusion edit. Failed discovery can be retried.
+
+
+## Google Sheets source
+
+Paste the link for a specific tab of a Google Sheet shared as **Anyone with the
+link can view**. This route reads Google's CSV export without a Google account
+or API key. The link itself grants access, so the app stores it in the OS
+credential store. Only a `docs.google.com/spreadsheets/d/…/edit` link with a
+numeric tab ID is accepted. The app never edits the sheet.
+
+Then show the app one shift. In the sheet, select the cells of one filled
+shift (for a weekly grid, one day's column: date, weekday, helper, time, SPS),
+copy them, and choose **Indsæt vagt**. Click the date, the helper and the time
+in turn, then the SPS hours and a title such as `P-MØDE`, or skip those two.
+If the time cell holds only a start time, the app also asks for the end time.
+The app learns the date format and the word before SPS hours (such as `Sps`)
+from the example, and checks that the example reads as one shift. Only the
+cells' positions relative to the date are saved, never their contents.
+
+When reading, every cell holding a date in that format anchors one shift, so
+the same template covers a weekly grid and a table with one shift per row.
+A date with nothing at the template's positions, such as a heading, is
+ignored. A date written without a year, such as `23/9`, takes the year nearest
+the week being read, so `3/1` in the week after Christmas is next January. The
+year may only be left out with `/`, because `23.9` and `23-9` look like times. An impossible date such as `31/11/26` is reported, not skipped. One
+shift per date is supported.
+
+Setup needs at least one filled shift to discover helper names. Each source
+helper must be mapped to a MitHF helper before confirmation. An unreadable
+cell, or a date that appears twice, blocks every week it can touch; other weeks
+still work, and setup skips it. The message names the helper and date, such as
+"Zains vagt d. 27/9 mangler tid.", and only an impossible date points at its
+cell. These messages are shown on screen only and never go into a report.
+A shift's identity is its date. Editing cells in place updates the same
+shift. Moving a shift to another date is treated like deleting and
+recreating a TeamUp event: the new position is a new shift, and the app never
+removes the old one from MitHF or DUOS. The source is read afresh for preview
+and again before transfer.
+
+Disable DUOS in setup when SPS registration is not used. No DUOS login or
+helper mapping is then required. If a sheet still contains SPS instructions,
+the preview flags them for review before transfer.
+
+## Switching source
+
+Each source keeps its own setup. Choosing the other source under **Skift
+vagtplan** keeps the current setup, including its link or key and helper
+mappings, and choosing it again later restores it exactly. A source chosen for
+the first time starts from the connection step. Each source keeps its own sync
+history, because the history file is named after the source and its mappings.
 
 ## Teamup API key provisioning
 
@@ -47,7 +97,7 @@ This is the precise exception to calendar-link-only setup.
 
 ## Local storage and revalidation
 
-The key, capability link and any imported bearer token go into the OS
+The TeamUp key, source capability link and any imported bearer token go into the OS
 credential store: Windows Credential Locker, macOS Keychain or Linux Secret
 Service. The app explicitly selects these OS backends; it never substitutes a
 plaintext or null backend. Linux requires an unlocked Secret Service in the

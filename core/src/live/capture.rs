@@ -186,34 +186,36 @@ pub async fn read_shapes(
         None => missing.push("mithf.ekstra: the selected week reported no shifts"),
     }
 
-    let portfolios = browser
-        .request(
-            Service::Duos,
-            "portfolios",
-            json!({"dateOfActivePortfolio": today.to_string()}),
-        )
-        .await?;
-    duos.insert("portfolios".into(), shape(&portfolios));
-    let types = browser
-        .request(Service::Duos, "types", json!({"portfolioId": arrangement}))
-        .await?;
-    duos.insert("types".into(), shape(&types));
-    let employments = browser
-        .request(
-            Service::Duos,
-            "employments",
-            json!({"portfolioId": arrangement, "dateOfActiveEmployment": today.to_string()}),
-        )
-        .await?;
-    duos.insert("employments".into(), shape(&employments));
-    let search = browser
+    if config.planning.duos_enabled {
+        let portfolios = browser
+            .request(
+                Service::Duos,
+                "portfolios",
+                json!({"dateOfActivePortfolio": today.to_string()}),
+            )
+            .await?;
+        duos.insert("portfolios".into(), shape(&portfolios));
+        let types = browser
+            .request(Service::Duos, "types", json!({"portfolioId": arrangement}))
+            .await?;
+        duos.insert("types".into(), shape(&types));
+        let employments = browser
+            .request(
+                Service::Duos,
+                "employments",
+                json!({"portfolioId": arrangement, "dateOfActiveEmployment": today.to_string()}),
+            )
+            .await?;
+        duos.insert("employments".into(), shape(&employments));
+        let search = browser
         .request(
             Service::Duos,
             "search",
             json!({"skip": 0, "take": 100, "includeFields": ["id", "portfolioId", "helperId", "dutyTypeId", "startDate", "endDate", "statusId"]}),
         )
         .await?;
-    duos.insert("search".into(), shape(&search));
+        duos.insert("search".into(), shape(&search));
+    }
 
     Ok(json!({
         "note": "Recorded JSON structure and leaf types only. No values, names or identifiers.",

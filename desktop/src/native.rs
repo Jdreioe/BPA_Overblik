@@ -1,6 +1,6 @@
 //! Native Iced workflow using the Rust core and app-owned browser sessions.
 //! Setup editing remains in the existing application during migration.
-use crate::{setup, update};
+use crate::{setup, template, update};
 use chrono::{DateTime, Datelike, Duration, FixedOffset, NaiveDate, TimeZone, Timelike, Utc};
 use iced::widget::{button, column, container, progress_bar, row, scrollable, space, text, Column};
 use iced::{Element, Length, Subscription, Task};
@@ -16,7 +16,7 @@ use std::{
 use teamup_shift_sync_core::{
     apply_plan_controlled, build_plan,
     live::{
-        app_version, forget_logins, load_saved_setup, read_shapes, read_teamup, read_week,
+        app_version, forget_logins, load_saved_setup, read_shapes, read_source, read_week,
         redacted_report, BrowserSessions, LiveConfig, LiveDestinations, Service, Setup, Visibility,
     },
     plan_digest, ApplyOutcome, ApplyRequest, Outcome, PlanItem, PlanRequest, PlanSystem, SyncState,
@@ -248,8 +248,8 @@ impl FetchStage {
     }
     fn label(self) -> &'static str {
         match self {
-            FetchStage::Sessions => "Åbner MitHF og DUOS",
-            FetchStage::Reading => "Læser TeamUp, MitHF og DUOS",
+            FetchStage::Sessions => "Åbner tjenester",
+            FetchStage::Reading => "Læser vagtplan og tjenester",
             FetchStage::Planning => "Beregner ugens ændringer",
         }
     }
@@ -332,7 +332,7 @@ fn completion_summary(done: &ApplyDone) -> String {
         parts.join(" og ") + " er læst tilbage og verificeret."
     };
     match &done.verified_label {
-        Some(label) => format!("Færdig. {what} Sidst verificeret {label}."),
+        Some(label) => format!("Færdig. {what} Seneste overførsel: {label}."),
         None => format!("Færdig. {what}"),
     }
 }
@@ -472,6 +472,19 @@ impl Engine {
             .map_err(|e| e.to_string())?;
         view(document)
     }
+    async fn connect_sheets(
+        &self,
+        link: String,
+        layout: teamup_shift_sync_core::sheets::SheetLayout,
+    ) -> Result<setup::SetupState> {
+        let mut guard = self.setup.lock().await;
+        let document = guard.as_mut().ok_or("Opsætningen er ikke indlæst.")?;
+        document
+            .connect_sheets(&link, layout)
+            .await
+            .map_err(|e| e.to_string())?;
+        view(document)
+    }
     /// Apply one setup action. `discover` and `confirm` read both services, so
     /// they take the browser sessions first; the lock order is always browsers
     /// before the document.
@@ -496,6 +509,8 @@ impl Engine {
         match action {
             "status" => Ok(()),
             "source" => document.edit_source(),
+            "choose_source" => document.choose_source(params["source"].as_str().unwrap_or("")),
+            "duos_enabled" => document.choose_duos(params["enabled"].as_bool().unwrap_or(true)),
             "retry_source" => document.refresh_source().await,
             "edit" => document.edit(&params),
             _ => Err(teamup_shift_sync_core::live::LiveError(
@@ -543,10 +558,20 @@ impl Engine {
     /// Reading only needs the saved profile, so no browser window is opened.
     /// A window left over from login keeps serving these requests.
     async fn sessions(&self) -> Result<MutexGuard<'_, Option<BrowserSessions>>> {
+        let duos_enabled = self
+            .setup
+            .lock()
+            .await
+            .as_ref()
+            .map(Setup::duos_enabled)
+            .unwrap_or(true);
         let mut guard = self.prepared().await?;
         {
             let browser = guard.as_mut().ok_or("Browseren kunne ikke forberedes.")?;
-            for service in [Service::Mithf, Service::Duos] {
+            for service in [Service::Mithf]
+                .into_iter()
+                .chain(duos_enabled.then_some(Service::Duos))
+            {
                 browser
                     .open(service, Visibility::Background)
                     .await
@@ -556,16 +581,26 @@ impl Engine {
         Ok(guard)
     }
     async fn check(&self) -> Result<()> {
+        let duos_enabled = self
+            .setup
+            .lock()
+            .await
+            .as_ref()
+            .map(Setup::duos_enabled)
+            .unwrap_or(true);
         let guard = self.sessions().await?;
         let browser = guard.as_ref().ok_or("Log ind i MitHF og DUOS først.")?;
         browser
             .check(Service::Mithf)
             .await
             .map_err(|e| e.to_string())?;
-        browser
-            .check(Service::Duos)
-            .await
-            .map_err(|e| e.to_string())
+        if duos_enabled {
+            browser
+                .check(Service::Duos)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
     }
     /// Record what MitHF and DUOS actually send, for checking the readers'
     /// assumptions. Types only: the file holds no shift, helper or account
@@ -711,7 +746,7 @@ impl Engine {
         progress: Arc<StdMutex<TransferProgress>>,
         stop: Arc<AtomicBool>,
     ) -> ApplyResult {
-        // Re-read saved setup as well as TeamUp. A changed account scope must
+        // Re-read saved setup and the selected source. A changed account scope must
         // never inherit an approval, even when its week happens to look alike.
         let account = self
             .account()
@@ -732,7 +767,7 @@ impl Engine {
             .ok_or_else(|| apply_failure("Log ind i MitHF og DUOS først.".into(), &progress))?;
         let (to, start, end) =
             range(&account, approved.from).map_err(|message| apply_failure(message, &progress))?;
-        let shifts = read_teamup(&account, approved.from, to)
+        let shifts = read_source(&account, approved.from, to)
             .await
             .map_err(|error| apply_failure(error.to_string(), &progress))?;
         let now = Utc::now().fixed_offset();
@@ -964,18 +999,16 @@ impl std::fmt::Debug for Message {
         f.write_str("NativeMessage")
     }
 }
-/// The week is read from TeamUp, so the button that fetches it says where it
-/// comes from. It shows the plan; it does not propose anything on its own.
-const SHOW_WEEK: &str = "Se vagtplan fra TeamUp";
+/// Show the selected source's week and plan.
+const SHOW_WEEK: &str = "Se vagtplan";
 
 /// Short Danish guidance for the Hjælp screen.
-const HELP: [&str; 6] = [
-    "1. Log ind i MitHF og DUOS under Indstillinger. Login holder, indtil tjenesten selv logger dig ud.",
-    "2. Vælg ugen på forsiden, og vælg Se vagtplan fra TeamUp. Appen læser TeamUp, MitHF og DUOS og viser, hvad der mangler.",
-    "3. Løs først punkterne under Kræver opmærksomhed. Rettelser laves i TeamUp eller i tjenesten, ikke i appen.",
+const HELP: [&str; 5] = [
+    "1. Log ind i MitHF og eventuelt DUOS under Indstillinger. Login holder, indtil tjenesten selv logger dig ud.",
+    "2. Vælg ugen på forsiden, og vælg Se vagtplan.",
+    "3. Løs først punkterne under Kræver opmærksomhed. Rettelser laves i kilden eller i tjenesten, ikke i appen.",
     "4. Vælg Overfør ændringer. Hver ændring læses tilbage og bekræftes, før den næste begynder.",
     "Appen sletter aldrig noget i MitHF eller DUOS, og den godkender ikke registreringer for hjælperen.",
-    "Går noget galt, så vælg Del hvad der gik galt herunder. Appen skriver, hvad den ved om sig selv, og du bestemmer selv, om det skal sendes.",
 ];
 
 /// The screen in view. Everything technical lives away from the week.
@@ -990,6 +1023,9 @@ enum Screen {
 enum Activity {
     Idle,
     Setup,
+    /// A local setup edit. It blocks other operations like any activity but is
+    /// not shown, because it finishes before a status would be readable.
+    Save,
     Login,
     Capture,
     Preview,
@@ -1175,7 +1211,6 @@ impl NativeApp {
                     return Task::none();
                 }
                 self.activity = Activity::Idle;
-                self.setup.busy = false;
                 match result {
                     Ok(loaded) => {
                         self.account = loaded.account.clone();
@@ -1207,6 +1242,16 @@ impl NativeApp {
             }
             Message::Setup(setup::Message::Link(link)) => self.setup.link = link,
             Message::Setup(setup::Message::Key(key)) => self.setup.key = key,
+            Message::Setup(setup::Message::Template(template::Message::Paste)) => {
+                return iced::clipboard::read().map(|clipboard| {
+                    Message::Setup(setup::Message::Template(template::Message::Pasted(
+                        clipboard,
+                    )))
+                });
+            }
+            Message::Setup(setup::Message::Template(message)) => {
+                self.setup.template.update(message);
+            }
             Message::Setup(setup::Message::ToggleEdit(source)) => {
                 self.setup.toggle_edit(&source);
             }
@@ -1222,7 +1267,6 @@ impl NativeApp {
             Message::Setup(setup::Message::Connect) => {
                 self.invalidate();
                 self.activity = Activity::Setup;
-                self.setup.busy = true;
                 self.setup.error = None;
                 let engine = self.engine.clone();
                 let (link, key) = (self.setup.link.clone(), self.setup.key.clone());
@@ -1231,10 +1275,33 @@ impl NativeApp {
                     Message::SetupUpdated,
                 );
             }
-            Message::Setup(setup::Message::Action(action, params)) => {
+            Message::Setup(setup::Message::ConnectSheets) => {
+                let layout = match self.setup.sheet_layout() {
+                    Ok(layout) => layout,
+                    Err(error) => {
+                        self.setup.error = Some(error);
+                        return Task::none();
+                    }
+                };
                 self.invalidate();
                 self.activity = Activity::Setup;
-                self.setup.busy = true;
+                self.setup.error = None;
+                let engine = self.engine.clone();
+                let link = self.setup.link.clone();
+                return Task::perform(
+                    async move { engine.connect_sheets(link, layout).await },
+                    Message::SetupUpdated,
+                );
+            }
+            Message::Setup(setup::Message::Action(action, params)) => {
+                // Settings has no preview to revoke, and a local edit should
+                // leave the rest of the screen alone.
+                if matches!(action, "edit" | "duos_enabled") {
+                    self.activity = Activity::Save;
+                } else {
+                    self.invalidate();
+                    self.activity = Activity::Setup;
+                }
                 self.setup.error = None;
                 let engine = self.engine.clone();
                 return Task::perform(
@@ -1243,11 +1310,10 @@ impl NativeApp {
                 );
             }
             Message::SetupUpdated(result) => {
-                if self.activity != Activity::Setup {
+                if !matches!(self.activity, Activity::Setup | Activity::Save) {
                     return Task::none();
                 }
                 self.activity = Activity::Idle;
-                self.setup.busy = false;
                 match result {
                     Ok(state) => {
                         // The link and key are only needed until they are stored.
@@ -1318,8 +1384,17 @@ impl NativeApp {
                 self.activity = Activity::Idle;
                 match result {
                     Ok(()) => {
-                        self.notice =
-                            "MitHF og DUOS er forbundet. Du kan hente ugens ændringer.".into()
+                        self.notice = if self
+                            .setup
+                            .state
+                            .as_ref()
+                            .is_some_and(|state| !state.duos_enabled)
+                        {
+                            "MitHF er forbundet."
+                        } else {
+                            "MitHF og DUOS er forbundet."
+                        }
+                        .into()
                     }
                     Err(e) => {
                         self.preview = None;
@@ -1697,25 +1772,30 @@ impl NativeApp {
             iced::time::every(Self::UPDATE_CHECK_INTERVAL).map(|_| Message::PeriodicUpdateCheck),
         ])
     }
+    /// A local save is too short to show, so buttons keep their look. A press
+    /// during it is still ignored by the one-operation guard in `update`.
+    fn buttons_enabled(&self) -> bool {
+        matches!(self.activity, Activity::Idle | Activity::Save)
+    }
     fn action<'a>(&self, label: &'a str, message: Message) -> iced::widget::Button<'a, Message> {
         button(text(label))
             .style(iced::widget::button::secondary)
             .padding([8, 12])
-            .on_press_maybe((self.activity == Activity::Idle).then_some(message))
+            .on_press_maybe(self.buttons_enabled().then_some(message))
     }
     /// Outlined chrome: clearly a button, but not a second primary.
     fn quiet<'a>(&self, label: &'a str, message: Message) -> iced::widget::Button<'a, Message> {
         button(text(label).size(14))
             .style(super::widgets::outlined)
             .padding([7, 12])
-            .on_press_maybe((self.activity == Activity::Idle).then_some(message))
+            .on_press_maybe(self.buttons_enabled().then_some(message))
     }
     /// The single filled action on a screen.
     fn primary<'a>(&self, label: &'a str, message: Message) -> iced::widget::Button<'a, Message> {
         button(text(label))
             .style(iced::widget::button::primary)
             .padding([8, 14])
-            .on_press_maybe((self.activity == Activity::Idle).then_some(message))
+            .on_press_maybe(self.buttons_enabled().then_some(message))
     }
     fn view(&self) -> Element<'_, Message> {
         // No app-name headline here: the window title already says
@@ -1760,7 +1840,7 @@ impl NativeApp {
             page = self.apply_status(page);
         } else if self.activity != Activity::Preview {
             let busy = match self.activity {
-                Activity::Idle | Activity::Apply | Activity::Preview => "",
+                Activity::Idle | Activity::Save | Activity::Apply | Activity::Preview => "",
                 Activity::Setup => "Indlæser opsætning …",
                 Activity::Login => "Kontakter browseren …",
                 Activity::Capture => "Forbereder fejlrapporten …",
@@ -1789,14 +1869,12 @@ impl NativeApp {
             progress_line(self.apply_verified, self.apply_total),
         ));
         page = if self.apply_current.is_empty() {
-            page.push(text(
-                "Begynder. Hver ændring læses tilbage, før den næste begynder.",
-            ))
+            page.push(text("Begynder …"))
         } else {
             page.push(text(format!("{}.", self.apply_current)))
         };
         page = page.push(text(
-            "Hvis du stopper eller lukker, afslutter appen den igangværende ændring og kontrollerer den, før den standser.",
+            "Du kan trygt stoppe eller lukke appen. Den igangværende ændring gøres færdig først.",
         ));
         if self.apply_stopping {
             page.push(text(
@@ -1845,8 +1923,7 @@ impl NativeApp {
                     // Same quiet button, additionally disabled on the week
                     // that is already shown.
                     self.quiet("Denne uge", Message::Current).on_press_maybe(
-                        (self.activity == Activity::Idle && !is_current)
-                            .then_some(Message::Current),
+                        (self.buttons_enabled() && !is_current).then_some(Message::Current),
                     ),
                     self.quiet("Næste ›", Message::Navigate(7)),
                     space::horizontal(),
@@ -1859,7 +1936,7 @@ impl NativeApp {
             );
         if self.activity != Activity::Apply {
             if let Some(stamp) = &self.last_verified {
-                content = content.push(text(format!("Sidst verificeret {stamp}.")).size(12));
+                content = content.push(text(format!("Seneste overførsel: {stamp}.")).size(12));
             }
         }
         if let Some(fetch) = &self.fetch {
@@ -1943,19 +2020,24 @@ impl NativeApp {
     /// Tjenester, the current calendar step, and program actions. One filled
     /// button lives in the calendar step; the rest are a row of text buttons.
     fn settings<'a>(&'a self, mut content: Column<'a, Message>) -> Column<'a, Message> {
+        let duos_enabled = self
+            .setup
+            .state
+            .as_ref()
+            .is_none_or(|state| state.duos_enabled);
+        let mut services =
+            row![self.quiet("Log ind i MitHF", Message::Login(Service::Mithf))].spacing(8);
+        if duos_enabled {
+            services = services.push(self.quiet("Log ind i DUOS", Message::Login(Service::Duos)));
+        }
+        services = services
+            .push(self.quiet("Kontrollér login", Message::CheckLogin))
+            .push(self.quiet("Log ud af tjenester", Message::ForgetLogins));
         content = content
             .push(text("Indstillinger").size(20))
             .push(text("Tjenester").size(14))
-            .push(
-                row![
-                    self.quiet("Log ind i MitHF", Message::Login(Service::Mithf)),
-                    self.quiet("Log ind i DUOS", Message::Login(Service::Duos)),
-                    self.quiet("Kontrollér login", Message::CheckLogin),
-                    self.quiet("Log ud af MitHF og DUOS", Message::ForgetLogins),
-                ]
-                .spacing(8),
-            )
-            .push(text("Kalender").size(14))
+            .push(services)
+            .push(text("Vagtplan").size(14))
             .push(self.setup.view().map(Message::Setup))
             .push(text("Program").size(14));
         let mut program = row![
@@ -1979,7 +2061,7 @@ impl NativeApp {
         content = content.push(text(format!("Version {}.", app_version())));
         content = content
             .push(text(
-                "Del hvad der gik galt åbner et opslag på GitHub i din browser. Opslaget er offentligt, og du skal have en GitHub-konto for at sende det. Du læser teksten igennem først, og der står hverken navne, vagttekst, adgangskoder, cookies eller kalenderlink i den.",
+                "Går noget galt, åbner knappen et offentligt opslag på GitHub, som du læser igennem før afsendelse. Det kræver en GitHub-konto og indeholder ingen navne, vagttekst, adgangskoder, cookies eller links.",
             ))
             .push(self.quiet("Del hvad der gik galt", Message::ShareProblem));
         if self.account.is_some() {
@@ -2026,14 +2108,34 @@ mod tests {
     fn a_stored_connection_clears_the_typed_credentials() {
         let mut app = app();
         app.activity = Activity::Setup;
-        app.setup.busy = true;
         app.setup.link = "https://teamup.com/ksAbc123".into();
         app.setup.key = "an-api-key".into();
         let _ = app.update(Message::SetupUpdated(Ok(setup_state("destinations"))));
         // The credentials live in the OS keyring now; nothing keeps a copy.
         assert!(app.setup.link.is_empty());
         assert!(app.setup.key.is_empty());
-        assert!(!app.setup.busy);
+        assert_eq!(app.activity, Activity::Idle);
+    }
+
+    #[test]
+    fn a_local_setup_edit_keeps_the_screen_still_but_blocks_other_work() {
+        let mut app = app();
+        app.screen = Screen::Settings;
+        app.notice = "MitHF er forbundet.".into();
+        let _ = app.update(Message::Setup(setup::Message::Action(
+            "edit",
+            json!({"registration_type": "t1"}),
+        )));
+        assert_eq!(app.activity, Activity::Save);
+        assert!(app.buttons_enabled());
+        assert_eq!(app.notice, "MitHF er forbundet.");
+        // Still one operation at a time.
+        let _ = app.update(Message::Setup(setup::Message::Action(
+            "discover",
+            json!({}),
+        )));
+        assert_eq!(app.activity, Activity::Save);
+        let _ = app.update(Message::SetupUpdated(Ok(setup_state("mappings"))));
         assert_eq!(app.activity, Activity::Idle);
     }
 
@@ -2041,7 +2143,6 @@ mod tests {
     fn a_failed_setup_action_reports_on_the_setup_panel_and_allows_another_try() {
         let mut app = app();
         app.activity = Activity::Setup;
-        app.setup.busy = true;
         app.setup.link = "https://teamup.com/ksAbc123".into();
         app.setup.key = "an-api-key".into();
         let _ = app.update(Message::SetupUpdated(Err(
@@ -2085,7 +2186,7 @@ mod tests {
         let _ = app.update(Message::ApplyTick);
         let shown = app.fetch.as_ref().expect("fetch");
         assert_eq!(shown.shown, FetchStage::Reading);
-        assert!(shown.line().starts_with("Læser TeamUp, MitHF og DUOS …"));
+        assert!(shown.line().starts_with("Læser vagtplan og tjenester …"));
         // One stage is done, so the bar stands in the second section.
         assert!(shown.bar() >= 1.0 && shown.bar() < 2.0);
         let _ = app.view();
@@ -2439,7 +2540,6 @@ mod tests {
         let mut app = app();
         app.screen = Screen::Settings;
         app.activity = Activity::Setup;
-        app.setup.busy = true;
         let _ = app.update(Message::SetupUpdated(Ok(setup_state("ready"))));
         assert_eq!(app.screen, Screen::Home);
     }
@@ -2523,7 +2623,7 @@ mod tests {
         assert_eq!(verb_of(Outcome::WouldUpdate), "Opdaterer");
         assert_eq!(short_date_da(28, 8), "28. sep");
         assert_eq!(progress_line(1, 2), "1 af 2 ændringer overført.");
-        assert!(completion_summary(&done()).contains("Sidst verificeret 20. sep kl. 20.00."));
+        assert!(completion_summary(&done()).contains("Seneste overførsel: 20. sep kl. 20.00."));
     }
     #[test]
     fn verification_time_uses_the_configured_timezone() {
