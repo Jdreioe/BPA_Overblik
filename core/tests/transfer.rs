@@ -86,18 +86,23 @@ impl Destinations for MemoryDestinations {
                     .destination_id
                     .clone()
                     .unwrap_or_else(|| format!("new-{}", shifts.len()));
-                shifts.retain(|s| s.id != id);
-                shifts.push(MitHfShift {
-                    id: id.clone(),
-                    starts_at: moment(payload["starts_at"].as_str().unwrap()),
-                    ends_at: moment(payload["ends_at"].as_str().unwrap()),
-                    helper_count: payload["helper_count"].as_i64().unwrap(),
-                    helper_name: None,
-                    sps_intervals: vec![],
-                    meeting_intervals: vec![],
-                    sps_record_ids: vec![],
-                    meeting_record_ids: vec![],
-                });
+                if let Some(shift) = shifts.iter_mut().find(|s| s.id == id) {
+                    shift.starts_at = moment(payload["starts_at"].as_str().unwrap());
+                    shift.ends_at = moment(payload["ends_at"].as_str().unwrap());
+                    shift.helper_count = payload["helper_count"].as_i64().unwrap();
+                } else {
+                    shifts.push(MitHfShift {
+                        id: id.clone(),
+                        starts_at: moment(payload["starts_at"].as_str().unwrap()),
+                        ends_at: moment(payload["ends_at"].as_str().unwrap()),
+                        helper_count: payload["helper_count"].as_i64().unwrap(),
+                        helper_name: None,
+                        sps_intervals: vec![],
+                        meeting_intervals: vec![],
+                        sps_record_ids: vec![],
+                        meeting_record_ids: vec![],
+                    });
+                }
                 Some(id)
             }
             "mithf.assign_helper" => {
@@ -130,7 +135,7 @@ impl Destinations for MemoryDestinations {
             }
             _ if item.step_key.starts_with("duos.interval:") => {
                 let registration: DuosRegistration = serde_json::from_value(json!({
-                    "id": format!("duos-{}", self.snapshot.duos_registrations.len()),
+                    "id": item.destination_id.clone().unwrap_or_else(|| format!("duos-{}", self.snapshot.duos_registrations.len())),
                     "arrangement_id": payload["arrangement_id"], "employee_number": payload["employee_number"],
                     "registration_type": payload["registration_type"], "starts_at": payload["starts_at"], "ends_at": payload["ends_at"],
                 })).unwrap();
@@ -183,9 +188,12 @@ fn request() -> ApplyRequest {
     }
 }
 
-fn approve(request: &mut ApplyRequest, adapter: &MemoryDestinations) {
+fn preview_plan(
+    request: &ApplyRequest,
+    adapter: &MemoryDestinations,
+) -> teamup_shift_sync_core::SyncPlan {
     let state = SyncState::open(&adapter.state_path).unwrap();
-    let plan = build_plan(
+    build_plan(
         &PlanRequest {
             config: &request.config,
             shifts: &request.shifts,
@@ -197,8 +205,11 @@ fn approve(request: &mut ApplyRequest, adapter: &MemoryDestinations) {
         },
         &state,
     )
-    .unwrap();
-    request.expected_digest = plan_digest(&plan).unwrap();
+    .unwrap()
+}
+
+fn approve(request: &mut ApplyRequest, adapter: &MemoryDestinations) {
+    request.expected_digest = plan_digest(&preview_plan(request, adapter)).unwrap();
 }
 
 fn snapshots(path: &Path) -> i64 {
@@ -206,6 +217,200 @@ fn snapshots(path: &Path) -> i64 {
         .unwrap()
         .query_row("SELECT count(*) FROM source_occurrences", [], |r| r.get(0))
         .unwrap()
+}
+
+#[test]
+fn changed_shift_times_are_approved_and_verified_for_day_and_overnight_shifts() {
+    for (old_start, old_end, new_start, new_end) in [
+        (
+            "2026-09-14T07:30:00+02:00",
+            "2026-09-14T15:00:00+02:00",
+            "2026-09-14T08:30:00+02:00",
+            "2026-09-14T16:00:00+02:00",
+        ),
+        (
+            "2026-09-14T22:00:00+02:00",
+            "2026-09-15T06:00:00+02:00",
+            "2026-09-14T23:00:00+02:00",
+            "2026-09-15T07:00:00+02:00",
+        ),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut adapter = MemoryDestinations {
+            state_path: temp.path().join("sync.sqlite3"),
+            ..Default::default()
+        };
+        let mut request = request();
+        request.shifts[0].notes.clear();
+        request.shifts[0].starts_at = moment(old_start);
+        request.shifts[0].ends_at = moment(old_end);
+        approve(&mut request, &adapter);
+        runtime()
+            .block_on(apply_plan(
+                request.clone(),
+                adapter.state_path.clone(),
+                &mut adapter,
+                |_| {},
+            ))
+            .unwrap();
+        let original = adapter.snapshot.mithf_shifts[0].clone();
+        adapter.writes.clear();
+
+        request.shifts[0].starts_at = moment(new_start);
+        request.shifts[0].ends_at = moment(new_end);
+        let preview = preview_plan(&request, &adapter);
+        let edit = preview
+            .items
+            .iter()
+            .find(|item| item.step_key == "mithf.create_shift")
+            .unwrap();
+        assert_eq!(edit.outcome, Outcome::WouldUpdate);
+        assert_eq!(edit.destination_id.as_deref(), Some(original.id.as_str()));
+        approve(&mut request, &adapter);
+        let verified = runtime()
+            .block_on(apply_plan(
+                request,
+                adapter.state_path.clone(),
+                &mut adapter,
+                |_| {},
+            ))
+            .unwrap();
+        assert_eq!(adapter.writes, ["mithf.create_shift"]);
+        assert!(verified
+            .items
+            .iter()
+            .all(|item| item.outcome == Outcome::AlreadyMatched));
+        let updated = &adapter.snapshot.mithf_shifts[0];
+        assert_eq!(
+            (updated.starts_at, updated.ends_at),
+            (moment(new_start), moment(new_end))
+        );
+        assert_eq!(updated.id, original.id);
+        assert_eq!(updated.helper_name, original.helper_name);
+    }
+}
+
+#[test]
+fn split_sps_edit_updates_only_its_own_mithf_part() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut adapter = MemoryDestinations {
+        state_path: temp.path().join("sync.sqlite3"),
+        ..Default::default()
+    };
+    let mut request = request();
+    approve(&mut request, &adapter);
+    runtime()
+        .block_on(apply_plan(
+            request.clone(),
+            adapter.state_path.clone(),
+            &mut adapter,
+            |_| {},
+        ))
+        .unwrap();
+    for shift in &mut adapter.snapshot.mithf_shifts {
+        shift.sps_record_ids = vec![format!("rid-{}", shift.id)];
+    }
+    let first = adapter.snapshot.mithf_shifts[0].clone();
+    let second = adapter.snapshot.mithf_shifts[1].clone();
+    adapter.writes.clear();
+
+    request.shifts[0].notes = "uni 8-10 & 13-15".into();
+    let preview = preview_plan(&request, &adapter);
+    let first_sps = preview
+        .items
+        .iter()
+        .find(|i| i.step_key == "mithf.set_sps")
+        .unwrap();
+    let second_sps = preview
+        .items
+        .iter()
+        .find(|i| i.step_key == "mithf.set_sps#1")
+        .unwrap();
+    assert_eq!(first_sps.outcome, Outcome::AlreadyMatched);
+    assert_eq!(second_sps.outcome, Outcome::WouldUpdate);
+    assert_eq!(
+        second_sps.destination_id.as_deref(),
+        Some(second.id.as_str())
+    );
+    approve(&mut request, &adapter);
+    let verified = runtime()
+        .block_on(apply_plan(
+            request.clone(),
+            adapter.state_path.clone(),
+            &mut adapter,
+            |_| {},
+        ))
+        .unwrap();
+    assert!(verified
+        .items
+        .iter()
+        .all(|i| i.outcome == Outcome::AlreadyMatched));
+    assert_eq!(adapter.writes, ["mithf.set_sps#1", "duos.interval:notes:1"]);
+    assert_eq!(adapter.snapshot.mithf_shifts[0], first);
+    let updated = &adapter.snapshot.mithf_shifts[1];
+    assert_eq!(
+        (updated.starts_at, updated.ends_at),
+        (second.starts_at, second.ends_at)
+    );
+    assert_eq!(
+        updated.sps_intervals[0].ends_at,
+        moment("2026-09-14T15:00:00+02:00")
+    );
+    assert_eq!(updated.sps_record_ids, second.sps_record_ids);
+
+    adapter.writes.clear();
+    adapter.snapshot.mithf_shifts[1].sps_intervals[0].ends_at = moment("2026-09-14T14:30:00+02:00");
+    request.shifts[0].notes = "uni 8-10 & 13-14".into();
+    let blocked = preview_plan(&request, &adapter);
+    let sps = blocked
+        .items
+        .iter()
+        .find(|i| i.step_key == "mithf.set_sps#1")
+        .unwrap();
+    assert_eq!(sps.outcome, Outcome::Conflicted);
+    assert_eq!(sps.reason, "changed_since_sync");
+}
+
+#[test]
+fn manual_mithf_changes_block_automatic_edits() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut adapter = MemoryDestinations {
+        state_path: temp.path().join("sync.sqlite3"),
+        ..Default::default()
+    };
+    let mut request = request();
+    request.shifts[0].notes.clear();
+    approve(&mut request, &adapter);
+    runtime()
+        .block_on(apply_plan(
+            request.clone(),
+            adapter.state_path.clone(),
+            &mut adapter,
+            |_| {},
+        ))
+        .unwrap();
+    adapter.writes.clear();
+    adapter.snapshot.mithf_shifts[0].ends_at = moment("2026-09-14T14:30:00+02:00");
+    request.shifts[0].ends_at = moment("2026-09-14T16:00:00+02:00");
+    let preview = preview_plan(&request, &adapter);
+    let edit = preview
+        .items
+        .iter()
+        .find(|i| i.step_key == "mithf.create_shift")
+        .unwrap();
+    assert_eq!(edit.outcome, Outcome::Conflicted);
+    assert_eq!(edit.reason, "manually_changed");
+    approve(&mut request, &adapter);
+    assert!(matches!(
+        runtime().block_on(apply_plan(
+            request,
+            adapter.state_path.clone(),
+            &mut adapter,
+            |_| {},
+        )),
+        Err(TransferError::Approval(ApprovalError::UnresolvedItems))
+    ));
+    assert!(adapter.writes.is_empty());
 }
 
 #[test]

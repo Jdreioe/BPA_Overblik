@@ -1,7 +1,9 @@
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
-use teamup_shift_sync_core::{DestinationSnapshot, PlanningConfig, SourceShift, SyncPlan};
+use teamup_shift_sync_core::{
+    plan_digest, DestinationSnapshot, PlanningConfig, SourceShift, SyncPlan,
+};
 use teamup_shift_sync_gui::preview::build_week;
 
 #[derive(Deserialize)]
@@ -102,4 +104,71 @@ fn only_a_missing_destination_entry_offers_allowing_a_transfer_again() {
     assert_eq!(missing.attention.len(), 1);
     assert!(missing.attention[0].can_allow_retransfer);
     assert_eq!(missing.attention[0].source_key, case.shifts[0].key());
+}
+
+#[test]
+fn day_sps_edit_on_overnight_shift_shows_old_and_new_values_in_danish() {
+    let config: PlanningConfig = serde_json::from_value(json!({
+        "timezone": "Europe/Copenhagen", "default_helper_count": 1,
+        "duos_arrangement_id": "arrangement", "duos_registration_type": "Almindelig",
+        "helpers": {"helper": {"mithf_name": "Mit Helper", "duos_employee_number": "123"}}
+    }))
+    .unwrap();
+    let shift: SourceShift = serde_json::from_value(json!({
+        "calendar_id": "calendar", "event_id": "event", "occurrence_id": "occurrence",
+        "title": "Shift", "helper_key": "helper", "notes": "uni 2026-09-14 10-12",
+        "starts_at": "2026-09-14T09:00:00+02:00", "ends_at": "2026-09-15T09:00:00+02:00"
+    }))
+    .unwrap();
+    let source = shift.key();
+    let destination: DestinationSnapshot = serde_json::from_value(json!({
+        "mithf_shifts": [{
+            "id": "7001", "starts_at": "2026-09-14T08:00:00+02:00",
+            "ends_at": "2026-09-15T08:00:00+02:00", "helper_count": 1,
+            "helper_name": "Mit Helper",
+            "sps_intervals": [{"starts_at": "2026-09-14T10:00:00+02:00", "ends_at": "2026-09-14T11:00:00+02:00"}]
+        }]
+    }))
+    .unwrap();
+    let plan: SyncPlan = serde_json::from_value(json!({
+        "starts_at": "2026-09-14T00:00:00+02:00",
+        "ends_at": "2026-09-21T00:00:00+02:00",
+        "generated_at": "2026-09-14T20:00:00+02:00",
+        "items": [
+            {"source_key": source, "system": "mithf", "step_key": "mithf.create_shift",
+             "outcome": "would_update", "summary": "", "reason": "", "destination_id": "7001",
+             "payload": {"starts_at": "2026-09-14T09:00:00+02:00", "ends_at": "2026-09-15T09:00:00+02:00", "helper_count": 1}},
+            {"source_key": source, "system": "mithf", "step_key": "mithf.assign_helper",
+             "outcome": "already_matched", "summary": "", "reason": "", "destination_id": "7001",
+             "payload": {"helper_name": "Mit Helper"}},
+            {"source_key": source, "system": "mithf", "step_key": "mithf.set_sps",
+             "outcome": "would_update", "summary": "", "reason": "", "destination_id": "7001",
+             "payload": {"intervals": [{"starts_at": "2026-09-14T10:00:00+02:00", "ends_at": "2026-09-14T12:00:00+02:00"}]}}
+        ]
+    }))
+    .unwrap();
+    let week = build_week(
+        &config,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        &[shift],
+        &plan,
+        &destination,
+        true,
+    )
+    .unwrap();
+    let block = &week.days[0].blocks[0];
+    assert_eq!(block.status_label, "Ændres");
+    assert!(block
+        .details
+        .contains(&"Vagtens tid ændres i MitHF: 08:00 14. sep – 08:00 15. sep → 09:00 14. sep – 09:00 15. sep.".into()));
+    assert!(block
+        .details
+        .contains(&"SPS-timer ændres i MitHF: 10:00–11:00 → 10:00–12:00.".into()));
+    assert!(week.can_apply);
+    assert_eq!(week.days[1].blocks[0].details, block.details);
+
+    let mut changed = plan.clone();
+    changed.items[2].payload["intervals"][0]["ends_at"] = json!("2026-09-14T13:00:00+02:00");
+    assert_ne!(plan_digest(&changed).unwrap(), plan_digest(&plan).unwrap());
 }

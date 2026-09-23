@@ -158,7 +158,7 @@ fn detail(item: &PlanItem, destination: &DestinationSnapshot, zone: Tz) -> Resul
                                 .join(", ")
                         })
                         .unwrap_or("ingen SPS-timer".into());
-                    format!("SPS-timer ændres: {before} → {after}.")
+                    format!("SPS-timer ændres i MitHF: {before} → {after}.")
                 }
                 PendingIntegration => format!("SPS-timer {after} kræver aflæsning af MitHF."),
                 AlreadyMatched => format!("SPS-timer {after} er allerede sat."),
