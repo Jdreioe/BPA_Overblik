@@ -1,10 +1,10 @@
-# Sådan installerer du Vagtplanlægning
+# Sådan installerer du BPA Overblik
 
 Programmet hentes som én fil til dit system. Du skal ikke installere Rust,
 Python eller andre udviklerværktøjer.
 
 Hent filen fra den nyeste udgivelse:
-<https://github.com/Jdreioe/teamup_sync/releases/latest>
+<https://github.com/Jdreioe/BPA_Overblik/releases/latest>
 
 Udgivelserne hedder efter datoen, for eksempel `2026.09.21`.
 
@@ -15,7 +15,7 @@ Udgivelserne hedder efter datoen, for eksempel `2026.09.21`.
 | Linux, 64-bit | `teamup-shift-sync-ÅÅÅÅ.MM.DD-x86_64.AppImage` |
 
 Google Chrome eller Chromium skal være installeret på maskinen i forvejen.
-Vagtplanlægning henter aldrig selv en browser, og den rører aldrig din
+BPA Overblik henter aldrig selv en browser, og den rører aldrig din
 almindelige browser: den åbner sit eget vindue til MitHF og DUOS.
 
 ## Windows
@@ -37,9 +37,9 @@ mellem TeamUp, MitHF og DUOS og din historik ligger i
    endnu ikke er signeret. Højreklik i stedet på filen, vælg **Åbn**, og
    bekræft **Åbn** i vinduet der kommer frem.
 3. Følg installationen. Programmet lægger sig i mappen **Programmer**.
-4. Første gang du åbner **Vagtplanlægning**, spørger macOS igen. Vælg **Åbn**.
+4. Første gang du åbner **BPA Overblik**, spørger macOS igen. Vælg **Åbn**.
 
-Du fjerner programmet ved at trække **Vagtplanlægning** fra Programmer til
+Du fjerner programmet ved at trække **BPA Overblik** fra Programmer til
 papirkurven. Dine data ligger i `~/Library/Application Support/teamup-shift-sync`
 og bliver ikke slettet med programmet.
 
@@ -56,10 +56,10 @@ Der er ikke noget at afinstallere: du sletter filen. Dine data ligger i
 
 ## Hvad systemet spørger om
 
-Vagtplanlægning gemmer adgangskoder i systemets egen nøglering, og det er den
+BPA Overblik gemmer adgangskoder i systemets egen nøglering, og det er den
 eneste tilladelse den beder om:
 
-- **macOS** spørger "Vagtplanlægning vil bruge oplysninger fra din nøglering".
+- **macOS** spørger "BPA Overblik vil bruge oplysninger fra din nøglering".
   Vælg **Tillad**. Siger du nej, kan appen ikke huske dine logins.
 - **Linux** bruger skrivebordets nøglering, for eksempel GNOME Keyring. Den
   skal være installeret og låst op; ellers beder appen dig om at logge ind

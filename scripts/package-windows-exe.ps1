@@ -12,7 +12,7 @@ if ($version -notmatch '^\d{4}\.\d{2}\.\d{2}$') {
     throw "Release version must be YYYY.MM.DD, got: $version"
 }
 
-Write-Host "Building Vagtplanlægning $version for Windows/x86_64"
+Write-Host "Building BPA Overblik $version for Windows/x86_64"
 
 $target = "x86_64-pc-windows-msvc"
 $env:TEAMUP_SHIFT_SYNC_VERSION = $version

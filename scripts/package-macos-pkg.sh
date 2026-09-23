@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the macOS installer: Apple's own package format, a .pkg that installs
-# a universal Vagtplanlægning.app into /Applications. Needs a stable Rust
+# a universal BPA Overblik.app into /Applications. Needs a stable Rust
 # toolchain and the Xcode command line tools.
 set -euo pipefail
 
@@ -16,10 +16,10 @@ bundle_version="$year.$((10#$month)).$((10#$day))"
 # The package is built from a staging root holding nothing but the app, so
 # pkgbuild's install location is exactly /Applications.
 staging="$root/target/macos/root"
-app="$staging/Vagtplanlægning.app"
+app="$staging/BPA Overblik.app"
 pkg="$root/dist/teamup-shift-sync-$version-universal.pkg"
 
-echo "Building Vagtplanlægning $version for macOS (universal)"
+echo "Building BPA Overblik $version for macOS (universal)"
 
 export MACOSX_DEPLOYMENT_TARGET=11.0
 export TEAMUP_SHIFT_SYNC_VERSION="$version"

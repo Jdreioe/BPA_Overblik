@@ -148,9 +148,9 @@ jobs:
           pkgutil --files io.github.jdreioe.teamup-shift-sync | head -20 || true
           ls -la /Applications
 
-          # Resolved rather than spelled out, because the bundle name is not
-          # ASCII and the installer decides how it stores it.
-          app="$(ls -d /Applications/*.app | grep -i vagtplan | head -1)"
+          # Resolved rather than spelled out, so the check follows the bundle
+          # name and survives its space.
+          app="$(ls -d /Applications/*.app | grep -i overblik | head -1)"
           echo "Installed app: $app"
           test -x "$app/Contents/MacOS/teamup-shift-sync-gui"
           lipo -archs "$app/Contents/MacOS/teamup-shift-sync-gui" | tee /dev/stderr | grep -q "x86_64 arm64"
@@ -202,7 +202,7 @@ jobs:
           | Linux (64-bit) | `.AppImage` |
 
           Installationen er beskrevet trin for trin i
-          [docs/installation.md](https://github.com/Jdreioe/teamup_sync/blob/main/docs/installation.md).
+          [docs/installation.md](https://github.com/Jdreioe/BPA_Overblik/blob/main/docs/installation.md).
           Pakkerne er endnu ikke signeret, så Windows og macOS spørger en ekstra
           gang, før de åbner dem; vejledningen viser hvad du skal klikke på.
 
@@ -215,7 +215,7 @@ jobs:
 
           gh release create "$tag" \
             --verify-tag \
-            --title "Vagtplanlægning $VERSION" \
+            --title "BPA Overblik $VERSION" \
             --notes-file notes.md \
             --generate-notes \
             dist/*

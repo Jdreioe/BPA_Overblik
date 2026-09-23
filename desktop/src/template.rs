@@ -172,7 +172,9 @@ impl Template {
         ))
     }
 
-    pub fn view(&self) -> Element<'_, Message> {
+    /// `saved` says a layout from an earlier connection exists, so the empty
+    /// prompt offers to replace it rather than asking for a first example.
+    pub fn view(&self, saved: bool) -> Element<'_, Message> {
         let paste = button(text("Indsæt vagt").size(14))
             .style(crate::widgets::outlined)
             .padding([7, 12])
@@ -180,7 +182,14 @@ impl Template {
         let mut content = column![].spacing(8);
         if self.cells.is_empty() {
             content = content
-                .push(text("Kopiér cellerne for én vagt i regnearket, og indsæt dem her.").size(13))
+                .push(
+                    text(if saved {
+                        "Vagtens opbygning er gemt. Indsæt en ny vagt for at ændre den."
+                    } else {
+                        "Kopiér cellerne for én vagt i regnearket, og indsæt dem her."
+                    })
+                    .size(13),
+                )
                 .push(paste);
             if let Some(error) = self.error {
                 content = content.push(text(error).size(13));

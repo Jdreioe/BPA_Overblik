@@ -83,7 +83,7 @@ fn defaults() -> Value {
         "duos_enabled": true,
         "standard_times": {"everyday": "", "weekdays": {}},
         "arrangements": [], "types": [], "mithf": [], "duos": [], "mappings": [],
-        "arrangement": "", "registration_type": "", "account": "", "notice": "",
+        "arrangement": "", "registration_type": "", "account": "",
     })
 }
 
@@ -176,7 +176,7 @@ impl Setup {
         for (key, value) in self.data.as_object().into_iter().flatten() {
             if matches!(
                 key.as_str(),
-                "credential" | "catalog" | "imported" | "account_ids" | "other_source"
+                "credential" | "catalog" | "imported" | "account_ids" | "other_source" | "notice"
             ) {
                 continue;
             }
@@ -289,10 +289,11 @@ impl Setup {
     }
 
     /// Store new TeamUp credentials and read the calendars they expose.
+    /// Returns the Danish result of the check, like [`Self::refresh_source`].
     ///
     /// The credentials are persisted before the first request, so a failed
     /// network call can be retried later instead of asking for them again.
-    pub async fn connect(&mut self, link: &str, api_key: &str) -> Result<(), LiveError> {
+    pub async fn connect(&mut self, link: &str, api_key: &str) -> Result<String, LiveError> {
         if self.data["source"] != "teamup" {
             return Err(LiveError("Vælg TeamUp som kilde først."));
         }
@@ -316,7 +317,7 @@ impl Setup {
         &mut self,
         link: &str,
         layout: crate::sheets::SheetLayout,
-    ) -> Result<(), LiveError> {
+    ) -> Result<String, LiveError> {
         if self.data["source"] != "sheets" {
             return Err(LiveError("Vælg Google Sheets som kilde først."));
         }
@@ -327,12 +328,16 @@ impl Setup {
         store_credential(&credential, &json!({"link": link.trim()}))?;
         self.data["credential"] = json!(credential);
         self.data["sheet_layout"] = serde_json::to_value(layout).map_err(|_| INVALID)?;
-        self.apply_source(calendars, colors, &notice)
+        self.apply_source(calendars, colors)?;
+        Ok(notice)
     }
 
     /// Re-read the TeamUp calendars for the saved credentials. Confirmed
     /// mappings survive unless the calendars themselves changed.
-    pub async fn refresh_source(&mut self) -> Result<(), LiveError> {
+    ///
+    /// Returns what the check found, in Danish, for the caller to show once.
+    /// It is a result, not setup, so it is never saved in the document.
+    pub async fn refresh_source(&mut self) -> Result<String, LiveError> {
         let secret = read_credential(self.credential()?)?;
         if self.data["source"] == "sheets" {
             let layout: crate::sheets::SheetLayout =
@@ -341,7 +346,8 @@ impl Setup {
             let access = sheets::parse_link(text(&secret["link"])?, layout)?;
             let (calendars, colors, notice) =
                 sheets::source_catalog(&access, self.timezone(), &self.standard_times()?).await?;
-            return self.apply_source(calendars, colors, &notice);
+            self.apply_source(calendars, colors)?;
+            return Ok(notice);
         }
         let access = teamup::Access {
             calendar: text(&secret["calendar"])?,
@@ -350,7 +356,8 @@ impl Setup {
         };
         let (calendars, colors, notice) =
             teamup::source_catalog(&access, self.timezone(), self.today()).await?;
-        self.apply_source(calendars, colors, &notice)
+        self.apply_source(calendars, colors)?;
+        Ok(notice)
     }
 
     /// Record freshly read TeamUp calendars. Split from the request so the
@@ -359,7 +366,6 @@ impl Setup {
         &mut self,
         calendars: Value,
         colors: Value,
-        notice: &str,
     ) -> Result<(), LiveError> {
         if calendars != self.data["calendars"] {
             self.data["mappings"] = json!([]);
@@ -367,7 +373,10 @@ impl Setup {
         }
         self.data["calendars"] = calendars;
         self.data["colors"] = colors;
-        self.data["notice"] = json!(notice);
+        // Documents saved before check results became return values.
+        if let Some(object) = self.data.as_object_mut() {
+            object.remove("notice");
+        }
         self.data["stage"] = json!("destinations");
         // The connection moved on, so there is no earlier stage to return to.
         if let Some(object) = self.data.as_object_mut() {
@@ -590,7 +599,6 @@ impl Setup {
             self.data["stage"] = json!("destinations");
             self.data["catalog"] = Value::Null;
             self.data["mappings"] = json!([]);
-            self.data["notice"] = json!(CHANGED);
             self.save()?;
             return Err(LiveError(CHANGED));
         }
@@ -642,7 +650,12 @@ mod tests {
                 object.remove("duos_enabled");
                 object.remove("sheet_layout");
                 object.remove("standard_times");
-                assert_eq!(legacy, *expected, "{name} / {call}: document differs");
+                // Check results are returned, no longer saved; see refresh_source.
+                let mut expected = expected.clone();
+                if let Some(object) = expected.as_object_mut() {
+                    object.remove("notice");
+                }
+                assert_eq!(legacy, expected, "{name} / {call}: document differs");
             }
         }
 
@@ -650,11 +663,9 @@ mod tests {
         /// document Python recorded. Reading is stubbed; deciding is compared.
         fn apply(setup: &mut Setup, call: &Value, expected: &Value) -> Result<(), LiveError> {
             match call["op"].as_str().expect("op") {
-                "refresh" => setup.apply_source(
-                    expected["calendars"].clone(),
-                    expected["colors"].clone(),
-                    expected["notice"].as_str().unwrap_or(""),
-                ),
+                "refresh" => {
+                    setup.apply_source(expected["calendars"].clone(), expected["colors"].clone())
+                }
                 "validate" => setup.validate_choices(),
                 "edit" => setup.edit(&call["params"]),
                 "discover" => {
