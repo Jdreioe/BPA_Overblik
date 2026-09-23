@@ -186,6 +186,12 @@ impl Setup {
         // Importing a legacy TOML configuration is not part of the native flow.
         view.insert("can_import".into(), json!(false));
         view.insert("has_credentials".into(), json!(self.credential().is_ok()));
+        view.insert(
+            "other_source_has_credentials".into(),
+            json!(self.data["other_source"]["credential"]
+                .as_str()
+                .is_some_and(|credential| !credential.is_empty())),
+        );
         Value::Object(view)
     }
 
@@ -868,12 +874,16 @@ mod tests {
         assert_eq!(setup.data["stage"], "source");
         // The kept setup holds a credential handle; it never reaches the view.
         assert!(setup.view().get("other_source").is_none());
+        assert_eq!(setup.view()["has_credentials"], false);
+        assert_eq!(setup.view()["other_source_has_credentials"], true);
         setup.data["credential"] = json!("sheet-handle");
         setup.data["stage"] = json!("ready");
         let mut sheets = setup.data.clone();
 
         setup.edit_source().unwrap();
         setup.choose_source("teamup").unwrap();
+        assert_eq!(setup.view()["has_credentials"], true);
+        assert_eq!(setup.view()["other_source_has_credentials"], true);
         let mut restored = setup.data.clone();
         restored.as_object_mut().unwrap().remove("other_source");
         assert_eq!(restored, teamup);

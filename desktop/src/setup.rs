@@ -51,6 +51,8 @@ pub struct SetupState {
     pub account: String,
     pub notice: String,
     pub has_credentials: bool,
+    #[serde(default)]
+    pub other_source_has_credentials: bool,
 }
 
 fn teamup_source() -> String {
@@ -345,14 +347,10 @@ impl SetupUi {
         name: &str,
     ) -> Element<'a, Message> {
         let active = state.source == id;
-        let status = if active {
-            if state.has_credentials {
-                "Tilsluttet"
-            } else {
-                "Ikke tilsluttet"
-            }
+        let has_credentials = if active {
+            state.has_credentials
         } else {
-            ""
+            state.other_source_has_credentials
         };
         row![
             radio(name, id, active.then_some(id), move |picked| {
@@ -363,7 +361,12 @@ impl SetupUi {
                 }
             }),
             space::horizontal(),
-            text(status).size(12),
+            text(if has_credentials {
+                "Tilsluttet"
+            } else {
+                "Ikke tilsluttet"
+            })
+            .size(12),
         ]
         .spacing(10)
         .align_y(iced::alignment::Vertical::Center)
@@ -415,7 +418,10 @@ impl SetupUi {
                         .padding(12),
                 )
                 .push(
-                    text("Brug din egen mail hos TeamUp. Organisation skal være over 5 bogstaver. Nøglen gemmes i nøgleringen.").size(12),
+                    text("Ingen API-nøgle? Åbn ansøgningen, og brug din egen mail.").size(12),
+                )
+                .push(
+                    text("Kopiér organisation og formål herunder. Indsæt nøglen ovenfor, når du får den.").size(12),
                 )
                 .push(
                     row![
@@ -738,6 +744,7 @@ mod tests {
             account: String::new(),
             notice: String::new(),
             has_credentials: true,
+            other_source_has_credentials: false,
         }
     }
 
