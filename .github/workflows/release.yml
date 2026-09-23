@@ -4,8 +4,8 @@
 # packaged from that one tag, each package is verified on a clean runner, and
 # the release is published only when all three succeed.
 #
-# Running this workflow manually builds and verifies the same packages with
-# today's date and publishes nothing.
+# Running this workflow manually builds the selected commit, creates today's
+# dated tag after all packages pass, and publishes the release.
 name: Release
 
 on:
@@ -36,12 +36,22 @@ jobs:
       - id: resolve
         name: Resolve the dated release version
         run: |
-          if [ "${{ github.ref_type }}" = "tag" ]; then
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
             version="${GITHUB_REF_NAME#v}"
           else
             version="$(date -u +%Y.%m.%d)"
           fi
           TEAMUP_SHIFT_SYNC_VERSION="$version" ./scripts/release-version.sh
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            tag="v$version"
+            if git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null; then
+              echo "Tag $tag already exists; dated releases are limited to one per day" >&2
+              exit 1
+            else
+              status=$?
+              if [ "$status" -ne 2 ]; then exit "$status"; fi
+            fi
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
   linux:
@@ -157,7 +167,7 @@ jobs:
 
   release:
     needs: [version, linux, windows, macos]
-    if: github.ref_type == 'tag'
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref_type == 'tag')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -172,6 +182,15 @@ jobs:
         run: |
           set -euo pipefail
           ls -l dist
+
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            tag="v$VERSION"
+            git tag "$tag" "$GITHUB_SHA"
+            # Checkout pushes with GITHUB_TOKEN, so this tag does not start a second run.
+            git push origin "refs/tags/$tag"
+          else
+            tag="$GITHUB_REF_NAME"
+          fi
 
           cat > notes.md <<'NOTES'
           ## Hent og installer
@@ -194,7 +213,8 @@ jobs:
           Chromium skal være installeret på maskinen. Appen henter aldrig selv en browser.
           NOTES
 
-          gh release create "$GITHUB_REF_NAME" \
+          gh release create "$tag" \
+            --verify-tag \
             --title "Vagtplanlægning $VERSION" \
             --notes-file notes.md \
             --generate-notes \

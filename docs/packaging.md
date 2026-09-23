@@ -38,9 +38,12 @@ git push origin v$(date -u +%Y.%m.%d)
 ```
 
 `.github/workflows/release.yml` then builds and verifies all three packages and
-publishes the release only if every platform succeeded. Running the workflow
-manually builds and verifies the same packages with today's date and publishes
-nothing, which is how a packaging change is checked before tagging.
+publishes the release only if every platform succeeded. You can also run the
+workflow manually on a selected branch. It builds that commit, then creates
+today's UTC tag and publishes the release after all packages pass. A manual run
+stops before building if today's tag already exists. Merging a branch does not
+publish a release; pull requests that change packaging run the package checks
+without publishing.
 
 Build one package locally with `scripts/package-linux-appimage.sh`,
 `scripts/package-windows-exe.ps1` or `scripts/package-macos-pkg.sh`. Each one
