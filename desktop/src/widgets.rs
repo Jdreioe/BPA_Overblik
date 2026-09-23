@@ -239,14 +239,16 @@ pub fn week_grid<'a, M: 'a>(week: &'a Week) -> Element<'a, M> {
                             .height(Length::Fixed(GRID_HEIGHT * (from - cursor) as f32 / 1440.0)),
                     );
                 }
-                lane = lane.push(
+                lane = lane.push(tooltip(
                     container(block_body(block))
                         .height(Length::Fixed(GRID_HEIGHT * (to - from) as f32 / 1440.0))
                         .width(Length::Fill)
                         .padding(3)
                         .clip(true)
                         .style(block_style(&block.status, &block.helper_color)),
-                );
+                    block_details(block),
+                    tooltip::Position::FollowCursor,
+                ));
                 cursor = to;
             }
             if cursor < 1440 {
@@ -273,8 +275,8 @@ pub fn week_grid<'a, M: 'a>(week: &'a Week) -> Element<'a, M> {
 
 fn block_body<'a, M: 'a>(block: &'a Block) -> Element<'a, M> {
     // The cell carries who and what-state. Time is the block's position on
-    // the clock; continuation and SPS are marks, with their times in the
-    // transfer summary and attention items instead of here.
+    // the clock; continuation and SPS are marks. Their exact values are in
+    // the block's tooltip.
     let mut body =
         column![text(format!("{} {}", status_marker(&block.status), block.helper)).size(11),]
             .spacing(0);
@@ -298,6 +300,37 @@ fn block_body<'a, M: 'a>(block: &'a Block) -> Element<'a, M> {
         body = body.push(text(marks.join(" ")).size(9));
     }
     body.into()
+}
+
+/// Everything the small cell leaves out: the exact time, the status in words
+/// and each change the transfer makes to this shift.
+fn block_details<'a, M: 'a>(block: &'a Block) -> Element<'a, M> {
+    let mut facts = vec![block.time_label.as_str(), block.status_label.as_str()];
+    if !block.part_label.is_empty() {
+        facts.push(&block.part_label);
+    }
+    if block.standard_time {
+        facts.push("standardtid");
+    }
+    let mut lines = column![
+        text(&block.helper).size(13).font(iced::Font {
+            weight: iced::font::Weight::Bold,
+            ..iced::Font::DEFAULT
+        }),
+        text(facts.join(" · ")).size(12),
+    ]
+    .spacing(2);
+    if !block.sps_label.is_empty() {
+        lines = lines.push(text(format!("SPS {}", block.sps_label)).size(12));
+    }
+    for detail in &block.details {
+        lines = lines.push(text(detail).size(12));
+    }
+    container(lines)
+        .padding(8)
+        .max_width(320)
+        .style(container::bordered_box)
+        .into()
 }
 
 /// Text cue beside every colour, so status never depends on colour alone.
