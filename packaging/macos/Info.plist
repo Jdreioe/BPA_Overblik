@@ -3,9 +3,9 @@
 <plist version="1.0">
 <dict>
   <key>CFBundleName</key>
-  <string>Vagtplanlægning</string>
+  <string>BPA Overblik</string>
   <key>CFBundleDisplayName</key>
-  <string>Vagtplanlægning</string>
+  <string>BPA Overblik</string>
   <key>CFBundleIdentifier</key>
   <string>io.github.jdreioe.teamup-shift-sync</string>
   <key>CFBundleExecutable</key>

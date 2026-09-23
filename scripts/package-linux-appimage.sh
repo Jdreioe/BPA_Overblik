@@ -16,7 +16,7 @@ appimage="$out_dir/teamup-shift-sync-$version-$arch.AppImage"
 appimagetool="$root/target/appimage/appimagetool-$arch.AppImage"
 runtime="$root/target/appimage/runtime-$arch"
 
-echo "Building Vagtplanlægning $version for Linux/$arch"
+echo "Building BPA Overblik $version for Linux/$arch"
 
 TEAMUP_SHIFT_SYNC_VERSION="$version" \
   cargo build --release --locked --workspace --target "$arch-unknown-linux-gnu"

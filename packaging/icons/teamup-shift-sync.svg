@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- BPA Overblik: the O of Overblik as a ring around four tiles, one ticked off.
+       Source for packaging/icons/*.png and packaging/windows/*.ico. -->
+  <rect width="256" height="256" rx="56" fill="#1d4f63"/>
+  <circle cx="128" cy="128" r="84" fill="none" stroke="#8fc7d6" stroke-width="18"/>
+  <rect x="84"  y="84"  width="40" height="40" rx="10" fill="#ffffff"/>
+  <rect x="132" y="84"  width="40" height="40" rx="10" fill="#ffffff"/>
+  <rect x="84"  y="132" width="40" height="40" rx="10" fill="#ffffff"/>
+  <rect x="132" y="132" width="40" height="40" rx="10" fill="#4cc38a"/>
+  <path d="M141 152 l7 7 l15 -15" fill="none" stroke="#ffffff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use teamup_shift_sync_core::live::app_version;
 
-const RELEASES: &str = "https://api.github.com/repos/Jdreioe/teamup_sync/releases/latest";
+const RELEASES: &str = "https://api.github.com/repos/Jdreioe/BPA_Overblik/releases/latest";
 const FETCH_FAILED: &str = "Opdateringen kunne ikke hentes. Prøv igen senere.";
 const INSTALL_FAILED: &str = "Opdateringen kunne ikke installeres. Prøv igen senere.";
 

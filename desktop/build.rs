@@ -12,7 +12,7 @@ fn embed_windows_icon() {
         .join("teamup-shift-sync.ico");
     let mut resource = winresource::WindowsResource::new();
     resource.set_icon(icon.to_str().expect("Windows icon path"));
-    resource.set("ProductName", "Vagtplanlægning");
-    resource.set("FileDescription", "Vagtplanlægning");
+    resource.set("ProductName", "BPA Overblik");
+    resource.set("FileDescription", "BPA Overblik");
     resource.compile().expect("Windows icon");
 }

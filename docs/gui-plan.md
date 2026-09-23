@@ -3,15 +3,15 @@
 Draft, 19 September 2026. Jonas selected Iced and cross-platform support for
 Windows, macOS and Linux.
 
-Tracking issue: https://github.com/Jdreioe/teamup_sync/issues/1
+Tracking issue: https://github.com/Jdreioe/BPA_Overblik/issues/1
 
-- [ ] [Build the Iced desktop shell on the pure Rust core](https://github.com/Jdreioe/teamup_sync/issues/2)
-- [ ] [Manage browser login sessions without manual browser setup](https://github.com/Jdreioe/teamup_sync/issues/3)
-- [ ] [Add guided setup with calendar discovery and confirmed helper matches](https://github.com/Jdreioe/teamup_sync/issues/4)
-- [ ] [Show a readable weekly preview and bind approval to its exact changes](https://github.com/Jdreioe/teamup_sync/issues/5)
-- [ ] [Run approved transfers with verified progress and safe recovery](https://github.com/Jdreioe/teamup_sync/issues/6)
-- [ ] [Add simple settings, account isolation and targeted conflict recovery](https://github.com/Jdreioe/teamup_sync/issues/7)
-- [ ] [Ship and validate the cross-platform app with nontechnical users](https://github.com/Jdreioe/teamup_sync/issues/8)
+- [ ] [Build the Iced desktop shell on the pure Rust core](https://github.com/Jdreioe/BPA_Overblik/issues/2)
+- [ ] [Manage browser login sessions without manual browser setup](https://github.com/Jdreioe/BPA_Overblik/issues/3)
+- [ ] [Add guided setup with calendar discovery and confirmed helper matches](https://github.com/Jdreioe/BPA_Overblik/issues/4)
+- [ ] [Show a readable weekly preview and bind approval to its exact changes](https://github.com/Jdreioe/BPA_Overblik/issues/5)
+- [ ] [Run approved transfers with verified progress and safe recovery](https://github.com/Jdreioe/BPA_Overblik/issues/6)
+- [ ] [Add simple settings, account isolation and targeted conflict recovery](https://github.com/Jdreioe/BPA_Overblik/issues/7)
+- [ ] [Ship and validate the cross-platform app with nontechnical users](https://github.com/Jdreioe/BPA_Overblik/issues/8)
 
 ## Product decision
 

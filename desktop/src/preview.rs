@@ -1,6 +1,6 @@
 //! Danish presentation of a finished Rust plan. No network, state writes, or
 //! approval authority lives here; the core revalidates every actual transfer.
-use crate::protocol::{Attention, Block, Day, Week};
+use crate::protocol::{Attention, Block, Day, Notice, Tone, Week};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Timelike};
 use chrono_tz::Tz;
 use serde_json::{Map, Value};
@@ -402,46 +402,6 @@ pub fn build_week(
     let has_writes = plan.items.iter().any(|i| writes(i.outcome));
     let has_blockers = plan.items.iter().any(|i| blocker(i.outcome));
     let can_apply = destination_read && attention.is_empty() && has_writes && !has_blockers;
-    let headline = if planned == 0 {
-        "Der er ingen vagter i denne uge.".into()
-    } else if !attention.is_empty() {
-        format!(
-            "{} opmærksomhed, før ugen kan overføres.",
-            plural(attention.len(), "punkt kræver", "punkter kræver")
-        )
-    } else if !destination_read {
-        if config.duos_enabled {
-            "MitHF og DUOS er ikke aflæst.".into()
-        } else {
-            "MitHF er ikke aflæst.".into()
-        }
-    } else if !has_writes {
-        "Ugen er allerede overført.".into()
-    } else {
-        "Ugen er klar til overførsel.".into()
-    };
-    let notice = if !destination_read {
-        if config.duos_enabled {
-            "MitHF og DUOS er ikke aflæst. Visningen viser, hvad vagtplanen beder om, ikke hvad der allerede findes i tjenesterne."
-        } else {
-            "MitHF er ikke aflæst. Visningen viser, hvad vagtplanen beder om, ikke hvad der allerede findes i tjenesten."
-        }
-    } else {
-        ""
-    }.into();
-    // Only what the headline does not already say.
-    let blocked_reason = if !destination_read {
-        if config.duos_enabled {
-            "Log ind i MitHF og DUOS, så ugen kan aflæses."
-        } else {
-            "Log ind i MitHF, så ugen kan aflæses."
-        }
-    } else if attention.is_empty() && has_blockers {
-        "Løs punkterne under Kræver opmærksomhed først."
-    } else {
-        ""
-    }
-    .into();
     let summary = summary(&counts);
     let parts = labels(&counts);
     let mithf = parts[..5]
@@ -457,6 +417,45 @@ pub fn build_week(
         (true, false) => format!("Overfører {duos} til DUOS."),
         (true, true) => "Der er ingen ændringer at overføre.".into(),
     };
+    // One status per week: the outcome, and a next step only when one exists.
+    let unread = if config.duos_enabled {
+        "MitHF og DUOS"
+    } else {
+        "MitHF"
+    };
+    let status = if planned == 0 {
+        Notice::new(Tone::Info, "Der er ingen vagter i denne uge", "")
+    } else if !attention.is_empty() {
+        Notice::new(
+            Tone::Warning,
+            "Ugen kan ikke godkendes endnu",
+            if attention.len() == 1 {
+                "Løs punktet herunder først.".to_owned()
+            } else {
+                format!("Løs de {} punkter herunder først.", attention.len())
+            },
+        )
+    } else if !destination_read {
+        Notice::new(
+            Tone::Warning,
+            format!("{unread} kan ikke kontrolleres"),
+            format!("Log ind i {unread}, og hent ugen igen."),
+        )
+    } else if has_blockers {
+        Notice::new(
+            Tone::Warning,
+            "Ugen kan ikke godkendes endnu",
+            "Hent ugen igen.",
+        )
+    } else if !has_writes {
+        Notice::new(Tone::Success, "Ugen er allerede overført", "")
+    } else {
+        Notice::new(
+            Tone::Info,
+            "Ugen er klar til godkendelse",
+            apply_summary.clone(),
+        )
+    };
     Ok(Week {
         days: days
             .into_iter()
@@ -470,12 +469,10 @@ pub fn build_week(
             })
             .collect(),
         attention,
-        headline,
-        notice,
+        status,
         summary,
         apply_summary,
         can_apply,
-        blocked_reason,
         destination_read,
     })
 }
