@@ -398,6 +398,8 @@ impl SetupUi {
             );
         } else {
             content = content
+                .push(text("På PC: TeamUp → ☰ → Settings → Shared").size(12))
+                .push(text("Kopiér Reader-linket, og indsæt det her:").size(12))
                 .push(
                     text_input("TeamUp-kalenderlink", &self.link)
                         .id(iced::widget::Id::new(SOURCE_LINK_ID))
