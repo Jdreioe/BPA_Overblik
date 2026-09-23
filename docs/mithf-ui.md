@@ -48,12 +48,25 @@ dialog contents remain in the DOM: do not treat their presence as open state.
 
 ## Still requires verification
 
+On 2026-09-23, Jonas reported a successful live time edit on a 24-hour shift
+and a successful SPS edit on a split shift. The exact read-back status is not
+yet confirmed. Overnight SPS intervals are outside the intended use.
+
 - The confirmation state after choosing a helper and the read-back path for the
   saved assignment.
-- SPS save/read-back behavior, including overnight interval editing.
+- `rettid` save/read-back for an ordinary shift and an explicit `AlreadyMatched`
+  read-back for the reported 24-hour edit.
+- `retreg` read-back with an existing SPS record ID.
 - SPS read-back on a shift created by splitting. The planner cuts a shift at
   the start of each further SPS interval so every MitHF shift carries exactly
-  one, but the saved result has not been read back from a real shift.
+  one. The split edit was reported to save successfully, but its read-back
+  outcome has not yet been confirmed.
 
 No live shift should be created merely to discover these details. Use an
 already authorized batch or explicit permission for a harmless concrete test.
+
+The weekly flow proposes time or SPS edits only while MitHF still matches the
+last verified transfer. It shows the old and new values before approval and
+requires matching read-back after each edit. If someone changed the MitHF
+shift or SPS interval separately, the batch stops for review. V1 has no
+force-overwrite action; correcting that conflict remains a manual decision.
