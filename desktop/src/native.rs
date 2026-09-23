@@ -377,7 +377,7 @@ fn completion_notice(done: &ApplyDone) -> Notice {
 
 /// Where a report can be shared. The repository is public, which the Support
 /// screen says before anything is opened.
-const ISSUE_FORM: &str = "https://github.com/Jdreioe/teamup_sync/issues/new";
+const ISSUE_FORM: &str = "https://github.com/Jdreioe/BPA_Overblik/issues/new";
 
 /// The saved report, and whether a browser accepted the prefilled issue.
 #[derive(Clone, Debug)]
@@ -409,7 +409,7 @@ fn issue_url(report: &Value, path: &std::path::Path) -> String {
     const INTRO: &str = "Skriv kort, hvad du gjorde, og hvad der skete:\n\n\n";
     let details = serde_json::to_string_pretty(report).unwrap_or_default();
     let mut body = format!("{INTRO}Oplysninger fra appen:\n\n```json\n{details}\n```\n");
-    let title = query_encoded("Der gik noget galt i Vagtplanlægning");
+    let title = query_encoded("Der gik noget galt i BPA Overblik");
     if ISSUE_FORM.len() + title.len() + query_encoded(&body).len() > BUDGET {
         body = format!(
             "{INTRO}Vedhæft filen {} fra din computer.\n",
@@ -2100,7 +2100,7 @@ impl NativeApp {
                                 self.status = Some(Notice::new(
                                     Tone::Info,
                                     "Installationsprogrammet er åbnet",
-                                    "Følg trinnene, og åbn Vagtplanlægning igen bagefter.",
+                                    "Følg trinnene, og åbn BPA Overblik igen bagefter.",
                                 ));
                             }
                             Err(error) => {
@@ -2218,7 +2218,7 @@ impl NativeApp {
     }
     fn view(&self) -> Element<'_, Message> {
         // No app-name headline here: the window title already says
-        // Vagtplanlægning, and each screen brings its own heading.
+        // BPA Overblik, and each screen brings its own heading.
         let mut page = column![]
             .spacing(12)
             .padding(20)
@@ -2634,7 +2634,7 @@ pub fn run() -> iced::Result {
     iced::application(NativeApp::new, NativeApp::update, NativeApp::view)
         .subscription(NativeApp::subscription)
         .exit_on_close_request(false)
-        .title("Vagtplanlægning")
+        .title("BPA Overblik")
         .run()
 }
 
@@ -3219,8 +3219,8 @@ mod tests {
     fn the_shared_issue_is_prefilled_and_falls_back_to_the_saved_file() {
         let path = std::path::Path::new("/hjem/fejlrapport.json");
         let url = issue_url(&json!({"version": 1, "setup": {"stage": "ready"}}), path);
-        assert!(url.starts_with("https://github.com/Jdreioe/teamup_sync/issues/new?title="));
-        assert!(url.contains("Vagtplanl%C3%A6gning"));
+        assert!(url.starts_with("https://github.com/Jdreioe/BPA_Overblik/issues/new?title="));
+        assert!(url.contains("BPA%20Overblik"));
         assert!(url.contains("%22stage%22"));
 
         // A report too long for an address points at the file instead.

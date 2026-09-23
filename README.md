@@ -13,7 +13,7 @@ installation, no worker process and no bundled runtime; see the completed
 Dated releases carry one file per system: a `.exe` for Windows 10/11, a
 universal `.pkg` for macOS 11 and newer, and an `.AppImage` for 64-bit Linux.
 Download the newest one from
-[releases](https://github.com/Jdreioe/teamup_sync/releases/latest); the Danish
+[releases](https://github.com/Jdreioe/BPA_Overblik/releases/latest); the Danish
 [installation guide](docs/installation.md) has the steps, including the
 one-time security prompt on Windows and macOS.
 

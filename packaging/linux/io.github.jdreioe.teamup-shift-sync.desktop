@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=Vagtplanlægning
+Name=BPA Overblik
 GenericName=Vagtoverførsel
 Comment=Gennemse ugens vagter og overfør dem til MitHF og DUOS
 Exec=teamup-shift-sync-gui

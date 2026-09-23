@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
   <id>io.github.jdreioe.teamup-shift-sync</id>
-  <name>Vagtplanlægning</name>
+  <name>BPA Overblik</name>
   <summary>Gennemse ugens vagter og overfør dem til MitHF og DUOS</summary>
   <summary xml:lang="en">Review a week of shifts and transfer them to MitHF and DUOS</summary>
   <metadata_license>CC0-1.0</metadata_license>
@@ -12,15 +12,15 @@
   </developer>
   <description>
     <p>
-      Vagtplanlægning henter en uges vagter fra TeamUp, viser hvad der vil
+      BPA Overblik henter en uges vagter fra TeamUp, viser hvad der vil
       blive ændret, og overfører først noget når ugen er godkendt. Hver
       overførsel læses tilbage og kontrolleres. Ingen vagter overføres
       automatisk eller i baggrunden.
     </p>
   </description>
   <launchable type="desktop-id">io.github.jdreioe.teamup-shift-sync.desktop</launchable>
-  <url type="homepage">https://github.com/Jdreioe/teamup_sync</url>
-  <url type="bugtracker">https://github.com/Jdreioe/teamup_sync/issues</url>
+  <url type="homepage">https://github.com/Jdreioe/BPA_Overblik</url>
+  <url type="bugtracker">https://github.com/Jdreioe/BPA_Overblik/issues</url>
   <categories>
     <category>Office</category>
     <category>Calendar</category>

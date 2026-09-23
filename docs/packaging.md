@@ -7,7 +7,7 @@ Linux wrap the desktop app, the CLI and the fixtures; Windows is the desktop
 | System | Package | Built on | Installed as |
 | --- | --- | --- | --- |
 | Windows 10/11 x86_64 | `.exe` (portable desktop app) | `windows-latest` | wherever the person keeps the file |
-| macOS 11+ x86_64 and arm64 | `.pkg` (`pkgbuild`, not relocatable) | `macos-14` | `/Applications/Vagtplanlægning.app` |
+| macOS 11+ x86_64 and arm64 | `.pkg` (`pkgbuild`, not relocatable) | `macos-14` | `/Applications/BPA Overblik.app` |
 | Linux x86_64, glibc 2.35+ | `.AppImage` | `ubuntu-22.04` | wherever the person keeps the file |
 
 The user-facing instructions live in [installation](installation.md); this file

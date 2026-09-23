@@ -4,7 +4,7 @@
 <array>
   <dict>
     <key>RootRelativeBundlePath</key>
-    <string>Vagtplanlægning.app</string>
+    <string>BPA Overblik.app</string>
     <!-- Not relocatable: the app belongs in /Applications. Left relocatable,
          macOS installs it over whatever copy Launch Services happens to know
          about, which in CI was the build directory. -->
