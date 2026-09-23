@@ -207,7 +207,7 @@ impl SetupUi {
         ]
         .spacing(10);
         content = content
-            .push(text("Fælles tid").size(14))
+            .push(text("Standardtid for alle dage").size(14))
             .push(
                 text_input("F.eks. 6-22", &self.standard_default)
                     .id(iced::widget::Id::new(STANDARD_DEFAULT_ID))
@@ -215,7 +215,7 @@ impl SetupUi {
                     .padding(10),
             )
             .push(
-                text("Tomt felt bruger fælles tid. Skriv »ingen« for ingen standard den dag.")
+                text("Lad en dag stå tom for at bruge tiden ovenfor. Skriv »ingen« for ingen standardtid.")
                     .size(12),
             );
         for (index, day) in [
@@ -227,7 +227,7 @@ impl SetupUi {
             content = content.push(
                 row![
                     text(*day).width(Length::Fixed(90.0)),
-                    text_input("Fælles tid", &self.standard_days[index])
+                    text_input("Brug tiden ovenfor", &self.standard_days[index])
                         .id(iced::widget::Id::new(STANDARD_DAY_IDS[index]))
                         .on_input(move |value| Message::StandardDay(index, value))
                         .padding(10)
