@@ -216,8 +216,13 @@ impl Setup {
         })
     }
 
-    /// Return to the TeamUp connection step without discarding saved choices.
+    /// Return to the connection step without discarding saved choices. The
+    /// stage it came from is remembered, so a setup kept by `choose_source`
+    /// comes back where it was, not half-edited.
     pub fn edit_source(&mut self) -> Result<(), LiveError> {
+        if self.data["stage"] != "source" {
+            self.data["resume_stage"] = self.data["stage"].clone();
+        }
         self.data["stage"] = json!("source");
         self.save()
     }
@@ -238,7 +243,11 @@ impl Setup {
         let other = object
             .remove("other_source")
             .filter(|other| other["source"] == source);
-        let left = self.data.clone();
+        let resume = object.remove("resume_stage");
+        let mut left = self.data.clone();
+        if let Some(stage) = resume {
+            left["stage"] = stage;
+        }
         match other {
             Some(other) => self.data = other,
             None => {
@@ -336,6 +345,10 @@ impl Setup {
         self.data["colors"] = colors;
         self.data["notice"] = json!(notice);
         self.data["stage"] = json!("destinations");
+        // The connection moved on, so there is no earlier stage to return to.
+        if let Some(object) = self.data.as_object_mut() {
+            object.remove("resume_stage");
+        }
         self.save()
     }
 
@@ -798,6 +811,8 @@ mod tests {
         setup.data["stage"] = json!("ready");
         let teamup = setup.data.clone();
 
+        // The app opens the connection step with Skift vagtplan first.
+        setup.edit_source().unwrap();
         setup.choose_source("sheets").unwrap();
         assert_eq!(setup.data["mappings"], json!([]));
         assert_eq!(setup.data["stage"], "source");
@@ -807,12 +822,14 @@ mod tests {
         setup.data["stage"] = json!("ready");
         let mut sheets = setup.data.clone();
 
+        setup.edit_source().unwrap();
         setup.choose_source("teamup").unwrap();
         let mut restored = setup.data.clone();
         restored.as_object_mut().unwrap().remove("other_source");
         assert_eq!(restored, teamup);
         assert_eq!(setup.data["other_source"]["credential"], "sheet-handle");
 
+        setup.edit_source().unwrap();
         setup.choose_source("sheets").unwrap();
         sheets.as_object_mut().unwrap().remove("other_source");
         let mut now = Setup::load(dir.path()).unwrap().data;
