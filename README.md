@@ -202,7 +202,7 @@ built by `scripts/package-*` from a dated tag. For a plain local build, use
 
 ## The weekly preview
 
-"Se ændringer" shows the selected Monday-to-Sunday week as a grid of seven day
+"Se vagtplan fra TeamUp" shows the selected Monday-to-Sunday week as a grid of seven day
 columns, one block per MitHF shift over the hours it covers. A shift crossing
 midnight appears in both days, marked as continuing, and keeps both dates in
 its label. A shift split for several SPS intervals shows its parts. Under the
