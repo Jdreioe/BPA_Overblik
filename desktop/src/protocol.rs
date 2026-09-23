@@ -145,7 +145,7 @@ mod tests {
                            "explanation": "…", "action": "…",
                            "source_key": "cal:event:2026-09-14T07:30:00+02:00",
                            "can_allow_retransfer": true}],
-            "status": {"tone": "info", "title": "Ugen er klar til overførsel",
+            "status": {"tone": "info", "title": "Ugen er klar til godkendelse",
                        "detail": "Overfører …"},
             "summary": ["1 ny vagt i MitHF"], "apply_summary": "Overfører …",
             "can_apply": true, "destination_read": true,

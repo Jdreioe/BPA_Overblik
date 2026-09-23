@@ -26,7 +26,7 @@ TOML configuration is the one setup feature not carried over from the old engine
 2. Choose **Check forbindelse** in each pane, then return to the week and **Se vagtplan**.
 3. Review the split shifts, times, helper assignments, SPS and DUOS values.
    Resolve any points under **Kræver opmærksomhed** before proceeding.
-4. **Overfør ændringer** approves exactly the displayed plan and submits it.
+4. **Godkend ændringer** approves exactly the displayed plan and submits it.
    The app reloads saved setup and the selected source, checks the account database scope,
    and invokes the core's locked destination revalidation and verified transfer.
 

@@ -238,7 +238,7 @@ Items needing attention come first, each with a plain-language cause and the
 next action. Empty weeks, unchanged weeks and an unread destination each read
 differently, and an unread destination is never shown as empty.
 
-"Overfør ændringer" is enabled only for a fully reconciled week with no
+"Godkend ændringer" is enabled only for a fully reconciled week with no
 unresolved items and at least one write. Clicking it re-reads the source and
 enabled destinations; only an unchanged plan counts as approved. Changing the
 week, the setup or the plan revokes an approval. The transfer verifies every

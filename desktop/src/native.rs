@@ -1109,7 +1109,7 @@ const HELP: [&str; 5] = [
     "1. Log ind i MitHF og eventuelt DUOS under Udbydere. Login holder, indtil tjenesten selv logger dig ud.",
     "2. Vælg ugen på forsiden, og vælg Se vagtplan.",
     "3. Løs først punkterne under Kræver opmærksomhed. Rettelser laves i kilden eller i tjenesten, ikke i appen.",
-    "4. Vælg Overfør ændringer. Hver ændring læses tilbage og bekræftes, før den næste begynder.",
+    "4. Vælg Godkend ændringer. Hver ændring læses tilbage og bekræftes, før den næste begynder.",
     "Appen sletter aldrig noget i MitHF eller DUOS, og den godkender ikke registreringer for hjælperen.",
 ];
 
@@ -2435,7 +2435,7 @@ impl NativeApp {
                 },
                 Message::Preview,
             ));
-            actions = actions.push(self.primary("Overfør ændringer", Message::Apply));
+            actions = actions.push(self.primary("Godkend ændringer", Message::Apply));
         } else if self.needs_recheck {
             actions = actions.push(self.primary("Kontrollér igen", Message::Preview));
         } else {
@@ -3419,7 +3419,7 @@ mod tests {
                            "action": "Ret konflikten i MitHF.",
                            "source_key": "shift-b",
                            "can_allow_retransfer": false}],
-            "status": {"tone": "warning", "title": "Ugen kan ikke overføres endnu",
+            "status": {"tone": "warning", "title": "Ugen kan ikke godkendes endnu",
                        "detail": "Løs punktet herunder først."},
             "summary": [],
             "apply_summary": "Der er ingen ændringer at overføre.",

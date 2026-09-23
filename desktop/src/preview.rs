@@ -428,7 +428,7 @@ pub fn build_week(
     } else if !attention.is_empty() {
         Notice::new(
             Tone::Warning,
-            "Ugen kan ikke overføres endnu",
+            "Ugen kan ikke godkendes endnu",
             if attention.len() == 1 {
                 "Løs punktet herunder først.".to_owned()
             } else {
@@ -444,7 +444,7 @@ pub fn build_week(
     } else if has_blockers {
         Notice::new(
             Tone::Warning,
-            "Ugen kan ikke overføres endnu",
+            "Ugen kan ikke godkendes endnu",
             "Hent ugen igen.",
         )
     } else if !has_writes {
@@ -452,7 +452,7 @@ pub fn build_week(
     } else {
         Notice::new(
             Tone::Info,
-            "Ugen er klar til overførsel",
+            "Ugen er klar til godkendelse",
             apply_summary.clone(),
         )
     };
