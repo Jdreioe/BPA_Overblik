@@ -131,9 +131,8 @@ impl BrowserSessions {
             .append(true)
             .open(root.join("browser.lock"))
             .map_err(|_| INVALID)?;
-        fs2::FileExt::try_lock_exclusive(&lock).map_err(|_| {
-            LiveError("Rust-forhåndsvisningen kører allerede. Luk det andet vindue først.")
-        })?;
+        fs2::FileExt::try_lock_exclusive(&lock)
+            .map_err(|_| LiveError("Appen kører allerede i et andet vindue. Luk det først."))?;
         let client = reqwest::Client::builder()
             .no_proxy()
             .timeout(Duration::from_secs(10))
@@ -217,7 +216,9 @@ impl BrowserSessions {
             if child.try_wait().map_err(|_| INVALID)?.is_some()
                 || tokio::time::Instant::now() >= deadline
             {
-                return Err(LiveError("Browseren svarede ikke. Luk eventuelle andre Rust-forhåndsvisninger, og prøv igen."));
+                return Err(LiveError(
+                    "Browseren svarede ikke. Luk andre vinduer med appen, og prøv igen.",
+                ));
             }
             if let Ok(marker) = tokio::fs::read_to_string(profile.join("DevToolsActivePort")).await
             {
@@ -354,7 +355,7 @@ impl BrowserSessions {
             ),
         };
         if !allowed {
-            return Err(LiveError("Rust-forhåndsvisningen tillader kun læsning."));
+            return Err(LiveError("Her må appen kun læse fra tjenesten."));
         }
         self.call(service, action, payload).await
     }
