@@ -9,7 +9,8 @@ use sha2::{Digest, Sha256};
 
 use super::LiveError;
 use crate::{
-    sheets::{csv_cells, parse_cells, SheetIssue, SheetLayout},
+    sheets::{csv_cells, parse_cells_with_standard, SheetIssue, SheetLayout},
+    standard_time::StandardTimes,
     SourceShift,
 };
 
@@ -138,11 +139,19 @@ async fn fetch(access: &SheetAccess) -> Result<Vec<Vec<String>>, LiveError> {
 pub(crate) async fn source_catalog(
     access: &SheetAccess,
     zone: Tz,
+    standard: &StandardTimes,
 ) -> Result<(Value, Value, String), LiveError> {
     let grid = fetch(access).await?;
     let today = chrono::Utc::now().with_timezone(&zone).date_naive();
-    let parsed =
-        parse_cells(&grid, &access.layout, &access.source_id(), zone, today).map_err(LiveError)?;
+    let parsed = parse_cells_with_standard(
+        &grid,
+        &access.layout,
+        &access.source_id(),
+        zone,
+        today,
+        standard,
+    )
+    .map_err(LiveError)?;
     if parsed.helpers.is_empty() {
         return Err(LiveError(
             "Regnearket indeholder ingen læsbare vagter. Kontrollér opsætningen.",
@@ -178,10 +187,18 @@ pub(crate) async fn read(
     zone: Tz,
     from: NaiveDate,
     to: NaiveDate,
+    standard: &StandardTimes,
 ) -> Result<Vec<SourceShift>, String> {
     let grid = fetch(access).await.map_err(|error| error.to_string())?;
-    let parsed = parse_cells(&grid, &access.layout, &access.source_id(), zone, from)
-        .map_err(str::to_owned)?;
+    let parsed = parse_cells_with_standard(
+        &grid,
+        &access.layout,
+        &access.source_id(),
+        zone,
+        from,
+        standard,
+    )
+    .map_err(str::to_owned)?;
     if let Some(issue) = parsed
         .issues
         .iter()
@@ -227,7 +244,7 @@ fn week_shifts(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sheets::{CellOffset, IssueKind, TimeCells};
+    use crate::sheets::{parse_cells, CellOffset, IssueKind, TimeCells};
 
     /// Date, helper two rows below it, time three rows below it.
     fn layout() -> SheetLayout {

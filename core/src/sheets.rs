@@ -16,6 +16,7 @@ use chrono::{DateTime, Datelike, Duration, FixedOffset, NaiveDate, NaiveTime, Ti
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
+use crate::standard_time::StandardTimes;
 use crate::SourceShift;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -153,6 +154,8 @@ impl SheetLayout {
 pub enum IssueKind {
     MissingHelper,
     MissingTime,
+    NoStandardTime,
+    InvalidStandardTime,
     UnreadableTime,
     UnreadableSps,
     ImpossibleDate,
@@ -165,6 +168,8 @@ impl IssueKind {
         match self {
             IssueKind::MissingHelper => "Hjælperen mangler.",
             IssueKind::MissingTime => "Tiden mangler.",
+            IssueKind::NoStandardTime => "Der er ingen standardtid for denne ugedag.",
+            IssueKind::InvalidStandardTime => "Standardtiden kan ikke bruges på denne dato.",
             IssueKind::UnreadableTime => "Tiden skal være som 8-24 eller 08:30-16:00.",
             IssueKind::UnreadableSps => "SPS-feltet følger ikke skabelonens skrivemåde.",
             IssueKind::ImpossibleDate => "Datoen findes ikke.",
@@ -204,6 +209,12 @@ impl SheetIssue {
         match self.kind {
             IssueKind::MissingHelper => format!("Vagten {day} mangler en hjælper."),
             IssueKind::MissingTime => format!("{shift} mangler tid."),
+            IssueKind::NoStandardTime => {
+                format!("{shift} mangler tid, og ugedagen har ingen standardtid.")
+            }
+            IssueKind::InvalidStandardTime => {
+                format!("{shift} har en standardtid, der ikke kan bruges på grund af sommertid.")
+            }
             IssueKind::UnreadableTime => format!(
                 "{shift} har en tid, der ikke kan læses. Skriv den som 8-24 eller 08:30-16:00."
             ),
@@ -293,7 +304,26 @@ pub fn parse_cells(
     zone: Tz,
     reference: NaiveDate,
 ) -> Result<ParsedSheet, &'static str> {
+    parse_cells_with_standard(
+        cells,
+        layout,
+        source_id,
+        zone,
+        reference,
+        &StandardTimes::default(),
+    )
+}
+
+pub fn parse_cells_with_standard(
+    cells: &[Vec<String>],
+    layout: &SheetLayout,
+    source_id: &str,
+    zone: Tz,
+    reference: NaiveDate,
+    standard: &StandardTimes,
+) -> Result<ParsedSheet, &'static str> {
     layout.validate()?;
+    standard.validate()?;
     let mut parsed = ParsedSheet::default();
     let mut readings = Vec::new();
     for (row_index, row) in cells.iter().enumerate() {
@@ -305,9 +335,15 @@ pub fn parse_cells(
                 .chain(DATE_FORMATS)
                 .find_map(|format| parse_date(value, format, reference));
             match date {
-                Some(date) => {
-                    readings.extend(read_shift(cells, layout, source_id, zone, date, row, col))
-                }
+                Some(date) => readings.extend(read_shift(
+                    cells,
+                    layout,
+                    source_id,
+                    zone,
+                    date,
+                    (row, col),
+                    standard,
+                )),
                 None if looks_like_date(value) => parsed.issues.push(SheetIssue {
                     cell: a1(row, col),
                     kind: IssueKind::ImpossibleDate,
@@ -370,9 +406,10 @@ fn read_shift(
     source_id: &str,
     zone: Tz,
     date: NaiveDate,
-    date_row: usize,
-    date_col: usize,
+    position: (usize, usize),
+    standard: &StandardTimes,
 ) -> Option<Reading> {
+    let (date_row, date_col) = position;
     let offsets = [
         Some(layout.helper),
         Some(match layout.time {
@@ -405,9 +442,15 @@ fn read_shift(
         date: Some(date),
         helper: (!helper.is_empty()).then(|| helper.to_owned()),
     };
+    let use_standard = start_text.is_empty() && end_text.is_empty();
+    let resolved = if use_standard {
+        standard.on(date, zone)
+    } else {
+        Ok(interval(date, start_text, end_text, zone))
+    };
     let result = if helper.is_empty() {
         Err(issue(offsets[0], IssueKind::MissingHelper))
-    } else if let Some((starts_at, ends_at)) = interval(date, start_text, end_text, zone) {
+    } else if let Ok(Some((starts_at, ends_at))) = &resolved {
         match sps_notes(sps, &layout.sps_label) {
             Some(notes) => {
                 let id = date.format("%Y%m%d").to_string();
@@ -417,16 +460,26 @@ fn read_shift(
                     occurrence_id: id,
                     title: if title.is_empty() { "Vagt" } else { title }.into(),
                     helper_key: helper.into(),
-                    starts_at,
-                    ends_at,
+                    starts_at: *starts_at,
+                    ends_at: *ends_at,
                     notes,
                     comments: vec![],
                     recurrence_start: None,
                     source_version: None,
+                    standard_time: use_standard,
                 })
             }
             None => Err(issue(layout.sps, IssueKind::UnreadableSps)),
         }
+    } else if use_standard {
+        Err(issue(
+            offsets[1],
+            if resolved.is_err() {
+                IssueKind::InvalidStandardTime
+            } else {
+                IssueKind::NoStandardTime
+            },
+        ))
     } else if start_text.is_empty() || end_text.is_empty() {
         Err(issue(offsets[1], IssueKind::MissingTime))
     } else {
@@ -499,7 +552,7 @@ fn a1(row: usize, mut col: usize) -> String {
     format!("{letters}{row}")
 }
 
-fn split_range(value: &str) -> (&str, &str) {
+pub(crate) fn split_range(value: &str) -> (&str, &str) {
     value
         .split_once(['-', '–', '—'])
         .map_or((value, ""), |(start, end)| (start.trim(), end.trim()))
@@ -517,7 +570,7 @@ fn clock(value: &str, end: bool) -> Option<(u32, u32)> {
     }
 }
 
-fn interval(
+pub(crate) fn interval(
     date: NaiveDate,
     start: &str,
     end: &str,
@@ -639,7 +692,7 @@ mod tests {
         assert_eq!(parsed.shifts.len(), 1);
         assert_eq!(
             parsed.issues[0].message("SPS"),
-            "Ninkes vagt d. 22/9 mangler tid."
+            "Ninkes vagt d. 22/9 mangler tid, og ugedagen har ingen standardtid."
         );
         assert_eq!(
             parsed
@@ -649,6 +702,31 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["Ninke", "Zain"]
         );
+    }
+
+    #[test]
+    fn empty_time_uses_standard_and_a_cleared_weekday_requires_review() {
+        let layout = column_template();
+        let sheet =
+            csv_cells("26/09/26,27/09/26\nLørdag,Søndag\nAlex,Joe\n,\n".as_bytes()).unwrap();
+        let standard = StandardTimes {
+            everyday: "6-22".into(),
+            weekdays: std::collections::BTreeMap::from([
+                ("sat".into(), Some("22-8".into())),
+                ("sun".into(), None),
+            ]),
+        };
+        let parsed =
+            parse_cells_with_standard(&sheet, &layout, "sheet", TZ, day(2026, 9, 26), &standard)
+                .unwrap();
+        assert_eq!(parsed.shifts.len(), 1);
+        assert!(parsed.shifts[0].standard_time);
+        assert_eq!(
+            parsed.shifts[0].ends_at.to_rfc3339(),
+            "2026-09-27T08:00:00+02:00"
+        );
+        assert_eq!(parsed.issues[0].kind, IssueKind::NoStandardTime);
+        assert!(parsed.issues[0].message("").contains("27/9"));
     }
 
     #[test]

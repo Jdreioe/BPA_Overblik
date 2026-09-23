@@ -71,12 +71,12 @@ spørger installationen én gang. Den kører ikke noget i baggrunden.
 
 ## Opdatering
 
-Appen søger selv efter en nyere udgivelse, mens den er åbnet. Når en ny version
-er klar, viser den det øverst i vinduet. Vælg **Hent opdatering**. På Windows
-og Linux erstatter appen filen og åbner den nye udgave. På macOS åbner den
-installationspakken, som du følger som første gang.
-
-Du kan også vælge **Tjek for opdateringer** under Indstillinger. Dine logins,
+Appen søger selv efter en nyere udgivelse, mens den er åbnet. I sidepanelet under
+**Indstillinger** søger det runde pilikon igen. Når en ny version er klar, bliver
+det til et downloadikon. Ikonet animerer, mens opdateringen hentes. Når den er
+klar, bliver det til et genstartsikon. På Windows og Linux genstarter et klik
+appen i den nye version. På macOS åbner klikket installationspakken, som du
+følger som første gang. Dine logins,
 dine kobler og din synkroniseringshistorik følger med over. Appen henter aldrig
 vagter af sig selv.
 
@@ -89,7 +89,7 @@ vagter af sig selv.
   i `TEAMUP_BROWSER_PATH`.
 - **Login virker ikke.** Klik **Log ind** igen. Den valgte uge og din opsætning
   går ikke tabt.
-- **Noget andet.** Åbn **Hjælp** i programmet og brug **Del hvad der gik galt**.
+- **Noget andet.** Åbn **Support** i programmet og brug **Del hvad der gik galt**.
   Det åbner et færdigudfyldt opslag i din browser, som du selv læser igennem,
   før du sender det. Der står hverken navne, vagttekst, adgangskoder eller
   kalenderlink i det, men versionen af programmet står der, og den er det

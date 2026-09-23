@@ -107,6 +107,36 @@ fn only_a_missing_destination_entry_offers_allowing_a_transfer_again() {
 }
 
 #[test]
+fn standard_shift_is_marked_in_the_week() {
+    let cases: Vec<Case> = serde_json::from_str(include_str!("goldens/preview.json")).unwrap();
+    let mut case = cases
+        .into_iter()
+        .find(|case| {
+            case.shifts.len() == 1
+                && case.plan.items.iter().any(|item| {
+                    item.step_key == "mithf.create_shift" && item.payload.contains_key("starts_at")
+                })
+        })
+        .expect("a visible shift");
+    case.shifts[0].standard_time = true;
+    let week = build_week(
+        &case.config,
+        &case.names,
+        &case.colors,
+        &case.shifts,
+        &case.plan,
+        &case.destination,
+        case.destination_read,
+    )
+    .unwrap();
+    assert!(week
+        .days
+        .iter()
+        .flat_map(|day| &day.blocks)
+        .any(|block| block.standard_time));
+}
+
+#[test]
 fn day_sps_edit_on_overnight_shift_shows_old_and_new_values_in_danish() {
     let config: PlanningConfig = serde_json::from_value(json!({
         "timezone": "Europe/Copenhagen", "default_helper_count": 1,

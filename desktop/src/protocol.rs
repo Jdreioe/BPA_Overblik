@@ -20,10 +20,16 @@ pub struct Block {
     pub time_label: String,
     pub sps_label: String,
     pub part_label: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub standard_time: bool,
     pub continues_before: bool,
     pub continues_after: bool,
     #[serde(default)]
     pub details: Vec<String>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

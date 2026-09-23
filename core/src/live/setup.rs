@@ -16,6 +16,7 @@ use super::{
     destinations::build_catalog,
     rows, sheets, teamup, text, BrowserSessions, LiveError, INVALID,
 };
+use crate::standard_time::StandardTimes;
 
 const UNREADABLE: LiveError =
     LiveError("Den gemte opsætning kunne ikke læses. Gendan setup.json fra din sikkerhedskopi.");
@@ -80,6 +81,7 @@ fn defaults() -> Value {
     json!({
         "version": 1, "stage": "source", "source": "teamup", "credential": "", "calendars": [], "colors": {},
         "duos_enabled": true,
+        "standard_times": {"everyday": "", "weekdays": {}},
         "arrangements": [], "types": [], "mithf": [], "duos": [], "mappings": [],
         "arrangement": "", "registration_type": "", "account": "", "notice": "",
     })
@@ -96,6 +98,19 @@ pub struct Setup {
 }
 
 impl Setup {
+    fn standard_times(&self) -> Result<StandardTimes, LiveError> {
+        let standard: StandardTimes =
+            serde_json::from_value(self.data["standard_times"].clone())
+                .map_err(|_| LiveError("De gemte standardtider er ugyldige."))?;
+        standard.validate().map_err(LiveError)?;
+        Ok(standard)
+    }
+
+    pub fn set_standard_times(&mut self, standard: StandardTimes) -> Result<(), LiveError> {
+        standard.validate().map_err(LiveError)?;
+        self.data["standard_times"] = serde_json::to_value(standard).map_err(|_| INVALID)?;
+        self.save()
+    }
     pub fn duos_enabled(&self) -> bool {
         self.data["duos_enabled"].as_bool().unwrap_or(true)
     }
@@ -171,6 +186,12 @@ impl Setup {
         // Importing a legacy TOML configuration is not part of the native flow.
         view.insert("can_import".into(), json!(false));
         view.insert("has_credentials".into(), json!(self.credential().is_ok()));
+        view.insert(
+            "other_source_has_credentials".into(),
+            json!(self.data["other_source"]["credential"]
+                .as_str()
+                .is_some_and(|credential| !credential.is_empty())),
+        );
         Value::Object(view)
     }
 
@@ -245,6 +266,7 @@ impl Setup {
             .filter(|other| other["source"] == source);
         let resume = object.remove("resume_stage");
         let mut left = self.data.clone();
+        let standard_times = left["standard_times"].clone();
         if let Some(stage) = resume {
             left["stage"] = stage;
         }
@@ -259,6 +281,7 @@ impl Setup {
                 self.data["stage"] = json!("source");
             }
         }
+        self.data["standard_times"] = standard_times;
         if left["credential"].as_str().is_some_and(|c| !c.is_empty()) {
             self.data["other_source"] = left;
         }
@@ -298,7 +321,8 @@ impl Setup {
             return Err(LiveError("Vælg Google Sheets som kilde først."));
         }
         let access = sheets::parse_link(link, layout.clone())?;
-        let (calendars, colors, notice) = sheets::source_catalog(&access, self.timezone()).await?;
+        let (calendars, colors, notice) =
+            sheets::source_catalog(&access, self.timezone(), &self.standard_times()?).await?;
         let credential = uuid::Uuid::new_v4().simple().to_string();
         store_credential(&credential, &json!({"link": link.trim()}))?;
         self.data["credential"] = json!(credential);
@@ -316,7 +340,7 @@ impl Setup {
                     .map_err(|_| LiveError("Regnearkets gemte opsætning er ugyldig."))?;
             let access = sheets::parse_link(text(&secret["link"])?, layout)?;
             let (calendars, colors, notice) =
-                sheets::source_catalog(&access, self.timezone()).await?;
+                sheets::source_catalog(&access, self.timezone(), &self.standard_times()?).await?;
             return self.apply_source(calendars, colors, &notice);
         }
         let access = teamup::Access {
@@ -414,14 +438,23 @@ impl Setup {
             "helpers"
         });
         if self.duos_enabled()
-            && selected(&catalog["types"], &self.data["registration_type"]).is_err()
+            && selected(&self.data["types"], &self.data["registration_type"]).is_err()
         {
+            // Registration is always the ordinary shift type unless the person
+            // says otherwise elsewhere, so prefer it by name. A single offered
+            // type is still chosen on its own.
             let types = rows(&catalog["types"])?;
-            self.data["registration_type"] = json!(if types.len() == 1 {
-                text(&types[0]["id"])?
-            } else {
-                ""
-            });
+            let mut chosen = String::new();
+            if types.len() == 1 {
+                chosen = text(&types[0]["id"])?.to_owned();
+            } else if let Some(common) = types.iter().find(|row| {
+                row["name"]
+                    .as_str()
+                    .is_some_and(|name| name.eq_ignore_ascii_case("almindelig"))
+            }) {
+                chosen = text(&common["id"])?.to_owned();
+            }
+            self.data["registration_type"] = json!(chosen);
         }
         // Keep reviewed edits only while every identity and account choice is
         // unchanged; otherwise propose again from the fresh catalog.
@@ -536,7 +569,7 @@ impl Setup {
                 serde_json::from_value(self.data["sheet_layout"].clone())
                     .map_err(|_| LiveError("Regnearkets gemte opsætning er ugyldig."))?;
             let access = sheets::parse_link(text(&secret["link"])?, layout)?;
-            sheets::source_catalog(&access, self.timezone()).await?
+            sheets::source_catalog(&access, self.timezone(), &self.standard_times()?).await?
         } else {
             let access = teamup::Access {
                 calendar: text(&secret["calendar"])?,
@@ -608,6 +641,7 @@ mod tests {
                 object.remove("source");
                 object.remove("duos_enabled");
                 object.remove("sheet_layout");
+                object.remove("standard_times");
                 assert_eq!(legacy, *expected, "{name} / {call}: document differs");
             }
         }
@@ -725,6 +759,28 @@ mod tests {
     }
 
     #[test]
+    fn standard_times_are_validated_and_saved_for_both_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut setup = Setup::load(dir.path()).unwrap();
+        assert!(setup
+            .set_standard_times(StandardTimes {
+                everyday: "tomorrow".into(),
+                ..Default::default()
+            })
+            .is_err());
+        setup
+            .set_standard_times(StandardTimes {
+                everyday: "6-22".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        setup.choose_source("sheets").unwrap();
+        assert_eq!(setup.view()["standard_times"]["everyday"], "6-22");
+        let restored = Setup::load(dir.path()).unwrap();
+        assert_eq!(restored.view()["standard_times"]["everyday"], "6-22");
+    }
+
+    #[test]
     fn editing_rejects_unknown_calendars_and_non_boolean_exclusions() {
         let dir = tempfile::tempdir().expect("temp dir");
         let mut setup = Setup::load(dir.path()).expect("load");
@@ -818,12 +874,16 @@ mod tests {
         assert_eq!(setup.data["stage"], "source");
         // The kept setup holds a credential handle; it never reaches the view.
         assert!(setup.view().get("other_source").is_none());
+        assert_eq!(setup.view()["has_credentials"], false);
+        assert_eq!(setup.view()["other_source_has_credentials"], true);
         setup.data["credential"] = json!("sheet-handle");
         setup.data["stage"] = json!("ready");
         let mut sheets = setup.data.clone();
 
         setup.edit_source().unwrap();
         setup.choose_source("teamup").unwrap();
+        assert_eq!(setup.view()["has_credentials"], true);
+        assert_eq!(setup.view()["other_source_has_credentials"], true);
         let mut restored = setup.data.clone();
         restored.as_object_mut().unwrap().remove("other_source");
         assert_eq!(restored, teamup);
@@ -835,6 +895,47 @@ mod tests {
         let mut now = Setup::load(dir.path()).unwrap().data;
         now.as_object_mut().unwrap().remove("other_source");
         assert_eq!(now, sheets);
+    }
+
+    #[test]
+    fn the_ordinary_shift_type_is_preferred_when_several_are_offered() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut setup = Setup::load(dir.path()).unwrap();
+        let catalog = json!({
+            "arrangements": [], "types": [
+                {"id": "t9", "name": "Sygdom"},
+                {"id": "t1", "name": "Almindelig"},
+            ],
+            "mithf": [], "duos": [], "account": "", "account_ids": {},
+        });
+        setup.apply_catalog(catalog.clone(), "").unwrap();
+        assert_eq!(setup.data["registration_type"], "t1");
+
+        // Without an ordinary type nothing is guessed; the person chooses.
+        let mut setup = Setup::load(dir.path()).unwrap();
+        let catalog = json!({
+            "arrangements": [], "types": [
+                {"id": "t9", "name": "Sygdom"},
+                {"id": "t8", "name": "Ferie"},
+            ],
+            "mithf": [], "duos": [], "account": "", "account_ids": {},
+        });
+        setup.apply_catalog(catalog, "").unwrap();
+        assert_eq!(setup.data["registration_type"], "");
+
+        // A kept choice is never overwritten by the preference.
+        let mut setup = Setup::load(dir.path()).unwrap();
+        setup.data["types"] = json!([{"id": "t9", "name": "Sygdom"}]);
+        setup.data["registration_type"] = json!("t9");
+        let catalog = json!({
+            "arrangements": [], "types": [
+                {"id": "t9", "name": "Sygdom"},
+                {"id": "t1", "name": "Almindelig"},
+            ],
+            "mithf": [], "duos": [], "account": "", "account_ids": {},
+        });
+        setup.apply_catalog(catalog, "").unwrap();
+        assert_eq!(setup.data["registration_type"], "t9");
     }
 
     #[test]

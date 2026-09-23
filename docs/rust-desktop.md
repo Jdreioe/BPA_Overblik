@@ -12,18 +12,18 @@ It uses the per-user application data directory, or `TEAMUP_SHIFT_SYNC_DATA_DIR`
 when set, for `setup.json`, browser profiles and sync history. Source credentials or a Google Sheets capability link are read from and written to the OS vault.
 
 The home screen shows only the week, its changes and the two primary actions.
-Everything technical lives on **Indstillinger** and **Hjælp**. Setup runs on
+Everything technical lives on **Indstillinger** and **Support**. Setup runs on
 Indstillinger: until a setup is confirmed that is the screen the app opens, and
 confirming revalidates both services and returns to the week. Importing a legacy
 TOML configuration is the one setup feature not carried over from the old engine.
 
-1. On **Indstillinger**, connect a source, then choose **Log ind i MitHF** and, if enabled, **Log ind i DUOS**.
+1. On **Indstillinger → Udbydere**, connect a source under **Vagtplan**, then choose **Log ind** in the MitHF pane and, if enabled, in the DUOS pane.
    Complete authentication in each browser. These two buttons are the only thing
    that opens a browser window; reads reuse the saved profile headless, and
    MitHF's shift calendar is entered through the site's own "Åbn din vagtplan"
    action. Login lives beside setup because reading the catalog needs both
    services.
-2. Choose **Kontrollér login**, then return to the week and **Se vagtplan**.
+2. Choose **Check forbindelse** in each pane, then return to the week and **Se vagtplan**.
 3. Review the split shifts, times, helper assignments, SPS and DUOS values.
    Resolve any points under **Kræver opmærksomhed** before proceeding.
 4. **Overfør ændringer** approves exactly the displayed plan and submits it.
@@ -46,8 +46,8 @@ preview only reads and a transfer rebuilds it in full anyway. A transfer
 additionally refuses an approval whose account database is no longer the
 current one.
 
-**Log ud af MitHF og DUOS** on Indstillinger closes the app's browsers and
-removes only its own profiles, so a different account starts from a clean
+**Log ud** in a service's pane closes the app's browser for that service and
+removes only its own profile, so a different account starts from a clean
 session. It keeps the synchronization history and changes nothing in either
 service.
 
@@ -61,7 +61,7 @@ preview. Nothing is deleted in a destination, no other shift is affected, and
 the next preview still runs the full overlap and conflict checks before anything
 can be approved.
 
-**Hjælp** holds short Danish guidance and two exports. Neither is called a
+**Support** holds short Danish guidance and two exports. Neither is called a
 diagnostic on screen: the person asked to produce one is not a developer.
 
 **Del hvad der gik galt** writes `fejlrapport.json` and opens a prefilled issue
@@ -89,10 +89,11 @@ window and close when it exits. Use `TEAMUP_BROWSER_PATH` if Chromium cannot
 be found; this mode does not download a browser.
 
 On startup the app asks GitHub for the latest dated release, and while the
-window stays open it asks again every six hours. A newer package shows a banner
-with **Hent opdatering**. Windows and Linux download and replace the running
-file, then reopen it. macOS downloads the `.pkg` and opens the installer.
-**Tjek for opdateringer** on Indstillinger runs the same check by hand. A
+window stays open it asks again every six hours. The circular icon in the
+settings sidebar checks again on click, changes to download when an update is
+available, animates during download, and changes to restart when ready. Windows
+and Linux replace the running file, then restart on click. macOS downloads the
+`.pkg` and opens it on click. A
 development build (`0.1.0`) never offers an update. Failures on the automatic
 check stay silent.
 

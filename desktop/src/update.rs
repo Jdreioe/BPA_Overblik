@@ -1,7 +1,7 @@
 //! Check GitHub releases and replace the running package.
 //!
 //! Windows and Linux are one file the app can overwrite. macOS is a `.pkg`, so
-//! the updater opens the installer instead of writing into `/Applications`.
+//! the updater downloads an installer instead of writing into `/Applications`.
 
 use std::path::{Path, PathBuf};
 
@@ -24,7 +24,7 @@ pub enum ApplyOutcome {
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     Restart(PathBuf),
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    OpenedInstaller,
+    OpenInstaller(PathBuf),
 }
 
 pub fn is_release_version(version: &str) -> bool {
@@ -90,8 +90,7 @@ pub async fn apply(offer: Offer) -> Result<ApplyOutcome, String> {
     {
         let path = std::env::temp_dir().join(&offer.asset_name);
         download(&offer.url, &path).await?;
-        open_path(&path)?;
-        return Ok(ApplyOutcome::OpenedInstaller);
+        return Ok(ApplyOutcome::OpenInstaller(path));
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -109,6 +108,11 @@ pub fn restart(path: &Path) -> Result<(), String> {
         "Opdateringen er hentet, men appen kunne ikke startes igen. Åbn den nye fil selv."
             .to_string()
     })
+}
+
+#[cfg(target_os = "macos")]
+pub fn open_installer(path: &Path) -> Result<(), String> {
+    open_path(path)
 }
 
 /// Start the replaced package as its own process.

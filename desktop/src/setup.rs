@@ -1,8 +1,12 @@
-use iced::widget::{button, checkbox, column, pick_list, row, text, text_input};
+use iced::widget::{
+    button, column, image, pick_list, radio, row, space, text, text_input, toggler,
+};
 use iced::{Element, Length};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use teamup_shift_sync_core::live::Service;
 use teamup_shift_sync_core::sheets::SheetLayout;
+use teamup_shift_sync_core::standard_time::StandardTimes;
 
 use crate::template::{self, Template};
 
@@ -34,6 +38,8 @@ pub struct SetupState {
     pub source: String,
     #[serde(default)]
     pub sheet_layout: Option<SheetLayout>,
+    #[serde(default)]
+    pub standard_times: StandardTimes,
     pub calendars: Vec<Choice>,
     pub arrangements: Vec<Choice>,
     pub types: Vec<Choice>,
@@ -44,8 +50,9 @@ pub struct SetupState {
     pub registration_type: String,
     pub account: String,
     pub notice: String,
-    pub can_import: bool,
     pub has_credentials: bool,
+    #[serde(default)]
+    pub other_source_has_credentials: bool,
 }
 
 fn teamup_source() -> String {
@@ -61,12 +68,23 @@ pub enum Message {
     Link(String),
     Key(String),
     Template(template::Message),
+    StandardDefault(String),
+    StandardDay(usize, String),
     Connect,
     ConnectSheets,
     OpenTeamupKeys,
     CopyOrganization,
     CopyPurpose,
     ToggleEdit(String),
+    /// Expand or collapse one provider's settings on the providers tab.
+    ToggleProvider(String),
+    /// Provider login actions. The app maps these onto its own engine
+    /// messages, like the TeamUp key shortcut.
+    Login(Service),
+    CheckLogin(Service),
+    ForgetLogin(Service),
+    /// Clicking the already active shift source. Deliberately nothing.
+    Noop,
     Action(&'static str, Value),
 }
 impl std::fmt::Debug for Message {
@@ -85,6 +103,26 @@ pub const TEAMUP_ORG_SUGGESTION: &str = "Vagtplanlaegning";
 pub const TEAMUP_PURPOSE_SUGGESTION: &str =
     "Personal tool syncing my own TeamUp shifts to the services where I register my working hours.";
 
+/// Provider marks, icon only. The full lockups stay out of the app.
+const DUOS_ICON: &[u8] = include_bytes!("../assets/duos-icon.png");
+const MITHF_ICON: &[u8] = include_bytes!("../assets/mithf-icon.png");
+
+/// Stable input ids. Iced tracks focus by widget position, so an error line
+/// appearing under a field would otherwise move every field and drop focus
+/// on each keystroke.
+const STANDARD_DEFAULT_ID: &str = "standard-falles";
+const STANDARD_DAY_IDS: [&str; 7] = [
+    "standard-mandag",
+    "standard-tirsdag",
+    "standard-onsdag",
+    "standard-torsdag",
+    "standard-fredag",
+    "standard-lordag",
+    "standard-sondag",
+];
+const SOURCE_LINK_ID: &str = "source-link";
+const TEAMUP_KEY_ID: &str = "teamup-key";
+
 #[derive(Default)]
 pub struct SetupUi {
     pub state: Option<SetupState>,
@@ -92,13 +130,61 @@ pub struct SetupUi {
     pub key: String,
     pub template: Template,
     pub error: Option<String>,
+    pub standard_default: String,
+    pub standard_days: [String; 7],
     /// Calendars the person reopened for editing. A row shows dropdowns
     /// while it is ambiguous (no match yet) or reopened here; a unique
     /// suggestion otherwise renders as plain text. Nothing is confirmed
     /// until the joint confirmation below.
     pub editing: std::collections::BTreeSet<String>,
+    /// Providers collapsed on the providers tab. Everything starts open.
+    pub collapsed: std::collections::BTreeSet<String>,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Section {
+    Integrations,
+    Helpers,
+}
+
 impl SetupUi {
+    pub fn load_standard(&mut self, state: &SetupState) {
+        self.standard_default = state.standard_times.everyday.clone();
+        for (index, day) in ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+            .iter()
+            .enumerate()
+        {
+            self.standard_days[index] = match state.standard_times.weekdays.get(*day) {
+                None => String::new(),
+                Some(None) => "ingen".into(),
+                Some(Some(value)) => value.clone(),
+            };
+        }
+    }
+
+    pub fn standard_times(&self) -> StandardTimes {
+        let mut weekdays = std::collections::BTreeMap::new();
+        for (index, day) in ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+            .iter()
+            .enumerate()
+        {
+            let value = self.standard_days[index].trim();
+            if !value.is_empty() {
+                weekdays.insert(
+                    (*day).into(),
+                    if value.eq_ignore_ascii_case("ingen") {
+                        None
+                    } else {
+                        Some(value.into())
+                    },
+                );
+            }
+        }
+        StandardTimes {
+            everyday: self.standard_default.trim().into(),
+            weekdays,
+        }
+    }
     /// The layout learned from the pasted shift, or the saved one while no
     /// new shift has been pasted.
     pub fn sheet_layout(&self) -> Result<SheetLayout, String> {
@@ -113,7 +199,50 @@ impl SetupUi {
         }
     }
 
-    pub fn view(&self) -> Element<'_, Message> {
+    pub fn standard_view(&self) -> Element<'_, Message> {
+        let mut content = column![
+            text("Standardtider").size(20),
+            text("Bruges når en TeamUp-vagt er heldags, eller når tiden mangler i regnearket.")
+                .size(13),
+        ]
+        .spacing(10);
+        content = content
+            .push(text("Standardtid for alle dage").size(14))
+            .push(
+                text_input("F.eks. 6-22", &self.standard_default)
+                    .id(iced::widget::Id::new(STANDARD_DEFAULT_ID))
+                    .on_input(Message::StandardDefault)
+                    .padding(10),
+            )
+            .push(
+                text("Lad en dag stå tom for at bruge tiden ovenfor. Skriv »ingen« for ingen standardtid.")
+                    .size(12),
+            );
+        for (index, day) in [
+            "Mandag", "Tirsdag", "Onsdag", "Torsdag", "Fredag", "Lørdag", "Søndag",
+        ]
+        .iter()
+        .enumerate()
+        {
+            content = content.push(
+                row![
+                    text(*day).width(Length::Fixed(90.0)),
+                    text_input("Brug tiden ovenfor", &self.standard_days[index])
+                        .id(iced::widget::Id::new(STANDARD_DAY_IDS[index]))
+                        .on_input(move |value| Message::StandardDay(index, value))
+                        .padding(10)
+                        .width(Length::Fixed(200.0)),
+                ]
+                .spacing(10),
+            );
+        }
+        content
+            .push(text(self.error.as_deref().unwrap_or("")).size(13))
+            .push(text("Gyldige tider gemmes automatisk.").size(12))
+            .into()
+    }
+
+    pub fn view(&self, section: Section) -> Element<'_, Message> {
         let mut content = column![].spacing(8);
         if let Some(error) = &self.error {
             content = content.push(text(error));
@@ -132,67 +261,167 @@ impl SetupUi {
         if !state.notice.is_empty() {
             content = content.push(text(&state.notice));
         }
+        if section == Section::Helpers && state.stage == "source" {
+            return content
+                .push(text("Tilslut en vagtplan under Udbydere først."))
+                .into();
+        }
+        if section == Section::Integrations {
+            return content.push(self.provider_groups(state)).into();
+        }
         if state.stage == "source" {
-            content = content.push(
-                pick_list(
-                    vec![
-                        Choice {
-                            id: "teamup".into(),
-                            name: "TeamUp".into(),
-                        },
-                        Choice {
-                            id: "sheets".into(),
-                            name: "Google Sheets".into(),
-                        },
-                    ],
-                    Some(Choice {
-                        id: state.source.clone(),
-                        name: source_name(&state.source).into(),
-                    }),
-                    |choice: Choice| Message::Action("choose_source", json!({"source": choice.id})),
-                )
-                .padding(8)
-                .width(Length::Fixed(250.0)),
-            );
-            if state.source == "sheets" {
-                content = content
-                    .push(
-                        text_input("Google Sheets-link til den valgte fane", &self.link)
-                            .on_input(Message::Link)
-                            .secure(true)
-                            .padding(12),
-                    )
-                    .push(text("Del arket som »Alle med linket kan se«.").size(12));
-                if self.template.is_empty() && state.sheet_layout.is_some() {
-                    content = content.push(
-                        text("Vagtens opbygning er gemt. Indsæt en ny vagt for at ændre den.")
-                            .size(13),
-                    );
+            return content
+                .push(text("Tilslut en vagtplan under Udbydere først."))
+                .into();
+        }
+        if state.mappings.is_empty() {
+            content = content.push(text(
+                "Hjælperne hentes automatisk, når forbindelserne er klar.",
+            ));
+        } else {
+            let mut header = row![
+                text(if state.source == "sheets" {
+                    "Regneark"
+                } else {
+                    "TeamUp"
+                })
+                .width(Length::FillPortion(2)),
+                text("MitHF").width(Length::FillPortion(2)),
+            ]
+            .spacing(8);
+            if state.duos_enabled {
+                header = header.push(text("DUOS").width(Length::FillPortion(2)));
+            }
+            content = content.push(header);
+            for mapping in &state.mappings {
+                content = content.push(self.mapping_row(state, mapping));
+            }
+        }
+        content.into()
+    }
+
+    /// The providers tab: one group per side. The shift source is
+    /// single-select; each payroll service keeps its own login and settings.
+    fn provider_groups<'a>(&'a self, state: &'a SetupState) -> Element<'a, Message> {
+        column![
+            crate::widgets::group(text("Vagtplan").size(14), self.source_section(state)),
+            crate::widgets::group(text("Løn").size(14), self.service_section(state)),
+        ]
+        .spacing(12)
+        .into()
+    }
+
+    fn source_section<'a>(&'a self, state: &'a SetupState) -> Element<'a, Message> {
+        let mut content = column![
+            self.source_row(state, "teamup", "TeamUp"),
+            self.source_row(state, "sheets", "Google Sheets"),
+        ]
+        .spacing(8);
+        if state.stage == "source" {
+            content = content.push(self.source_connection(state));
+        } else {
+            let mut resume = row![quiet_button(
+                "Genopsæt forbindelsen",
+                Message::Action("source", json!({})),
+            )]
+            .spacing(8);
+            if state.has_credentials {
+                resume = resume.push(quiet_button(
+                    "Prøv den gemte forbindelse igen",
+                    Message::Action("retry_source", json!({})),
+                ));
+            }
+            content = content
+                .push(text("Forbindelsen er gemt.").size(13))
+                .push(resume);
+        }
+        content.into()
+    }
+
+    /// One shift source. The radio both shows and switches the active source;
+    /// clicking the active one is nothing.
+    fn source_row<'a>(
+        &'a self,
+        state: &'a SetupState,
+        id: &'static str,
+        name: &str,
+    ) -> Element<'a, Message> {
+        let active = state.source == id;
+        let has_credentials = if active {
+            state.has_credentials
+        } else {
+            state.other_source_has_credentials
+        };
+        row![
+            radio(name, id, active.then_some(id), move |picked| {
+                if picked == state.source {
+                    Message::Noop
+                } else {
+                    Message::Action("choose_source", json!({"source": picked}))
                 }
-                content = content.push(self.template.view().map(Message::Template));
-                content = content.push(
-                    primary_button("Tilslut regneark", Message::ConnectSheets).on_press_maybe(
-                        self.sheet_layout()
-                            .is_ok()
-                            .then_some(Message::ConnectSheets),
-                    ),
-                );
+            }),
+            space::horizontal(),
+            text(if has_credentials {
+                "Tilsluttet"
             } else {
-                content = content
+                "Ikke tilsluttet"
+            })
+            .size(12),
+        ]
+        .spacing(10)
+        .align_y(iced::alignment::Vertical::Center)
+        .into()
+    }
+
+    /// The connection form for the not-yet-connected source.
+    fn source_connection<'a>(&'a self, state: &'a SetupState) -> Element<'a, Message> {
+        let mut content = column![].spacing(8);
+        if state.source == "sheets" {
+            content = content
+                .push(
+                    text_input("Google Sheets-link til den valgte fane", &self.link)
+                        .id(iced::widget::Id::new(SOURCE_LINK_ID))
+                        .on_input(Message::Link)
+                        .secure(true)
+                        .padding(12),
+                )
+                .push(text("Del arket som »Alle med linket kan se«.").size(12));
+            if self.template.is_empty() && state.sheet_layout.is_some() {
+                content = content.push(
+                    text("Vagtens opbygning er gemt. Indsæt en ny vagt for at ændre den.").size(13),
+                );
+            }
+            content = content.push(self.template.view().map(Message::Template));
+            content = content.push(
+                primary_button("Tilslut regneark", Message::ConnectSheets).on_press_maybe(
+                    self.sheet_layout()
+                        .is_ok()
+                        .then_some(Message::ConnectSheets),
+                ),
+            );
+        } else {
+            content = content
+                .push(text("På PC: TeamUp → ☰ → Settings → Shared").size(12))
+                .push(text("Kopiér Reader-linket, og indsæt det her:").size(12))
                 .push(
                     text_input("TeamUp-kalenderlink", &self.link)
+                        .id(iced::widget::Id::new(SOURCE_LINK_ID))
                         .on_input(Message::Link)
                         .secure(true)
                         .padding(12),
                 )
                 .push(
                     text_input("TeamUp API-nøgle", &self.key)
+                        .id(iced::widget::Id::new(TEAMUP_KEY_ID))
                         .on_input(Message::Key)
                         .secure(true)
                         .padding(12),
                 )
                 .push(
-                    text("Brug din egen mail hos TeamUp. Organisation skal være over 5 bogstaver. Nøglen gemmes i nøgleringen.").size(12),
+                    text("Ingen API-nøgle? Åbn ansøgningen, og brug din egen mail.").size(12),
+                )
+                .push(
+                    text("Kopiér organisation og formål herunder. Indsæt nøglen ovenfor, når du får den.").size(12),
                 )
                 .push(
                     row![
@@ -204,98 +433,92 @@ impl SetupUi {
                     .spacing(8),
                 )
                 .push(primary_button("Tilslut kalender", Message::Connect));
-                if state.has_credentials || state.can_import {
-                    let mut extra = row![].spacing(8);
-                    if state.has_credentials {
-                        extra = extra.push(quiet_button(
-                            "Prøv den gemte forbindelse igen",
-                            Message::Action("retry_source", json!({})),
-                        ));
-                    }
-                    if state.can_import {
-                        extra = extra.push(quiet_button(
-                            "Importér tidligere opsætning",
-                            Message::Action("import", json!({})),
-                        ));
-                    }
-                    content = content.push(extra);
-                }
-            }
-        } else {
-            // The label is part of the click target, so the whole line toggles.
-            content = content.push(
-                checkbox(state.duos_enabled)
-                    .label("Registrér SPS i DUOS")
-                    .size(20)
-                    .on_toggle(|enabled| {
-                        Message::Action("duos_enabled", json!({"enabled": enabled}))
-                    }),
+        }
+        content.into()
+    }
+
+    fn service_section<'a>(&'a self, state: &'a SetupState) -> Element<'a, Message> {
+        let mut content = column![self.service_row(state, Service::Mithf)].spacing(8);
+        if !self.collapsed.contains(Service::Mithf.key()) {
+            content = content.push(self.service_logins(Service::Mithf));
+        }
+        content = content.push(self.service_row(state, Service::Duos));
+        if !self.collapsed.contains(Service::Duos.key()) {
+            content = content.push(self.duos_settings(state));
+        }
+        content.into()
+    }
+
+    fn service_row<'a>(&'a self, state: &'a SetupState, service: Service) -> Element<'a, Message> {
+        let id = service.key();
+        let open = !self.collapsed.contains(id);
+        let mut header = row![
+            service_icon(service),
+            text(service.name()).size(14),
+            space::horizontal(),
+        ]
+        .spacing(10)
+        .align_y(iced::alignment::Vertical::Center);
+        if service == Service::Duos {
+            header =
+                header.push(toggler(state.duos_enabled).on_toggle(|enabled| {
+                    Message::Action("duos_enabled", json!({"enabled": enabled}))
+                }));
+        }
+        header
+            .push(quiet_button(
+                if open { "▾" } else { "▸" },
+                Message::ToggleProvider(id.to_owned()),
+            ))
+            .into()
+    }
+
+    fn service_logins(&self, service: Service) -> Element<'_, Message> {
+        row![
+            quiet_button("Log ind", Message::Login(service)),
+            quiet_button("Check forbindelse", Message::CheckLogin(service)),
+            quiet_button("Log ud", Message::ForgetLogin(service)),
+        ]
+        .spacing(8)
+        .into()
+    }
+
+    fn duos_settings<'a>(&'a self, state: &'a SetupState) -> Element<'a, Message> {
+        if !state.duos_enabled {
+            return text("Slå til for at registrere SPS-timer i DUOS.")
+                .size(13)
+                .into();
+        }
+        let mut content = column![self.service_logins(Service::Duos)].spacing(8);
+        if !state.account.is_empty() {
+            content = content.push(text(&state.account));
+        }
+        if !state.arrangements.is_empty() {
+            content = content.push(text("DUOS SPS-ordning").size(13)).push(
+                pick_list(
+                    state.arrangements.clone(),
+                    find(&state.arrangements, &state.arrangement),
+                    |c: Choice| Message::Action("discover", json!({"arrangement": c.id})),
+                )
+                .placeholder("Vælg ordning")
+                .padding(8)
+                .width(Length::Fixed(280.0)),
             );
-            if !state.account.is_empty() {
-                content = content.push(text(&state.account));
-            }
-            if !state.arrangements.is_empty() {
-                content = content.push(text("DUOS SPS-ordning").size(13)).push(
-                    pick_list(
-                        state.arrangements.clone(),
-                        find(&state.arrangements, &state.arrangement),
-                        |c: Choice| Message::Action("discover", json!({"arrangement": c.id})),
-                    )
-                    .placeholder("Vælg ordning")
-                    .padding(8)
-                    .width(Length::Fixed(280.0)),
-                );
-            }
-            if !state.types.is_empty() {
-                content = content.push(text("Registreringstype").size(13)).push(
-                    pick_list(
-                        state.types.clone(),
-                        find(&state.types, &state.registration_type),
-                        |c: Choice| Message::Action("edit", json!({"registration_type": c.id})),
-                    )
-                    .placeholder("Vælg registreringstype")
-                    .padding(8)
-                    .width(Length::Fixed(280.0)),
-                );
-            }
-            if state.mappings.is_empty() {
-                content = content.push(primary_button(
-                    find_helpers(&state.source),
-                    Message::Action("discover", json!({})),
-                ));
-            } else {
-                let mut header = row![
-                    text(if state.source == "sheets" {
-                        "Regneark"
-                    } else {
-                        "TeamUp"
-                    })
-                    .width(Length::FillPortion(2)),
-                    text("MitHF").width(Length::FillPortion(2)),
-                ]
-                .spacing(8);
-                if state.duos_enabled {
-                    header = header.push(text("DUOS").width(Length::FillPortion(2)));
-                }
-                content = content.push(header);
-                for mapping in &state.mappings {
-                    content = content.push(self.mapping_row(state, mapping));
-                }
-                content =
-                    content.push(primary_button("Gem", Message::Action("confirm", json!({}))));
-            }
-            let mut extra = row![quiet_button(
-                "Skift vagtplan",
-                Message::Action("source", json!({})),
-            )]
-            .spacing(8);
-            if !state.mappings.is_empty() {
-                extra = extra.push(quiet_button(
-                    find_helpers(&state.source),
-                    Message::Action("discover", json!({})),
-                ));
-            }
-            content = content.push(extra);
+        }
+        // Registration is always the ordinary type until per-shift choice
+        // lands, so the picker only appears as an escape hatch when nothing
+        // valid is selected and no ordinary type is offered.
+        if !state.types.is_empty() && find(&state.types, &state.registration_type).is_none() {
+            content = content.push(text("Registreringstype").size(13)).push(
+                pick_list(
+                    state.types.clone(),
+                    find(&state.types, &state.registration_type),
+                    |c: Choice| Message::Action("edit", json!({"registration_type": c.id})),
+                )
+                .placeholder("Vælg registreringstype")
+                .padding(8)
+                .width(Length::Fixed(280.0)),
+            );
         }
         content.into()
     }
@@ -403,22 +626,23 @@ impl SetupUi {
             self.editing.insert(source.to_owned());
         }
     }
-}
 
-fn find_helpers(source: &str) -> &'static str {
-    if source == "sheets" {
-        "Find hjælpere i Google Sheets"
-    } else {
-        "Find hjælpere i TeamUp"
+    pub fn toggle_provider(&mut self, id: &str) {
+        if !self.collapsed.remove(id) {
+            self.collapsed.insert(id.to_owned());
+        }
     }
 }
 
-fn source_name(source: &str) -> &'static str {
-    if source == "sheets" {
-        "Google Sheets"
-    } else {
-        "TeamUp"
-    }
+/// One provider mark beside its name. Icon only, never the full lockup.
+fn service_icon(service: Service) -> Element<'static, Message> {
+    let bytes = match service {
+        Service::Mithf => MITHF_ICON,
+        Service::Duos => DUOS_ICON,
+    };
+    image(iced::widget::image::Handle::from_bytes(bytes))
+        .width(Length::Fixed(28.0))
+        .into()
 }
 
 fn primary_button<'a>(label: &'a str, message: Message) -> iced::widget::Button<'a, Message> {
@@ -483,6 +707,7 @@ mod tests {
         SetupState {
             source: "teamup".into(),
             sheet_layout: None,
+            standard_times: Default::default(),
             duos_enabled: true,
             stage: "mappings".into(),
             calendars: vec![
@@ -518,8 +743,8 @@ mod tests {
             registration_type: String::new(),
             account: String::new(),
             notice: String::new(),
-            can_import: false,
             has_credentials: true,
+            other_source_has_credentials: false,
         }
     }
 
@@ -574,8 +799,31 @@ mod tests {
             state: Some(confirmation_state()),
             ..SetupUi::default()
         };
-        let _ = ui.view();
+        let _ = ui.view(Section::Helpers);
         ui.toggle_edit("cal-ft");
-        let _ = ui.view();
+        let _ = ui.view(Section::Helpers);
+    }
+
+    #[test]
+    fn providers_render_sources_and_services_and_collapse() {
+        let mut state = confirmation_state();
+        state.arrangements = vec![choice("a1", "SPS")];
+        state.arrangement = "a1".into();
+        state.types = vec![choice("t1", "Almindelig")];
+        state.registration_type = "t1".into();
+        let mut ui = SetupUi {
+            state: Some(state),
+            ..SetupUi::default()
+        };
+        let _ = ui.view(Section::Integrations);
+        ui.toggle_provider("duos");
+        assert!(ui.collapsed.contains("duos"));
+        let _ = ui.view(Section::Integrations);
+        // Without a valid type and no ordinary one offered, the picker stays.
+        let mut state = confirmation_state();
+        state.types = vec![choice("t9", "Sygdom")];
+        ui.state = Some(state);
+        ui.collapsed.clear();
+        let _ = ui.view(Section::Integrations);
     }
 }

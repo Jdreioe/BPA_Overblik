@@ -149,6 +149,12 @@ impl BrowserSessions {
         })
     }
 
+    /// Drop one service's session. The child is launched `kill_on_drop`, so
+    /// removing it stops that browser without touching the other service.
+    pub fn close(&mut self, service: Service) {
+        self.sessions.remove(&service);
+    }
+
     /// Reuses a live session unless a background one has to become visible for
     /// login. A background request never replaces a window already in use.
     pub async fn open(
@@ -482,17 +488,16 @@ async fn cdp(socket: &str, method: &str, params: Value) -> Result<Value, LiveErr
     .map_err(|_| LiveError("Browserforespørgslen tog for lang tid. Prøv igen."))?
 }
 
-/// Forget the saved MitHF and DUOS logins by removing the app's own browser
-/// profiles. Nothing is sent to either service, and no synchronization record
-/// is touched: this only clears local session data, so the next login starts
-/// clean. Close the sessions first. Run on a blocking thread.
-pub fn forget_logins(data_dir: &Path) -> Result<(), LiveError> {
-    let profiles = data_dir.join("rust-preview/profiles");
-    if !profiles.exists() {
+/// Forget one service's saved login by removing the app's own browser
+/// profile for it. Nothing is sent to the service, and no synchronization
+/// record is touched. Close the session first. Run on a blocking thread.
+pub fn forget_login(data_dir: &Path, service: Service) -> Result<(), LiveError> {
+    let profile = data_dir.join("rust-preview/profiles").join(service.key());
+    if !profile.exists() {
         return Ok(());
     }
-    std::fs::remove_dir_all(&profiles).map_err(|_| {
-        LiveError("De gemte logins kunne ikke fjernes. Luk appens browservinduer, og prøv igen.")
+    std::fs::remove_dir_all(&profile).map_err(|_| {
+        LiveError("Det gemte login kunne ikke fjernes. Luk appens browservinduer, og prøv igen.")
     })
 }
 
@@ -549,17 +554,20 @@ mod tests {
     use super::{write_allowed, Service};
 
     #[test]
-    fn forgetting_logins_removes_only_the_app_profiles() {
+    fn forgetting_a_login_removes_only_that_service_profile() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let profiles = dir.path().join("rust-preview/profiles/mithf");
-        std::fs::create_dir_all(&profiles).expect("profile");
+        for service in [Service::Mithf, Service::Duos] {
+            std::fs::create_dir_all(dir.path().join("rust-preview/profiles").join(service.key()))
+                .expect("profile");
+        }
         std::fs::write(dir.path().join("sync-abc.sqlite3"), b"history").expect("history");
 
-        super::forget_logins(dir.path()).expect("forget");
+        super::forget_login(dir.path(), Service::Mithf).expect("forget");
         // Logging out twice is not an error.
-        super::forget_logins(dir.path()).expect("forget again");
+        super::forget_login(dir.path(), Service::Mithf).expect("forget again");
 
-        assert!(!dir.path().join("rust-preview/profiles").exists());
+        assert!(!dir.path().join("rust-preview/profiles/mithf").exists());
+        assert!(dir.path().join("rust-preview/profiles/duos").is_dir());
         assert!(dir.path().join("sync-abc.sqlite3").is_file());
     }
 

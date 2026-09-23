@@ -1,11 +1,13 @@
-use chrono::{DateTime, FixedOffset, NaiveDate, TimeZone};
+use chrono::{DateTime, FixedOffset, NaiveDate, TimeZone, Timelike};
 use futures_util::{stream, StreamExt, TryStreamExt};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use super::{
-    choice, id, rows, text, timestamp, timing::Stage, unique, LiveConfig, LiveError, INVALID,
+    choice, id, rows, text, timestamp, timing::Stage, unique, LiveConfig, LiveError,
+    SourceReadError, INVALID,
 };
+use crate::standard_time::StandardTimes;
 use crate::{classify_source_title, SourceComment, SourceShift, SourceTitle};
 
 /// The three TeamUp credentials a request needs. Setup holds these before a
@@ -82,12 +84,13 @@ async fn occurrence(
     client: &reqwest::Client,
     access: &Access<'_>,
     event_id: &str,
+    zone: chrono_tz::Tz,
 ) -> Result<Value, LiveError> {
     get(
         client,
         access,
         &["events", event_id],
-        &[("format", "markdown".into())],
+        &[("format", "markdown".into()), ("tz", zone.to_string())],
     )
     .await
 }
@@ -98,11 +101,9 @@ pub async fn read_teamup(
     config: &LiveConfig,
     start: NaiveDate,
     end: NaiveDate,
-) -> Result<Vec<SourceShift>, LiveError> {
+) -> Result<Vec<SourceShift>, SourceReadError> {
     if end < start {
-        return Err(LiveError(
-            "Slutdatoen skal være på eller efter startdatoen.",
-        ));
+        return Err(LiveError("Slutdatoen skal være på eller efter startdatoen.").into());
     }
     let client = client()?;
     let access = config.access();
@@ -113,7 +114,7 @@ pub async fn read_teamup(
         .map(|c| Ok(json!({"id": id(&c["id"])?, "name": text(&c["name"])?.split_whitespace().collect::<Vec<_>>().join(" ")})))
         .collect::<Result<_, LiveError>>()?;
     if Value::Array(calendars) != config.setup["calendars"] {
-        return Err(LiveError("TeamUp-kalendere eller navne er ændret. Bekræft opsætningen igen i den almindelige app."));
+        return Err(LiveError("TeamUp-kalendere eller navne er ændret. Bekræft opsætningen igen i den almindelige app.").into());
     }
     let from = midnight(start, config.planning.timezone)?;
     let to = midnight(end.succ_opt().ok_or(INVALID)?, config.planning.timezone)?;
@@ -143,7 +144,12 @@ pub async fn read_teamup(
         .collect::<Result<_, _>>()?;
     let mut calls = Vec::with_capacity(event_ids.len());
     for event_id in &event_ids {
-        calls.push(occurrence(&client, &access, event_id));
+        calls.push(occurrence(
+            &client,
+            &access,
+            event_id,
+            config.planning.timezone,
+        ));
     }
     let details: Vec<Value> = stream::iter(calls)
         .buffered(DETAIL_CONCURRENCY)
@@ -154,12 +160,19 @@ pub async fn read_teamup(
     for detail in &details {
         let raw = &detail["event"];
         let shift = parse_occurrence(config, raw)?;
-        if shift.ends_at <= from || shift.starts_at >= to {
+        let all_day = raw["all_day"].as_bool().unwrap_or(false);
+        if shift.starts_at >= to
+            || (shift.ends_at <= from
+                && (!all_day
+                    || shift
+                        .starts_at
+                        .with_timezone(&config.planning.timezone)
+                        .date_naive()
+                        < start.pred_opt().unwrap_or(start)))
+        {
             continue;
         }
-        if raw["all_day"].as_bool().unwrap_or(false)
-            || classify_source_title(&shift.title) == SourceTitle::Reminder
-        {
+        if classify_source_title(&shift.title) == SourceTitle::Reminder {
             continue;
         }
         let assignments: Vec<_> = rows(&raw["subcalendar_ids"])?
@@ -169,7 +182,8 @@ pub async fn read_teamup(
         if assignments.is_empty() {
             return Err(LiveError(
                 "En vagt mangler en læsbar kalender. Kontrollér TeamUp-adgangen.",
-            ));
+            )
+            .into());
         }
         let selected: std::collections::BTreeSet<_> = assignments
             .iter()
@@ -181,14 +195,61 @@ pub async fn read_teamup(
         if selected.len() != 1 {
             return Err(LiveError(
                 "En TeamUp-vagt tilhører flere bekræftede hjælpere. Ret kalenderne, og prøv igen.",
-            ));
+            )
+            .into());
         }
-        shifts.push(SourceShift {
+        let mut shift = SourceShift {
             helper_key: (*selected.into_iter().next().unwrap()).clone(),
             ..shift
-        });
+        };
+        if all_day {
+            use_standard_time(&mut shift, &config.standard_times, config.planning.timezone)?;
+        }
+        if shift.ends_at > from && shift.starts_at < to {
+            shifts.push(shift);
+        }
     }
     Ok(shifts)
+}
+
+fn use_standard_time(
+    shift: &mut SourceShift,
+    standard: &StandardTimes,
+    zone: chrono_tz::Tz,
+) -> Result<(), SourceReadError> {
+    let local_start = shift.starts_at.with_timezone(&zone);
+    let local_end = shift.ends_at.with_timezone(&zone);
+    let date = local_start.date_naive();
+    let single_day = local_start.hour() == 0
+        && local_start.minute() == 0
+        && local_start.second() == 0
+        && ((local_end.hour() == 23
+            && local_end.minute() == 59
+            && local_end.second() == 59
+            && local_end.date_naive() == date)
+            || (local_end.hour() == 0
+                && local_end.minute() == 0
+                && local_end.second() == 0
+                && date.succ_opt() == Some(local_end.date_naive())));
+    if !single_day {
+        return Err(SourceReadError::Review(format!(
+            "TeamUp-vagten d. {} strækker sig over flere hele dage. Giv den egne tider, før ugen overføres.",
+            date.format("%d/%m")
+        )));
+    }
+    let interval = standard.on(date, zone)
+        .map_err(|_| SourceReadError::Review(format!(
+            "Standardtiden d. {} kan ikke bruges på grund af sommertid. Ret tiden før overførsel.",
+            date.format("%d/%m")
+        )))?
+        .ok_or_else(|| SourceReadError::Review(format!(
+            "TeamUp-vagten d. {} mangler en standardtid for denne ugedag. Tilføj en tid i Indstillinger før overførsel.",
+            date.format("%d/%m")
+        )))?;
+    shift.starts_at = interval.0;
+    shift.ends_at = interval.1;
+    shift.standard_time = true;
+    Ok(())
 }
 
 /// List the TeamUp helper calendars and confirm the link exposes shift details
@@ -364,5 +425,67 @@ fn parse_occurrence(config: &LiveConfig, raw: &Value) -> Result<SourceShift, Liv
         } else {
             Some(id(&raw["version"])?)
         },
+        standard_time: false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn all_day(start: &str, end: &str) -> SourceShift {
+        SourceShift {
+            calendar_id: "calendar".into(),
+            event_id: "event".into(),
+            occurrence_id: "event".into(),
+            title: "Vagt".into(),
+            helper_key: "helper".into(),
+            starts_at: DateTime::parse_from_rfc3339(start).unwrap(),
+            ends_at: DateTime::parse_from_rfc3339(end).unwrap(),
+            notes: "uni 22-24".into(),
+            comments: vec![],
+            recurrence_start: None,
+            source_version: None,
+            standard_time: false,
+        }
+    }
+
+    #[test]
+    fn single_day_all_day_event_uses_overnight_standard_without_losing_notes() {
+        let mut shift = all_day("2026-09-26T00:00:00+02:00", "2026-09-26T23:59:59+02:00");
+        let standard = StandardTimes {
+            everyday: "22-8".into(),
+            ..Default::default()
+        };
+        use_standard_time(&mut shift, &standard, chrono_tz::Europe::Copenhagen).unwrap();
+        assert_eq!(shift.starts_at.to_rfc3339(), "2026-09-26T22:00:00+02:00");
+        assert_eq!(shift.ends_at.to_rfc3339(), "2026-09-27T08:00:00+02:00");
+        assert_eq!(shift.notes, "uni 22-24");
+        assert!(shift.standard_time);
+    }
+
+    #[test]
+    fn missing_standard_and_multi_day_events_name_the_date_for_review() {
+        let mut shift = all_day("2026-09-26T00:00:00+02:00", "2026-09-27T00:00:00+02:00");
+        let message = use_standard_time(
+            &mut shift,
+            &StandardTimes::default(),
+            chrono_tz::Europe::Copenhagen,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(message.contains("26/09"));
+        let mut longer = all_day("2026-09-26T00:00:00+02:00", "2026-09-28T00:00:00+02:00");
+        let message = use_standard_time(
+            &mut longer,
+            &StandardTimes {
+                everyday: "6-22".into(),
+                ..Default::default()
+            },
+            chrono_tz::Europe::Copenhagen,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(message.contains("flere hele dage"));
+    }
 }
