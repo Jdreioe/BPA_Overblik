@@ -1094,6 +1094,13 @@ impl std::fmt::Debug for Message {
         f.write_str("NativeMessage")
     }
 }
+/// Moving between screens only changes what is shown, so it stays possible
+/// while an operation runs. Opening Indstillinger revokes a shown approval,
+/// which is always safe, and its automatic helper fetch waits for idle.
+fn is_navigation(message: &Message) -> bool {
+    matches!(message, Message::Open(_) | Message::SelectSettings(_))
+}
+
 /// Show the selected source's week and plan.
 const SHOW_WEEK: &str = "Se vagtplan";
 
@@ -1342,7 +1349,11 @@ impl NativeApp {
                 Message::Setup(setup::Message::StandardDefault(_))
                     | Message::Setup(setup::Message::StandardDay(_, _))
             );
-        if self.activity != Activity::Idle && !completion && !standard_input_during_save {
+        if self.activity != Activity::Idle
+            && !completion
+            && !standard_input_during_save
+            && !is_navigation(&message)
+        {
             return Task::none();
         }
         match message {
@@ -2176,6 +2187,10 @@ impl NativeApp {
             .as_ref()
             .is_some_and(|state| state.blocked.is_some())
     }
+    /// Whether a button sending `message` can be pressed now.
+    fn enabled(&self, message: &Message) -> bool {
+        self.buttons_enabled() || is_navigation(message)
+    }
     /// A local save is too short to show, so buttons keep their look. A press
     /// during it is still ignored by the one-operation guard in `update`.
     fn buttons_enabled(&self) -> bool {
@@ -2185,21 +2200,21 @@ impl NativeApp {
         button(text(label))
             .style(iced::widget::button::secondary)
             .padding([8, 12])
-            .on_press_maybe(self.buttons_enabled().then_some(message))
+            .on_press_maybe(self.enabled(&message).then_some(message))
     }
     /// Outlined chrome: clearly a button, but not a second primary.
     fn quiet<'a>(&self, label: &'a str, message: Message) -> iced::widget::Button<'a, Message> {
         button(text(label).size(14))
             .style(super::widgets::outlined)
             .padding([7, 12])
-            .on_press_maybe(self.buttons_enabled().then_some(message))
+            .on_press_maybe(self.enabled(&message).then_some(message))
     }
     /// The single filled action on a screen.
     fn primary<'a>(&self, label: &'a str, message: Message) -> iced::widget::Button<'a, Message> {
         button(text(label))
             .style(iced::widget::button::primary)
             .padding([8, 14])
-            .on_press_maybe(self.buttons_enabled().then_some(message))
+            .on_press_maybe(self.enabled(&message).then_some(message))
     }
     fn view(&self) -> Element<'_, Message> {
         // No app-name headline here: the window title already says
@@ -2419,9 +2434,17 @@ impl NativeApp {
         let mut header = row![text("Indstillinger").size(20), space::horizontal()]
             .spacing(8)
             .align_y(iced::alignment::Vertical::Center);
+        // Without a confirmed setup there is no week to go back to, so the
+        // button stays in place, greyed out, and its tooltip says why.
+        let has_week = self.account.is_some();
         header = header.push(tooltip(
-            self.circular_icon("⌂", Message::Open(Screen::Home)),
-            "Tilbage til ugen",
+            self.circular_icon("⌂", Message::Open(Screen::Home))
+                .on_press_maybe(has_week.then_some(Message::Open(Screen::Home))),
+            if has_week {
+                "Tilbage til ugen"
+            } else {
+                "Ugen vises, når opsætningen er bekræftet"
+            },
             tooltip::Position::Bottom,
         ));
         let mut sidebar = column![header].spacing(10);
@@ -2455,10 +2478,7 @@ impl NativeApp {
                     })
                     .padding([10, 12])
                     .width(Length::Fill)
-                    .on_press_maybe(
-                        self.buttons_enabled()
-                            .then_some(Message::SelectSettings(section)),
-                    ),
+                    .on_press(Message::SelectSettings(section)),
             );
         }
         sidebar = sidebar.push(self.quiet("Support", Message::Open(Screen::Help)));
@@ -2547,7 +2567,7 @@ impl NativeApp {
             style.border.radius = 20.0.into();
             style
         })
-        .on_press_maybe(self.buttons_enabled().then_some(message))
+        .on_press_maybe(self.enabled(&message).then_some(message))
     }
 
     fn providers(&self) -> Column<'_, Message> {
@@ -2949,6 +2969,21 @@ mod tests {
             app.status.as_ref().map(|status| status.tone),
             Some(Tone::Error)
         );
+    }
+    #[test]
+    fn going_home_works_while_settings_are_still_loading() {
+        let mut app = app();
+        app.screen = Screen::Settings;
+        app.activity = Activity::Setup;
+        let _ = app.update(Message::Open(Screen::Home));
+        assert_eq!(app.screen, Screen::Home);
+        assert!(app.enabled(&Message::Open(Screen::Settings)));
+        // Week navigation still waits, because it revokes a shown approval.
+        assert!(!app.enabled(&Message::Navigate(7)));
+        let monday = app.monday;
+        let _ = app.update(Message::Navigate(7));
+        assert_eq!(app.monday, monday);
+        assert_eq!(app.activity, Activity::Setup);
     }
     #[test]
     fn settings_are_reachable_from_the_week_and_revoke_a_shown_approval() {
