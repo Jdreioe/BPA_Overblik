@@ -2237,6 +2237,23 @@ impl NativeApp {
         if self.activity == Activity::Apply {
             page = self.apply_status(page);
         }
+        if self.visible_screen() == Screen::Home {
+            page = page.push(
+                row![
+                    tooltip(
+                        self.circular_icon("⚙", Message::Open(Screen::Settings)),
+                        "Indstillinger",
+                        tooltip::Position::Top,
+                    ),
+                    tooltip(
+                        self.circular_icon("?", Message::Open(Screen::Help)),
+                        "Support",
+                        tooltip::Position::Top,
+                    ),
+                ]
+                .spacing(8),
+            );
+        }
         let base = container(page)
             .center_x(Length::Fill)
             .width(Length::Fill)
@@ -2342,9 +2359,6 @@ impl NativeApp {
                         (self.buttons_enabled() && !is_current).then_some(Message::Current),
                     ),
                     self.quiet("Næste ›", Message::Navigate(7)),
-                    space::horizontal(),
-                    self.quiet("Indstillinger", Message::Open(Screen::Settings)),
-                    self.quiet("Support", Message::Open(Screen::Help)),
                 ]
                 .spacing(8)
                 .align_y(iced::alignment::Vertical::Center)
@@ -2481,7 +2495,6 @@ impl NativeApp {
                     .on_press(Message::SelectSettings(section)),
             );
         }
-        sidebar = sidebar.push(self.quiet("Support", Message::Open(Screen::Help)));
         let (icon, label, action) = if let Some(ready) = &self.update_ready {
             match ready {
                 update::ApplyOutcome::Restart(_) => {
@@ -2512,9 +2525,17 @@ impl NativeApp {
             }),
             tooltip::Position::Right,
         );
-        sidebar = sidebar
-            .push(space().height(Length::Fill))
-            .push(update_control);
+        sidebar = sidebar.push(space().height(Length::Fill)).push(
+            row![
+                tooltip(
+                    self.circular_icon("?", Message::Open(Screen::Help)),
+                    "Support",
+                    tooltip::Position::Top,
+                ),
+                update_control,
+            ]
+            .spacing(8),
+        );
         let content = match self.settings_section {
             SettingsSection::Helpers => column![
                 row![
