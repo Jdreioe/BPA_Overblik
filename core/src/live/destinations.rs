@@ -40,10 +40,14 @@ pub(crate) async fn read_before_range(
     now: DateTime<FixedOffset>,
 ) -> Result<DestinationPrelude, LiveError> {
     let today = now.with_timezone(&config.planning.timezone).date_naive();
-    let (_, duos_registrations) = futures_util::try_join!(
-        validate_catalog_once(browser, config, today),
-        read_duos(browser, config)
-    )?;
+    let (_, duos_registrations) =
+        futures_util::try_join!(validate_catalog_once(browser, config, today), async {
+            if config.planning.duos_enabled {
+                read_duos(browser, config).await
+            } else {
+                Ok(vec![])
+            }
+        })?;
     Ok(DestinationPrelude { duos_registrations })
 }
 
@@ -72,10 +76,14 @@ async fn read_snapshot(
     start: DateTime<FixedOffset>,
     end: DateTime<FixedOffset>,
 ) -> Result<DestinationSnapshot, LiveError> {
-    let (mithf_shifts, duos_registrations) = futures_util::try_join!(
-        read_mithf(browser, config, start, end),
-        read_duos(browser, config)
-    )?;
+    let (mithf_shifts, duos_registrations) =
+        futures_util::try_join!(read_mithf(browser, config, start, end), async {
+            if config.planning.duos_enabled {
+                read_duos(browser, config).await
+            } else {
+                Ok(vec![])
+            }
+        })?;
     Ok(DestinationSnapshot {
         mithf_shifts,
         duos_registrations: within(duos_registrations, start, end),
@@ -132,6 +140,7 @@ pub(crate) async fn build_catalog(
     browser: &BrowserSessions,
     arrangement: &str,
     today: NaiveDate,
+    duos_enabled: bool,
 ) -> Result<Value, LiveError> {
     let helpers = browser
         .request(Service::Mithf, "hjaelperliste", json!({}))
@@ -158,53 +167,58 @@ pub(crate) async fn build_catalog(
     }
     let customer = named(&customers[0])?;
     let grant = named(grants[0])?;
-    let portfolios = browser
-        .request(
-            Service::Duos,
-            "portfolios",
-            json!({"dateOfActivePortfolio": today.to_string()}),
-        )
-        .await?;
-    let mut arrangements = Vec::new();
-    for portfolio in rows(&portfolios)? {
-        if portfolio["type"] != "Ordnings SPS" {
-            continue;
-        }
-        let mut name = text(&portfolio["name"])?.to_owned();
-        if let Some(suffix) = portfolio["suffix"].as_str().filter(|s| !s.is_empty()) {
-            name.push_str(&format!(" · {suffix}"));
-        }
-        arrangements.push(choice(&portfolio["id"], &json!(name))?);
-    }
-    let arrangements = unique(arrangements)?;
-    if rows(&arrangements)?.is_empty() {
-        return Err(LiveError("DUOS har ingen aktiv SPS-ordning. Kontrollér kontoen og ordningens gyldighed hos DUOS."));
-    }
-    let (mut types, mut duos) = (json!([]), json!([]));
-    if !arrangement.is_empty() {
-        selected(&arrangements, &json!(arrangement))?;
-        let raw = browser
-            .request(Service::Duos, "types", json!({"portfolioId": arrangement}))
+    let (arrangements, types, duos) = if duos_enabled {
+        let portfolios = browser
+            .request(
+                Service::Duos,
+                "portfolios",
+                json!({"dateOfActivePortfolio": today.to_string()}),
+            )
             .await?;
-        types = unique(rows(&raw)?.iter().map(named).collect::<Result<_, _>>()?)?;
-        let employments = browser
+        let mut arrangements = Vec::new();
+        for portfolio in rows(&portfolios)? {
+            if portfolio["type"] != "Ordnings SPS" {
+                continue;
+            }
+            let mut name = text(&portfolio["name"])?.to_owned();
+            if let Some(suffix) = portfolio["suffix"].as_str().filter(|s| !s.is_empty()) {
+                name.push_str(&format!(" · {suffix}"));
+            }
+            arrangements.push(choice(&portfolio["id"], &json!(name))?);
+        }
+        let arrangements = unique(arrangements)?;
+        if rows(&arrangements)?.is_empty() {
+            return Err(LiveError("DUOS har ingen aktiv SPS-ordning. Kontrollér kontoen og ordningens gyldighed hos DUOS."));
+        }
+        let (mut types, mut duos) = (json!([]), json!([]));
+        if !arrangement.is_empty() {
+            selected(&arrangements, &json!(arrangement))?;
+            let raw = browser
+                .request(Service::Duos, "types", json!({"portfolioId": arrangement}))
+                .await?;
+            types = unique(rows(&raw)?.iter().map(named).collect::<Result<_, _>>()?)?;
+            let employments = browser
             .request(
                 Service::Duos,
                 "employments",
                 json!({"portfolioId": arrangement, "dateOfActiveEmployment": today.to_string()}),
             )
             .await?;
-        duos = unique(
-            rows(&employments)?
-                .iter()
-                .filter(|e| employment_available(e, today))
-                .map(|e| choice(&e["helperId"], &e["helperName"]))
-                .collect::<Result<_, _>>()?,
-        )?;
-        if rows(&types)?.is_empty() || rows(&duos)?.is_empty() {
-            return Err(LiveError("Ordningen har ingen tilgængelige registreringstyper eller aktive hjælpere. Kontrollér ansættelserne hos DUOS."));
+            duos = unique(
+                rows(&employments)?
+                    .iter()
+                    .filter(|e| employment_available(e, today))
+                    .map(|e| choice(&e["helperId"], &e["helperName"]))
+                    .collect::<Result<_, _>>()?,
+            )?;
+            if rows(&types)?.is_empty() || rows(&duos)?.is_empty() {
+                return Err(LiveError("Ordningen har ingen tilgængelige registreringstyper eller aktive hjælpere. Kontrollér ansættelserne hos DUOS."));
+            }
         }
-    }
+        (arrangements, types, duos)
+    } else {
+        (json!([]), json!([]), json!([]))
+    };
     Ok(
         json!({"mithf": mithf, "arrangements": arrangements, "types": types, "duos": duos,
         "account": format!("MitHF: {} · {}", text(&customer["name"])?, text(&grant["name"])?),
@@ -255,15 +269,23 @@ async fn validate_catalog(
     today: NaiveDate,
 ) -> Result<Identities, LiveError> {
     let stage = Stage::start("destination.catalog");
-    let catalog = build_catalog(browser, &config.planning.duos_arrangement_id, today).await?;
+    let catalog = build_catalog(
+        browser,
+        &config.planning.duos_arrangement_id,
+        today,
+        config.planning.duos_enabled,
+    )
+    .await?;
     stage.done(5);
     if catalog != config.setup["catalog"] {
         return Err(LiveError("Navne, ansættelser eller kontovalg er ændret. Bekræft opsætningen igen i den almindelige app."));
     }
-    selected(
-        &catalog["types"],
-        &json!(config.planning.duos_registration_type),
-    )?;
+    if config.planning.duos_enabled {
+        selected(
+            &catalog["types"],
+            &json!(config.planning.duos_registration_type),
+        )?;
+    }
     let mut selected_mithf = BTreeSet::new();
     let mut selected_duos = BTreeSet::new();
     let mut helpers = BTreeMap::new();
@@ -272,9 +294,13 @@ async fn validate_catalog(
             continue;
         }
         let mit = selected(&catalog["mithf"], &mapping["mithf"])?;
-        let duos = selected(&catalog["duos"], &mapping["duos"])?;
+        let duos_id = if config.planning.duos_enabled {
+            Some(id(&selected(&catalog["duos"], &mapping["duos"])?["id"])?)
+        } else {
+            None
+        };
         if !selected_mithf.insert(id(&mit["id"])?)
-            || !selected_duos.insert(id(&duos["id"])?)
+            || duos_id.is_some_and(|duos| !selected_duos.insert(duos))
             || rows(&catalog["mithf"])?
                 .iter()
                 .filter(|r| r["name"] == mit["name"])
@@ -560,6 +586,9 @@ impl<'a> LiveDestinations<'a> {
         // the same for every segment of a split shift.
         let step = item.step_key.split('#').next().unwrap_or_default();
         if item.system == PlanSystem::Duos {
+            if !self.config.planning.duos_enabled {
+                return Err(LiveError("DUOS er fravalgt i opsætningen."));
+            }
             return self.register_duos(item).await;
         }
         if step == "mithf.create_shift" {
@@ -942,11 +971,13 @@ mod tests {
 
     fn config(arrangement: &str, setup: Value) -> LiveConfig {
         LiveConfig {
+            sheet: None,
             planning: crate::PlanningConfig {
                 timezone: chrono_tz::Europe::Copenhagen,
                 default_helper_count: 1,
                 duos_arrangement_id: arrangement.into(),
                 duos_registration_type: "type-1".into(),
+                duos_enabled: true,
                 helpers: BTreeMap::new(),
             },
             calendar: "cal".into(),

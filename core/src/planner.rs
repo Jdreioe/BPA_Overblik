@@ -67,6 +67,16 @@ pub fn build_plan(request: &PlanRequest<'_>, state: &SyncState) -> Result<SyncPl
             continue;
         }
         let parsed = parse_sps_instructions(shift, request.config.timezone);
+        if !request.config.duos_enabled && !parsed.intervals.is_empty() {
+            items.push(item(
+                shift,
+                PlanSystem::Source,
+                "sps.no_duos",
+                Outcome::Review,
+                "SPS is written on this shift, but DUOS is disabled in setup",
+                "sps_without_duos",
+            ));
+        }
         for issue in &parsed.issues {
             let code = serde_json::to_value(issue.code).expect("issue codes serialize as strings");
             let code = code.as_str().unwrap();
@@ -86,7 +96,12 @@ pub fn build_plan(request: &PlanRequest<'_>, state: &SyncState) -> Result<SyncPl
                 "helper",
                 Outcome::Review,
                 &format!(
-                    "No confirmed destination mapping for TeamUp helper {}",
+                    "No confirmed destination mapping for {} helper {}",
+                    if shift.calendar_id.starts_with("sheet-") {
+                        "spreadsheet"
+                    } else {
+                        "TeamUp"
+                    },
                     python_repr(&shift.helper_key)
                 ),
                 "no_helper_mapping",
@@ -129,6 +144,9 @@ pub fn build_plan(request: &PlanRequest<'_>, state: &SyncState) -> Result<SyncPl
         }
         let mut expected_steps = BTreeSet::new();
         for sps in &parsed.intervals {
+            if !request.config.duos_enabled {
+                continue;
+            }
             let key = format!("duos.interval:{}", sps.key);
             expected_steps.insert(key.clone());
             let expected = DuosRegistration {

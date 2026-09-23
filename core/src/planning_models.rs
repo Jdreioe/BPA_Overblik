@@ -15,7 +15,13 @@ pub struct PlanningConfig {
     pub default_helper_count: i64,
     pub duos_arrangement_id: String,
     pub duos_registration_type: String,
+    #[serde(default = "enabled_by_default")]
+    pub duos_enabled: bool,
     pub helpers: BTreeMap<String, HelperMapping>,
+}
+
+fn enabled_by_default() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Deserialize)]

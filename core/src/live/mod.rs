@@ -5,6 +5,7 @@ mod config;
 mod destinations;
 mod diagnostics;
 mod setup;
+mod sheets;
 mod teamup;
 mod timing;
 
@@ -22,6 +23,32 @@ use serde_json::Value;
 
 use crate::{reconciliation_range, DestinationSnapshot, SourceShift};
 
+#[derive(Debug, thiserror::Error)]
+pub enum SourceReadError {
+    #[error(transparent)]
+    Service(#[from] LiveError),
+    #[error("{0}")]
+    Sheet(String),
+}
+
+/// Read the selected source, preserving the same SourceShift contract for
+/// planning and approved transfers.
+pub async fn read_source(
+    config: &LiveConfig,
+    from: NaiveDate,
+    to: NaiveDate,
+) -> Result<Vec<SourceShift>, SourceReadError> {
+    if let Some(sheet) = &config.sheet {
+        sheets::read(sheet, config.planning.timezone, from, to)
+            .await
+            .map_err(SourceReadError::Sheet)
+    } else {
+        teamup::read_teamup(config, from, to)
+            .await
+            .map_err(Into::into)
+    }
+}
+
 /// Read one week's source shifts and the destination state they have to be
 /// reconciled against.
 ///
@@ -36,11 +63,12 @@ pub async fn read_week(
     start: DateTime<FixedOffset>,
     end: DateTime<FixedOffset>,
     now: DateTime<FixedOffset>,
-) -> Result<(Vec<SourceShift>, DestinationSnapshot), LiveError> {
-    let (shifts, prelude) = futures_util::try_join!(
-        teamup::read_teamup(config, from, to),
+) -> Result<(Vec<SourceShift>, DestinationSnapshot), SourceReadError> {
+    let (shifts, prelude) = futures_util::try_join!(read_source(config, from, to), async {
         destinations::read_before_range(browser, config, now)
-    )?;
+            .await
+            .map_err(SourceReadError::from)
+    })?;
     let (read_start, read_end) = reconciliation_range(&shifts, start, end);
     let destination = prelude
         .finish(browser, config, read_start, read_end)

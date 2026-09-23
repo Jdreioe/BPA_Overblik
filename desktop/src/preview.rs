@@ -409,22 +409,34 @@ pub fn build_week(
             plural(attention.len(), "punkt kræver", "punkter kræver")
         )
     } else if !destination_read {
-        "MitHF og DUOS er ikke aflæst, så ugen kan ikke overføres endnu.".into()
+        if config.duos_enabled {
+            "MitHF og DUOS er ikke aflæst.".into()
+        } else {
+            "MitHF er ikke aflæst.".into()
+        }
     } else if !has_writes {
-        "Ugen er allerede overført. Der er ingen ændringer.".into()
+        "Ugen er allerede overført.".into()
     } else {
         "Ugen er klar til overførsel.".into()
     };
-    let notice=if !destination_read { "MitHF og DUOS er ikke aflæst. Visningen viser, hvad TeamUp beder om, ikke hvad der allerede findes i tjenesterne." }
-        else { "" }.into();
+    let notice = if !destination_read {
+        if config.duos_enabled {
+            "MitHF og DUOS er ikke aflæst. Visningen viser, hvad vagtplanen beder om, ikke hvad der allerede findes i tjenesterne."
+        } else {
+            "MitHF er ikke aflæst. Visningen viser, hvad vagtplanen beder om, ikke hvad der allerede findes i tjenesten."
+        }
+    } else {
+        ""
+    }.into();
+    // Only what the headline does not already say.
     let blocked_reason = if !destination_read {
-        "Log ind i MitHF og DUOS, så ugen kan aflæses."
-    } else if !attention.is_empty() || has_blockers {
+        if config.duos_enabled {
+            "Log ind i MitHF og DUOS, så ugen kan aflæses."
+        } else {
+            "Log ind i MitHF, så ugen kan aflæses."
+        }
+    } else if attention.is_empty() && has_blockers {
         "Løs punkterne under Kræver opmærksomhed først."
-    } else if planned == 0 {
-        "Der er ingen vagter at overføre."
-    } else if !has_writes {
-        "Der er ingen ændringer at overføre."
     } else {
         ""
     }

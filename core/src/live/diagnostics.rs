@@ -61,6 +61,8 @@ fn setup_summary(data_dir: &Path) -> Value {
         "version": setup["version"],
         "stage": setup["stage"].as_str().unwrap_or("ukendt"),
         "has_credentials": setup["credential"].as_str().is_some_and(|handle| !handle.is_empty()),
+        "source": match setup["source"].as_str() { Some("sheets") => "sheets", _ => "teamup" },
+        "duos_enabled": setup["duos_enabled"].as_bool().unwrap_or(true),
         "timezone": setup["timezone"].as_str().unwrap_or("Europe/Copenhagen"),
         "lookback_days": setup["lookback_days"].as_i64().unwrap_or(7),
         "calendars": count(&setup["calendars"]),

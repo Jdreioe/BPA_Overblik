@@ -14,7 +14,7 @@ use serde_json::{json, Map, Value};
 use super::{
     config::{read_credential, store_credential},
     destinations::build_catalog,
-    rows, teamup, text, BrowserSessions, LiveError, INVALID,
+    rows, sheets, teamup, text, BrowserSessions, LiveError, INVALID,
 };
 
 const UNREADABLE: LiveError =
@@ -78,7 +78,8 @@ fn selected<'a>(choices: &'a Value, identifier: &Value) -> Result<&'a Value, Liv
 
 fn defaults() -> Value {
     json!({
-        "version": 1, "stage": "source", "credential": "", "calendars": [], "colors": {},
+        "version": 1, "stage": "source", "source": "teamup", "credential": "", "calendars": [], "colors": {},
+        "duos_enabled": true,
         "arrangements": [], "types": [], "mithf": [], "duos": [], "mappings": [],
         "arrangement": "", "registration_type": "", "account": "", "notice": "",
     })
@@ -95,6 +96,22 @@ pub struct Setup {
 }
 
 impl Setup {
+    pub fn duos_enabled(&self) -> bool {
+        self.data["duos_enabled"].as_bool().unwrap_or(true)
+    }
+
+    pub fn choose_duos(&mut self, enabled: bool) -> Result<(), LiveError> {
+        if self.duos_enabled() != enabled {
+            self.data["duos_enabled"] = json!(enabled);
+            self.data["catalog"] = Value::Null;
+            self.data["mappings"] = json!([]);
+            self.data["arrangement"] = json!("");
+            self.data["registration_type"] = json!("");
+            self.data["stage"] = json!("destinations");
+            self.save()?;
+        }
+        Ok(())
+    }
     /// Load the saved document, or start a new one. Run on a blocking thread.
     pub fn load(data_dir: &Path) -> Result<Self, LiveError> {
         let path = data_dir.join("setup.json");
@@ -108,6 +125,9 @@ impl Setup {
                 return Err(UNREADABLE);
             }
             for (key, value) in saved.as_object().ok_or(UNREADABLE)? {
+                // Setups saved while a source was being tried call the other
+                // source's setup `trial`.
+                let key = if key == "trial" { "other_source" } else { key };
                 data[key] = value.clone();
             }
         }
@@ -127,7 +147,7 @@ impl Setup {
     fn credential(&self) -> Result<&str, LiveError> {
         let credential = text(&self.data["credential"])?;
         if credential.is_empty() {
-            return Err(LiveError("Tilslut TeamUp-kalenderen først."));
+            return Err(LiveError("Tilslut vagtkilden først."));
         }
         Ok(credential)
     }
@@ -141,7 +161,7 @@ impl Setup {
         for (key, value) in self.data.as_object().into_iter().flatten() {
             if matches!(
                 key.as_str(),
-                "credential" | "catalog" | "imported" | "account_ids"
+                "credential" | "catalog" | "imported" | "account_ids" | "other_source"
             ) {
                 continue;
             }
@@ -202,11 +222,48 @@ impl Setup {
         self.save()
     }
 
+    /// Switch sources. Each source keeps its own setup: the one left behind
+    /// is kept under `other_source` and comes back exactly as it was when that
+    /// source is chosen again. A source chosen for the first time starts from
+    /// the connection step, without the old source's mappings or approval.
+    pub fn choose_source(&mut self, source: &str) -> Result<(), LiveError> {
+        if !matches!(source, "teamup" | "sheets") {
+            return Err(LiveError("Vælg TeamUp eller Google Sheets."));
+        }
+        if self.data["source"] == source {
+            self.data["stage"] = json!("source");
+            return self.save();
+        }
+        let object = self.data.as_object_mut().ok_or(INVALID)?;
+        let other = object
+            .remove("other_source")
+            .filter(|other| other["source"] == source);
+        let left = self.data.clone();
+        match other {
+            Some(other) => self.data = other,
+            None => {
+                self.data["source"] = json!(source);
+                self.data["credential"] = json!("");
+                self.data["calendars"] = json!([]);
+                self.data["mappings"] = json!([]);
+                self.data["catalog"] = Value::Null;
+                self.data["stage"] = json!("source");
+            }
+        }
+        if left["credential"].as_str().is_some_and(|c| !c.is_empty()) {
+            self.data["other_source"] = left;
+        }
+        self.save()
+    }
+
     /// Store new TeamUp credentials and read the calendars they expose.
     ///
     /// The credentials are persisted before the first request, so a failed
     /// network call can be retried later instead of asking for them again.
     pub async fn connect(&mut self, link: &str, api_key: &str) -> Result<(), LiveError> {
+        if self.data["source"] != "teamup" {
+            return Err(LiveError("Vælg TeamUp som kilde først."));
+        }
         let secret = json!({"calendar": calendar_reference(link)?, "api_key": api_key.trim()});
         if api_key.trim().is_empty() {
             return Err(LiveError("Indsæt din TeamUp API-nøgle. Du kan få hjælp af appens vedligeholder til at anmode om den."));
@@ -221,10 +278,38 @@ impl Setup {
         self.refresh_source().await
     }
 
+    /// Connect a link-shared sheet. The link stays in the OS keyring; only its
+    /// cell mapping is stored in setup.json.
+    pub async fn connect_sheets(
+        &mut self,
+        link: &str,
+        layout: crate::sheets::SheetLayout,
+    ) -> Result<(), LiveError> {
+        if self.data["source"] != "sheets" {
+            return Err(LiveError("Vælg Google Sheets som kilde først."));
+        }
+        let access = sheets::parse_link(link, layout.clone())?;
+        let (calendars, colors, notice) = sheets::source_catalog(&access, self.timezone()).await?;
+        let credential = uuid::Uuid::new_v4().simple().to_string();
+        store_credential(&credential, &json!({"link": link.trim()}))?;
+        self.data["credential"] = json!(credential);
+        self.data["sheet_layout"] = serde_json::to_value(layout).map_err(|_| INVALID)?;
+        self.apply_source(calendars, colors, &notice)
+    }
+
     /// Re-read the TeamUp calendars for the saved credentials. Confirmed
     /// mappings survive unless the calendars themselves changed.
     pub async fn refresh_source(&mut self) -> Result<(), LiveError> {
         let secret = read_credential(self.credential()?)?;
+        if self.data["source"] == "sheets" {
+            let layout: crate::sheets::SheetLayout =
+                serde_json::from_value(self.data["sheet_layout"].clone())
+                    .map_err(|_| LiveError("Regnearkets gemte opsætning er ugyldig."))?;
+            let access = sheets::parse_link(text(&secret["link"])?, layout)?;
+            let (calendars, colors, notice) =
+                sheets::source_catalog(&access, self.timezone()).await?;
+            return self.apply_source(calendars, colors, &notice);
+        }
         let access = teamup::Access {
             calendar: text(&secret["calendar"])?,
             api_key: text(&secret["api_key"])?,
@@ -254,21 +339,24 @@ impl Setup {
         self.save()
     }
 
-    /// Read MitHF and DUOS, and propose helper mappings for review.
+    /// Re-read the source, read MitHF and DUOS, and propose helper mappings
+    /// for review.
     ///
-    /// `arrangement` selects a DUOS arrangement; `None` keeps the saved one.
-    /// A single available arrangement is chosen automatically. Proposals are
-    /// suggestions only and always have to be confirmed.
+    /// The source is read too, so helpers added to a sheet after connecting
+    /// appear here. `arrangement` selects a DUOS arrangement; `None` keeps the
+    /// saved one. A single available arrangement is chosen automatically.
+    /// Proposals are suggestions only and always have to be confirmed.
     pub async fn discover(
         &mut self,
         browser: &BrowserSessions,
         arrangement: Option<&str>,
     ) -> Result<(), LiveError> {
+        self.refresh_source().await?;
         let today = self.today();
-        let mut catalog = build_catalog(browser, "", today).await?;
+        let mut catalog = build_catalog(browser, "", today, self.duos_enabled()).await?;
         let target = self.resolve_arrangement(&catalog, arrangement)?;
         if !target.is_empty() {
-            catalog = build_catalog(browser, &target, today).await?;
+            catalog = build_catalog(browser, &target, today, self.duos_enabled()).await?;
         }
         self.apply_catalog(catalog, &target)
     }
@@ -280,6 +368,9 @@ impl Setup {
         catalog: &Value,
         requested: Option<&str>,
     ) -> Result<String, LiveError> {
+        if !self.duos_enabled() {
+            return Ok(String::new());
+        }
         let mut target = requested
             .map(str::to_owned)
             .unwrap_or_else(|| self.data["arrangement"].as_str().unwrap_or("").to_owned());
@@ -304,12 +395,14 @@ impl Setup {
         }
         self.data["arrangement"] = json!(target);
         self.data["catalog"] = catalog.clone();
-        self.data["stage"] = json!(if target.is_empty() {
+        self.data["stage"] = json!(if target.is_empty() && self.duos_enabled() {
             "destinations"
         } else {
             "helpers"
         });
-        if selected(&catalog["types"], &self.data["registration_type"]).is_err() {
+        if self.duos_enabled()
+            && selected(&catalog["types"], &self.data["registration_type"]).is_err()
+        {
             let types = rows(&catalog["types"])?;
             self.data["registration_type"] = json!(if types.len() == 1 {
                 text(&types[0]["id"])?
@@ -326,7 +419,7 @@ impl Setup {
                 mappings.push(json!({
                     "source": text(&source["id"])?,
                     "mithf": suggested(name, &catalog["mithf"]),
-                    "duos": suggested(name, &catalog["duos"]),
+                    "duos": if self.duos_enabled() { suggested(name, &catalog["duos"]) } else { String::new() },
                     "excluded": false,
                 }));
             }
@@ -382,8 +475,10 @@ impl Setup {
                 "Gennemgå alle kalendere, og vælg hjælpere eller udelad dem.",
             ));
         }
-        selected(&self.data["arrangements"], &self.data["arrangement"])?;
-        selected(&self.data["types"], &self.data["registration_type"])?;
+        if self.duos_enabled() {
+            selected(&self.data["arrangements"], &self.data["arrangement"])?;
+            selected(&self.data["types"], &self.data["registration_type"])?;
+        }
         let included: Vec<_> = rows(&self.data["mappings"])?
             .iter()
             .filter(|row| row["excluded"] != json!(true))
@@ -391,7 +486,11 @@ impl Setup {
         if included.is_empty() {
             return Err(LiveError("Vælg mindst én hjælperkalender."));
         }
-        for service in ["mithf", "duos"] {
+        for service in if self.duos_enabled() {
+            vec!["mithf", "duos"]
+        } else {
+            vec!["mithf"]
+        } {
             let mut chosen = std::collections::BTreeSet::new();
             for row in &included {
                 let person = selected(&self.data[service], &row[service])?;
@@ -419,20 +518,27 @@ impl Setup {
     /// else sends the setup back for review.
     pub async fn revalidate(&mut self, browser: &BrowserSessions) -> Result<(), LiveError> {
         let secret = read_credential(self.credential()?)?;
-        let access = teamup::Access {
-            calendar: text(&secret["calendar"])?,
-            api_key: text(&secret["api_key"])?,
-            bearer: secret["bearer"].as_str().unwrap_or(""),
+        let (calendars, colors, _) = if self.data["source"] == "sheets" {
+            let layout: crate::sheets::SheetLayout =
+                serde_json::from_value(self.data["sheet_layout"].clone())
+                    .map_err(|_| LiveError("Regnearkets gemte opsætning er ugyldig."))?;
+            let access = sheets::parse_link(text(&secret["link"])?, layout)?;
+            sheets::source_catalog(&access, self.timezone()).await?
+        } else {
+            let access = teamup::Access {
+                calendar: text(&secret["calendar"])?,
+                api_key: text(&secret["api_key"])?,
+                bearer: secret["bearer"].as_str().unwrap_or(""),
+            };
+            teamup::source_catalog(&access, self.timezone(), self.today()).await?
         };
-        let (calendars, colors, _) =
-            teamup::source_catalog(&access, self.timezone(), self.today()).await?;
         if colors != self.data["colors"] {
             // Colour is appearance, not identity: adopt it without asking.
             self.data["colors"] = colors;
             self.save()?;
         }
         let arrangement = self.data["arrangement"].as_str().unwrap_or("").to_owned();
-        let fresh = build_catalog(browser, &arrangement, self.today()).await?;
+        let fresh = build_catalog(browser, &arrangement, self.today(), self.duos_enabled()).await?;
         if calendars != self.data["calendars"] || fresh != self.data["catalog"] {
             self.data["calendars"] = calendars;
             self.data["stage"] = json!("destinations");
@@ -484,7 +590,12 @@ mod tests {
                     step["error"].as_str(),
                     "{name} / {call}: error text differs",
                 );
-                assert_eq!(setup.data, *expected, "{name} / {call}: document differs");
+                let mut legacy = setup.data.clone();
+                let object = legacy.as_object_mut().expect("setup object");
+                object.remove("source");
+                object.remove("duos_enabled");
+                object.remove("sheet_layout");
+                assert_eq!(legacy, *expected, "{name} / {call}: document differs");
             }
         }
 
@@ -675,5 +786,51 @@ mod tests {
         setup.data["mappings"] =
             json!([{"source": "c1", "mithf": "m1", "duos": "d1", "excluded": false}]);
         assert!(setup.validate_choices().is_err());
+    }
+
+    #[test]
+    fn each_source_keeps_its_setup_when_switching_back_and_forth() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut setup = Setup::load(dir.path()).unwrap();
+        setup.data["credential"] = json!("teamup-handle");
+        setup.data["mappings"] =
+            json!([{"source": "c1", "mithf": "m1", "duos": "d1", "excluded": false}]);
+        setup.data["stage"] = json!("ready");
+        let teamup = setup.data.clone();
+
+        setup.choose_source("sheets").unwrap();
+        assert_eq!(setup.data["mappings"], json!([]));
+        assert_eq!(setup.data["stage"], "source");
+        // The kept setup holds a credential handle; it never reaches the view.
+        assert!(setup.view().get("other_source").is_none());
+        setup.data["credential"] = json!("sheet-handle");
+        setup.data["stage"] = json!("ready");
+        let mut sheets = setup.data.clone();
+
+        setup.choose_source("teamup").unwrap();
+        let mut restored = setup.data.clone();
+        restored.as_object_mut().unwrap().remove("other_source");
+        assert_eq!(restored, teamup);
+        assert_eq!(setup.data["other_source"]["credential"], "sheet-handle");
+
+        setup.choose_source("sheets").unwrap();
+        sheets.as_object_mut().unwrap().remove("other_source");
+        let mut now = Setup::load(dir.path()).unwrap().data;
+        now.as_object_mut().unwrap().remove("other_source");
+        assert_eq!(now, sheets);
+    }
+
+    #[test]
+    fn duos_can_be_disabled_without_a_duos_account_or_mapping() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut setup = Setup::load(dir.path()).unwrap();
+        setup.choose_duos(false).unwrap();
+        setup.data["calendars"] = json!([{"id": "helper", "name": "Alex"}]);
+        setup.data["mithf"] = json!([{"id": "mithf-helper", "name": "Alex"}]);
+        setup.data["mappings"] = json!([{
+            "source": "helper", "mithf": "mithf-helper", "duos": "", "excluded": false
+        }]);
+        setup.validate_choices().unwrap();
+        assert!(!Setup::load(dir.path()).unwrap().duos_enabled());
     }
 }

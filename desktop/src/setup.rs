@@ -1,7 +1,10 @@
-use iced::widget::{button, column, pick_list, row, text, text_input};
+use iced::widget::{button, checkbox, column, pick_list, row, text, text_input};
 use iced::{Element, Length};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use teamup_shift_sync_core::sheets::SheetLayout;
+
+use crate::template::{self, Template};
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Choice {
@@ -25,6 +28,12 @@ pub struct Mapping {
 #[derive(Debug, Clone, Deserialize)]
 pub struct SetupState {
     pub stage: String,
+    #[serde(default = "duos_on")]
+    pub duos_enabled: bool,
+    #[serde(default = "teamup_source")]
+    pub source: String,
+    #[serde(default)]
+    pub sheet_layout: Option<SheetLayout>,
     pub calendars: Vec<Choice>,
     pub arrangements: Vec<Choice>,
     pub types: Vec<Choice>,
@@ -39,12 +48,21 @@ pub struct SetupState {
     pub has_credentials: bool,
 }
 
+fn teamup_source() -> String {
+    "teamup".into()
+}
+fn duos_on() -> bool {
+    true
+}
+
 // These inputs contain credentials. Do not derive Debug with their contents.
 #[derive(Clone)]
 pub enum Message {
     Link(String),
     Key(String),
+    Template(template::Message),
     Connect,
+    ConnectSheets,
     OpenTeamupKeys,
     CopyOrganization,
     CopyPurpose,
@@ -72,7 +90,7 @@ pub struct SetupUi {
     pub state: Option<SetupState>,
     pub link: String,
     pub key: String,
-    pub busy: bool,
+    pub template: Template,
     pub error: Option<String>,
     /// Calendars the person reopened for editing. A row shows dropdowns
     /// while it is ambiguous (no match yet) or reopened here; a unique
@@ -81,14 +99,28 @@ pub struct SetupUi {
     pub editing: std::collections::BTreeSet<String>,
 }
 impl SetupUi {
+    /// The layout learned from the pasted shift, or the saved one while no
+    /// new shift has been pasted.
+    pub fn sheet_layout(&self) -> Result<SheetLayout, String> {
+        match self.template.layout() {
+            Some(result) => result.map_err(str::to_owned),
+            None if self.template.is_empty() => self
+                .state
+                .as_ref()
+                .and_then(|state| state.sheet_layout.clone())
+                .ok_or_else(|| "Indsæt en vagt fra regnearket først.".to_owned()),
+            None => Err("Vælg vagtens celler først.".to_owned()),
+        }
+    }
+
     pub fn view(&self) -> Element<'_, Message> {
         let mut content = column![].spacing(8);
         if let Some(error) = &self.error {
             content = content.push(text(error));
         }
-        if self.busy {
-            return content.push(text("Kontrollerer og gemmer …")).into();
-        }
+        // The form stays on screen while an action runs, so a quick save does
+        // not blink. The app ignores input until the action has finished and
+        // shows its own status line below the page.
         let Some(state) = &self.state else {
             return content
                 .push(primary_button(
@@ -101,7 +133,52 @@ impl SetupUi {
             content = content.push(text(&state.notice));
         }
         if state.stage == "source" {
-            content = content
+            content = content.push(
+                pick_list(
+                    vec![
+                        Choice {
+                            id: "teamup".into(),
+                            name: "TeamUp".into(),
+                        },
+                        Choice {
+                            id: "sheets".into(),
+                            name: "Google Sheets".into(),
+                        },
+                    ],
+                    Some(Choice {
+                        id: state.source.clone(),
+                        name: source_name(&state.source).into(),
+                    }),
+                    |choice: Choice| Message::Action("choose_source", json!({"source": choice.id})),
+                )
+                .padding(8)
+                .width(Length::Fixed(250.0)),
+            );
+            if state.source == "sheets" {
+                content = content
+                    .push(
+                        text_input("Google Sheets-link til den valgte fane", &self.link)
+                            .on_input(Message::Link)
+                            .secure(true)
+                            .padding(12),
+                    )
+                    .push(text("Del arket som »Alle med linket kan se«.").size(12));
+                if self.template.is_empty() && state.sheet_layout.is_some() {
+                    content = content.push(
+                        text("Vagtens opbygning er gemt. Indsæt en ny vagt for at ændre den.")
+                            .size(13),
+                    );
+                }
+                content = content.push(self.template.view().map(Message::Template));
+                content = content.push(
+                    primary_button("Tilslut regneark", Message::ConnectSheets).on_press_maybe(
+                        self.sheet_layout()
+                            .is_ok()
+                            .then_some(Message::ConnectSheets),
+                    ),
+                );
+            } else {
+                content = content
                 .push(
                     text_input("TeamUp-kalenderlink", &self.link)
                         .on_input(Message::Link)
@@ -127,23 +204,33 @@ impl SetupUi {
                     .spacing(8),
                 )
                 .push(primary_button("Tilslut kalender", Message::Connect));
-            if state.has_credentials || state.can_import {
-                let mut extra = row![].spacing(8);
-                if state.has_credentials {
-                    extra = extra.push(quiet_button(
-                        "Prøv den gemte forbindelse igen",
-                        Message::Action("retry_source", json!({})),
-                    ));
+                if state.has_credentials || state.can_import {
+                    let mut extra = row![].spacing(8);
+                    if state.has_credentials {
+                        extra = extra.push(quiet_button(
+                            "Prøv den gemte forbindelse igen",
+                            Message::Action("retry_source", json!({})),
+                        ));
+                    }
+                    if state.can_import {
+                        extra = extra.push(quiet_button(
+                            "Importér tidligere opsætning",
+                            Message::Action("import", json!({})),
+                        ));
+                    }
+                    content = content.push(extra);
                 }
-                if state.can_import {
-                    extra = extra.push(quiet_button(
-                        "Importér tidligere opsætning",
-                        Message::Action("import", json!({})),
-                    ));
-                }
-                content = content.push(extra);
             }
         } else {
+            // The label is part of the click target, so the whole line toggles.
+            content = content.push(
+                checkbox(state.duos_enabled)
+                    .label("Registrér SPS i DUOS")
+                    .size(20)
+                    .on_toggle(|enabled| {
+                        Message::Action("duos_enabled", json!({"enabled": enabled}))
+                    }),
+            );
             if !state.account.is_empty() {
                 content = content.push(text(&state.account));
             }
@@ -173,34 +260,38 @@ impl SetupUi {
             }
             if state.mappings.is_empty() {
                 content = content.push(primary_button(
-                    "Hent hjælpere og ordninger",
+                    find_helpers(&state.source),
                     Message::Action("discover", json!({})),
                 ));
             } else {
-                content = content.push(
-                    row![
-                        text("TeamUp").width(Length::FillPortion(2)),
-                        text("MitHF").width(Length::FillPortion(2)),
-                        text("DUOS").width(Length::FillPortion(2)),
-                    ]
-                    .spacing(8),
-                );
+                let mut header = row![
+                    text(if state.source == "sheets" {
+                        "Regneark"
+                    } else {
+                        "TeamUp"
+                    })
+                    .width(Length::FillPortion(2)),
+                    text("MitHF").width(Length::FillPortion(2)),
+                ]
+                .spacing(8);
+                if state.duos_enabled {
+                    header = header.push(text("DUOS").width(Length::FillPortion(2)));
+                }
+                content = content.push(header);
                 for mapping in &state.mappings {
                     content = content.push(self.mapping_row(state, mapping));
                 }
-                content = content.push(primary_button(
-                    "Bekræft og se denne uge",
-                    Message::Action("confirm", json!({})),
-                ));
+                content =
+                    content.push(primary_button("Gem", Message::Action("confirm", json!({}))));
             }
             let mut extra = row![quiet_button(
-                "Ret kalenderforbindelsen",
+                "Skift vagtplan",
                 Message::Action("source", json!({})),
             )]
             .spacing(8);
             if !state.mappings.is_empty() {
                 extra = extra.push(quiet_button(
-                    "Hent hjælpere og ordninger",
+                    find_helpers(&state.source),
                     Message::Action("discover", json!({})),
                 ));
             }
@@ -245,7 +336,7 @@ impl SetupUi {
         ]
         .spacing(4)
         .width(Length::FillPortion(2));
-        row![
+        let mut cells = row![
             teamup,
             self.choice_cell(
                 &state.mithf,
@@ -254,16 +345,18 @@ impl SetupUi {
                 "mithf",
                 "Vælg hjælper"
             ),
-            self.choice_cell(
+        ]
+        .spacing(8);
+        if state.duos_enabled {
+            cells = cells.push(self.choice_cell(
                 &state.duos,
                 &mapping.duos,
                 &mapping.source,
                 "duos",
-                "Vælg aktiv hjælper"
-            ),
-        ]
-        .spacing(8)
-        .into()
+                "Vælg aktiv hjælper",
+            ));
+        }
+        cells.into()
     }
 
     /// A MitHF/DUOS cell: plain text with a ret affordance for a unique
@@ -309,6 +402,22 @@ impl SetupUi {
         if !self.editing.remove(source) {
             self.editing.insert(source.to_owned());
         }
+    }
+}
+
+fn find_helpers(source: &str) -> &'static str {
+    if source == "sheets" {
+        "Find hjælpere i Google Sheets"
+    } else {
+        "Find hjælpere i TeamUp"
+    }
+}
+
+fn source_name(source: &str) -> &'static str {
+    if source == "sheets" {
+        "Google Sheets"
+    } else {
+        "TeamUp"
     }
 }
 
@@ -372,6 +481,9 @@ mod tests {
     /// joint confirmation stays the single loud action.
     fn confirmation_state() -> SetupState {
         SetupState {
+            source: "teamup".into(),
+            sheet_layout: None,
+            duos_enabled: true,
             stage: "mappings".into(),
             calendars: vec![
                 choice("cal-ft", "FT > Zain"),

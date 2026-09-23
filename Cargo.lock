@@ -4244,6 +4244,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "chrono-tz",
+ "csv",
  "dec_from_char",
  "fs2",
  "futures-util",

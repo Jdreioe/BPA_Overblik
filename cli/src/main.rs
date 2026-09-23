@@ -10,7 +10,7 @@ use std::{
 use teamup_shift_sync_core::{
     apply_plan, build_plan,
     live::{
-        load_saved_setup, read_shapes, read_teamup, read_week, BrowserSessions, LiveDestinations,
+        load_saved_setup, read_shapes, read_source, read_week, BrowserSessions, LiveDestinations,
         Service, Visibility,
     },
     plan_digest, ApplyRequest, Outcome, PlanRequest, SyncPlan, SyncState,
@@ -173,12 +173,18 @@ fn main() -> ExitCode {
 
 /// `Window` is for the interactive login command only; every other command
 /// reuses the saved profiles without opening a browser window.
-async fn browsers(data_dir: PathBuf, visibility: Visibility) -> Result<BrowserSessions> {
+async fn browsers(
+    data_dir: PathBuf,
+    visibility: Visibility,
+    duos_enabled: bool,
+) -> Result<BrowserSessions> {
     let mut browser = tokio::task::spawn_blocking(move || BrowserSessions::new(data_dir))
         .await
         .map_err(|_| "Browser preparation failed")??;
     browser.open(Service::Mithf, visibility).await?;
-    browser.open(Service::Duos, visibility).await?;
+    if duos_enabled {
+        browser.open(Service::Duos, visibility).await?;
+    }
     Ok(browser)
 }
 
@@ -218,7 +224,12 @@ async fn run(cli: Cli) -> Result<u8> {
                 .await
                 .map_err(|_| "Could not load setup")??;
             let range = dates.resolve(config.planning.timezone, Utc::now().fixed_offset())?;
-            let browser = browsers(data_dir, Visibility::Background).await?;
+            let browser = browsers(
+                data_dir,
+                Visibility::Background,
+                config.planning.duos_enabled,
+            )
+            .await?;
             let now = Utc::now().fixed_offset();
             let (shifts, destination) = read_week(
                 &browser,
@@ -265,9 +276,14 @@ async fn run(cli: Cli) -> Result<u8> {
                 to: Some(to),
             }
             .resolve(config.planning.timezone, Utc::now().fixed_offset())?;
-            let browser = browsers(data_dir, Visibility::Background).await?;
+            let browser = browsers(
+                data_dir,
+                Visibility::Background,
+                config.planning.duos_enabled,
+            )
+            .await?;
             // Never reuse source data from an earlier preview or accept an imported plan.
-            let shifts = read_teamup(&config, from, to).await?;
+            let shifts = read_source(&config, from, to).await?;
             let now = Utc::now().fixed_offset();
             let mut destinations = LiveDestinations::connect(&browser, &config, now).await?;
             apply_plan(
@@ -290,7 +306,12 @@ async fn run(cli: Cli) -> Result<u8> {
             Ok(0)
         }
         Command::Login { data_dir } => {
-            let browser = browsers(data_dir, Visibility::Window).await?;
+            let duos_enabled = std::fs::read_to_string(data_dir.join("setup.json"))
+                .ok()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .and_then(|setup| setup["duos_enabled"].as_bool())
+                .unwrap_or(true);
+            let browser = browsers(data_dir, Visibility::Window, duos_enabled).await?;
             eprintln!("Log in to both browser windows. In MitHF, open your shift calendar. Keep one service tab per window.");
             eprintln!("Press Enter when both logins are complete.");
             tokio::task::spawn_blocking(|| -> Result<()> {
@@ -307,8 +328,10 @@ async fn run(cli: Cli) -> Result<u8> {
             .await
             .map_err(|_| "Login confirmation failed")??;
             browser.check(Service::Mithf).await?;
-            browser.check(Service::Duos).await?;
-            println!("Both services are readable. The Rust browser profiles are saved for later commands.");
+            if duos_enabled {
+                browser.check(Service::Duos).await?;
+            }
+            println!("The selected services are readable. Browser profiles are saved for later commands.");
             Ok(0)
         }
         Command::Capture {
@@ -322,7 +345,12 @@ async fn run(cli: Cli) -> Result<u8> {
                 .map_err(|_| "Could not load setup")??;
             let now = Utc::now().fixed_offset();
             let range = dates.resolve(config.planning.timezone, now)?;
-            let browser = browsers(data_dir, Visibility::Background).await?;
+            let browser = browsers(
+                data_dir,
+                Visibility::Background,
+                config.planning.duos_enabled,
+            )
+            .await?;
             let today = now.with_timezone(&config.planning.timezone).date_naive();
             let recorded = read_shapes(&browser, &config, range.from, range.to, today).await?;
             let document = serde_json::to_string_pretty(&recorded)? + "\n";

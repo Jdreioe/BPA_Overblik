@@ -11,6 +11,7 @@ mod parser;
 mod planner;
 mod planning_models;
 mod reconciliation;
+pub mod sheets;
 mod source_rules;
 mod state;
 mod transfer;

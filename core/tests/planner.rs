@@ -168,6 +168,56 @@ fn future_and_ongoing_duos_intervals_are_planned_for_transfer() {
 }
 
 #[test]
+fn mithf_only_plans_plain_shifts_and_flags_sps_instead_of_writing_duos() {
+    use serde_json::json;
+    use teamup_shift_sync_core::Outcome;
+
+    let config: PlanningConfig = serde_json::from_value(json!({
+        "timezone": "Europe/Copenhagen", "default_helper_count": 1,
+        "duos_arrangement_id": "", "duos_registration_type": "", "duos_enabled": false,
+        "helpers": {"helper": {"mithf_name": "Alex", "duos_employee_number": ""}}
+    }))
+    .unwrap();
+    let state = SyncState::open(":memory:").unwrap();
+    for (notes, expects_review) in [("", false), ("uni 8-12", true)] {
+        let shift: SourceShift = serde_json::from_value(json!({
+            "calendar_id": "sheet", "event_id": "one", "occurrence_id": "one",
+            "title": "Vagt", "helper_key": "helper", "notes": notes,
+            "starts_at": "2026-11-02T08:00:00+01:00",
+            "ends_at": "2026-11-02T16:00:00+01:00"
+        }))
+        .unwrap();
+        let plan = build_plan(
+            &PlanRequest {
+                config: &config,
+                shifts: &[shift],
+                destination: &DestinationSnapshot::default(),
+                range_start: DateTime::parse_from_rfc3339("2026-11-02T00:00:00+01:00").unwrap(),
+                range_end: DateTime::parse_from_rfc3339("2026-11-03T00:00:00+01:00").unwrap(),
+                now: DateTime::parse_from_rfc3339("2026-11-01T12:00:00+01:00").unwrap(),
+                live: true,
+            },
+            &state,
+        )
+        .unwrap();
+        assert!(plan
+            .items
+            .iter()
+            .any(|item| item.system == PlanSystem::Mithf && item.outcome == Outcome::WouldCreate));
+        assert!(!plan
+            .items
+            .iter()
+            .any(|item| item.system == PlanSystem::Duos));
+        assert_eq!(
+            plan.items
+                .iter()
+                .any(|item| item.reason == "sps_without_duos"),
+            expects_review
+        );
+    }
+}
+
+#[test]
 fn planning_preserves_recovery_records_and_rejects_corrupt_state() {
     use serde_json::json;
     use teamup_shift_sync_core::{Outcome, PlanningError};
