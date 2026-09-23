@@ -40,9 +40,12 @@ Synchronization history is stored per account in `sync-<scope>.sqlite3`, where
 the scope covers the calendar, the MitHF customer and grant, the DUOS
 arrangement and registration type, and the confirmed helper mappings. Every
 preview and every transfer rereads both destinations and refuses to continue
-unless the fresh catalog still matches the confirmed one, so one account can
-never plan against another's history. A transfer additionally refuses an
-approval whose account database is no longer the current one.
+unless the catalog still matches the confirmed one, so one account can never
+plan against another's history. The first preview of a login builds the
+catalog; later previews of the same setup and day reuse that result, because a
+preview only reads and a transfer rebuilds it in full anyway. A transfer
+additionally refuses an approval whose account database is no longer the
+current one.
 
 **Log ud af MitHF og DUOS** on Indstillinger closes the app's browsers and
 removes only its own profiles, so a different account starts from a clean

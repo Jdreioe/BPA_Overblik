@@ -2,44 +2,97 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, FixedOffset, NaiveDate};
 use chrono_tz::Tz;
+use futures_util::{stream, StreamExt, TryStreamExt};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use super::{
-    choice, config::selected, id, named, rows, text, timestamp, truthy, unique, BrowserSessions,
-    LiveConfig, LiveError, Service, INVALID,
+    choice, config::selected, id, named, rows, text, timestamp, timing::Stage, truthy, unique,
+    BrowserSessions, LiveConfig, LiveError, Service, INVALID,
 };
 use crate::{
     DestinationSnapshot, DuosRegistration, MitHfShift, PlanItem, PlanSystem, TimeInterval,
 };
 
-pub async fn read_destinations(
-    browser: &BrowserSessions,
-    config: &LiveConfig,
-    start: DateTime<FixedOffset>,
-    end: DateTime<FixedOffset>,
-    now: DateTime<FixedOffset>,
-) -> Result<DestinationSnapshot, LiveError> {
-    validate_catalog(
-        browser,
-        config,
-        now.with_timezone(&config.planning.timezone).date_naive(),
-    )
-    .await?;
-    read_snapshot(browser, config, start, end).await
+/// How many shifts one MitHF extras call asks about. The endpoint takes a
+/// comma-separated `eids` list and answers keyed by shift id; the bound keeps
+/// one request's body predictable over a long range.
+const EKSTRA_BATCH: usize = 20;
+
+/// How many MitHF extras calls a read keeps in flight. The browser serves them
+/// from one authenticated tab, so this stays low enough not to flood it.
+const EKSTRA_CONCURRENCY: usize = 4;
+
+/// The part of a destination read that does not depend on the source range:
+/// the catalog check and the whole DUOS listing, which DUOS only serves
+/// unfiltered and this app narrows itself.
+///
+/// A preview starts this while TeamUp is still being read, and finishes it
+/// once the reconciliation range is known.
+pub(crate) struct DestinationPrelude {
+    duos_registrations: Vec<DuosRegistration>,
 }
 
+/// Validate the catalog and read DUOS, before any source range is known.
+pub(crate) async fn read_before_range(
+    browser: &BrowserSessions,
+    config: &LiveConfig,
+    now: DateTime<FixedOffset>,
+) -> Result<DestinationPrelude, LiveError> {
+    let today = now.with_timezone(&config.planning.timezone).date_naive();
+    let (_, duos_registrations) = futures_util::try_join!(
+        validate_catalog_once(browser, config, today),
+        read_duos(browser, config)
+    )?;
+    Ok(DestinationPrelude { duos_registrations })
+}
+
+impl DestinationPrelude {
+    /// Read MitHF for the resolved range and narrow DUOS to the same range.
+    pub(crate) async fn finish(
+        self,
+        browser: &BrowserSessions,
+        config: &LiveConfig,
+        start: DateTime<FixedOffset>,
+        end: DateTime<FixedOffset>,
+    ) -> Result<DestinationSnapshot, LiveError> {
+        Ok(DestinationSnapshot {
+            mithf_shifts: read_mithf(browser, config, start, end).await?,
+            duos_registrations: within(self.duos_registrations, start, end),
+        })
+    }
+}
+
+/// A read of both destinations for a known range, without the catalog check.
+/// The transfer's read-back uses this: the catalog was validated when the
+/// transfer connected.
 async fn read_snapshot(
     browser: &BrowserSessions,
     config: &LiveConfig,
     start: DateTime<FixedOffset>,
     end: DateTime<FixedOffset>,
 ) -> Result<DestinationSnapshot, LiveError> {
-    let mithf_shifts = read_mithf(browser, config, start, end).await?;
-    let duos_registrations = read_duos(browser, config, start, end).await?;
+    let (mithf_shifts, duos_registrations) = futures_util::try_join!(
+        read_mithf(browser, config, start, end),
+        read_duos(browser, config)
+    )?;
     Ok(DestinationSnapshot {
         mithf_shifts,
-        duos_registrations,
+        duos_registrations: within(duos_registrations, start, end),
     })
+}
+
+/// Keep the registrations overlapping the range. DUOS has no range parameter,
+/// so every read narrows the full listing here.
+fn within(
+    registrations: Vec<DuosRegistration>,
+    start: DateTime<FixedOffset>,
+    end: DateTime<FixedOffset>,
+) -> Vec<DuosRegistration> {
+    registrations
+        .into_iter()
+        .filter(|registration| registration.ends_at > start && registration.starts_at < end)
+        .collect()
 }
 
 /// Service identities a write depends on, resolved once before any submission.
@@ -159,12 +212,51 @@ pub(crate) async fn build_catalog(
     )
 }
 
+/// Validate the catalog unless this browser session already validated exactly
+/// this setup today.
+///
+/// Reading is the only thing that depends on it here, and a read changes
+/// nothing, so a catalog that changes mid-session costs a preview that is out
+/// of date rather than a wrong transfer: `LiveDestinations::connect` always
+/// validates in full, so a changed catalog still invalidates the approval
+/// before anything is written.
+async fn validate_catalog_once(
+    browser: &BrowserSessions,
+    config: &LiveConfig,
+    today: NaiveDate,
+) -> Result<(), LiveError> {
+    let stamp = catalog_stamp(config, today);
+    if browser.catalog_validated(&stamp) {
+        Stage::start("destination.catalog").done(0);
+        return Ok(());
+    }
+    validate_catalog(browser, config, today).await?;
+    browser.remember_catalog(stamp);
+    Ok(())
+}
+
+/// What a catalog check covered, as a digest: the day it was checked for, the
+/// chosen arrangement and the confirmed setup it was compared against. A
+/// digest rather than the values themselves, so no account or helper name is
+/// held for the session beyond the configuration itself.
+fn catalog_stamp(config: &LiveConfig, today: NaiveDate) -> [u8; 32] {
+    let scope = json!([
+        today.to_string(),
+        config.planning.duos_arrangement_id,
+        config.planning.duos_registration_type,
+        config.setup,
+    ]);
+    Sha256::digest(scope.to_string().as_bytes()).into()
+}
+
 async fn validate_catalog(
     browser: &BrowserSessions,
     config: &LiveConfig,
     today: NaiveDate,
 ) -> Result<Identities, LiveError> {
+    let stage = Stage::start("destination.catalog");
     let catalog = build_catalog(browser, &config.planning.duos_arrangement_id, today).await?;
+    stage.done(5);
     if catalog != config.setup["catalog"] {
         return Err(LiveError("Navne, ansættelser eller kontovalg er ændret. Bekræft opsætningen igen i den almindelige app."));
     }
@@ -240,6 +332,7 @@ async fn read_mithf(
         .with_timezone(&config.planning.timezone)
         .date_naive()
         .to_string();
+    let stage = Stage::start("mithf.plan");
     let response = browser
         .request(
             Service::Mithf,
@@ -247,13 +340,40 @@ async fn read_mithf(
             json!({"fra":first,"til":last,"frisk":1}),
         )
         .await?;
+    stage.done(1);
     let raw_by_id = mithf_rows(config, &response, &first, &last, start, end)?;
-    let mut shifts = Vec::new();
-    for (identifier, row) in raw_by_id {
-        let extra = browser
-            .request(Service::Mithf, "ekstra", json!({"eids": identifier}))
-            .await?;
-        shifts.push(mithf_shift(config, &identifier, &row, &extra)?);
+    // `ekstra` answers for several shifts at once, keyed by shift id, so a
+    // week is a couple of calls rather than one per row. Batches are bounded
+    // so a long range cannot grow a single request without limit, and the
+    // remaining calls do not depend on each other.
+    let stage = Stage::start("mithf.ekstra");
+    let identifiers: Vec<&String> = raw_by_id.keys().collect();
+    let mut calls = Vec::new();
+    for batch in identifiers.chunks(EKSTRA_BATCH) {
+        let eids = batch
+            .iter()
+            .map(|id| id.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        calls.push(browser.request(Service::Mithf, "ekstra", json!({ "eids": eids })));
+    }
+    let extras: Vec<Value> = stream::iter(calls)
+        .buffered(EKSTRA_CONCURRENCY)
+        .try_collect()
+        .await?;
+    stage.done(extras.len());
+    let mut shifts = Vec::with_capacity(identifiers.len());
+    for (batch, extra) in identifiers.chunks(EKSTRA_BATCH).zip(&extras) {
+        for identifier in batch {
+            // A shift missing from its own batch's answer fails the read: the
+            // planner may not treat absent extras as "no SPS hours".
+            shifts.push(mithf_shift(
+                config,
+                identifier,
+                &raw_by_id[*identifier],
+                extra,
+            )?);
+        }
     }
     Ok(shifts)
 }
@@ -336,18 +456,21 @@ fn mithf_shift(
     Ok(shift)
 }
 
+/// Page the account's whole registration listing. DUOS offers no range
+/// filter, so the caller narrows the result with `within`.
 async fn read_duos(
     browser: &BrowserSessions,
     config: &LiveConfig,
-    start: DateTime<FixedOffset>,
-    end: DateTime<FixedOffset>,
 ) -> Result<Vec<DuosRegistration>, LiveError> {
+    let stage = Stage::start("duos.search");
     let mut result = Vec::new();
     let mut seen = BTreeSet::new();
+    let mut pages = 0;
     let mut skip = 0;
     loop {
-        let response = browser.request(Service::Duos, "search", json!({"skip":skip,"take":100,"includeFields":["id","portfolioId","helperId","dutyTypeId","startDate","endDate","statusId"]})).await?;
+        let response = browser.request(Service::Duos, "search", json!({"skip":skip,"take":500,"includeFields":["id","portfolioId","helperId","dutyTypeId","startDate","endDate","statusId"]})).await?;
         let page = rows(&response["data"])?;
+        pages += 1;
         let has_more = response["hasMore"].as_bool().ok_or(INVALID)?;
         if has_more && page.is_empty() {
             return Err(LiveError(
@@ -370,20 +493,18 @@ async fn read_duos(
             if finishes <= begins {
                 return Err(INVALID);
             }
-            if finishes > start && begins < end {
-                result.push(DuosRegistration {
-                    id: key,
-                    arrangement_id: id(&row["portfolioId"])?,
-                    employee_number: id(&row["helperId"])?,
-                    registration_type: id(&row["dutyTypeId"])?,
-                    starts_at: begins,
-                    ends_at: finishes,
-                    status_id: row["statusId"]
-                        .as_i64()
-                        .or_else(|| row["statusId"].as_str().and_then(|s| s.parse().ok()))
-                        .ok_or(INVALID)?,
-                });
-            }
+            result.push(DuosRegistration {
+                id: key,
+                arrangement_id: id(&row["portfolioId"])?,
+                employee_number: id(&row["helperId"])?,
+                registration_type: id(&row["dutyTypeId"])?,
+                starts_at: begins,
+                ends_at: finishes,
+                status_id: row["statusId"]
+                    .as_i64()
+                    .or_else(|| row["statusId"].as_str().and_then(|s| s.parse().ok()))
+                    .ok_or(INVALID)?,
+            });
         }
         skip += page.len();
         if !has_more {
@@ -395,6 +516,7 @@ async fn read_duos(
             ));
         }
     }
+    stage.done(pages);
     Ok(result)
 }
 
@@ -419,7 +541,9 @@ impl<'a> LiveDestinations<'a> {
         now: DateTime<FixedOffset>,
     ) -> Result<Self, LiveError> {
         let today = now.with_timezone(&config.planning.timezone).date_naive();
+        // A transfer always validates in full, whatever a preview cached.
         let identities = validate_catalog(browser, config, today).await?;
+        browser.remember_catalog(catalog_stamp(config, today));
         Ok(Self {
             browser,
             config,
@@ -804,6 +928,82 @@ mod tests {
         system: String,
         action: String,
         payload: Value,
+    }
+
+    fn config(arrangement: &str, setup: Value) -> LiveConfig {
+        LiveConfig {
+            planning: crate::PlanningConfig {
+                timezone: chrono_tz::Europe::Copenhagen,
+                default_helper_count: 1,
+                duos_arrangement_id: arrangement.into(),
+                duos_registration_type: "type-1".into(),
+                helpers: BTreeMap::new(),
+            },
+            calendar: "cal".into(),
+            api_key: "key".into(),
+            bearer: String::new(),
+            setup,
+            lookback_days: 7,
+            state_path: "state.sqlite3".into(),
+            helper_names: BTreeMap::new(),
+            helper_colors: BTreeMap::new(),
+        }
+    }
+
+    /// A session skips the catalog check only for exactly what it validated:
+    /// a different day, arrangement or confirmed setup has to be checked again
+    /// before the preview it feeds can be trusted.
+    #[test]
+    fn a_remembered_catalog_check_covers_only_what_it_validated() {
+        let day = NaiveDate::from_ymd_opt(2026, 9, 14).expect("date");
+        let setup = json!({"catalog": {"mithf": [{"id": "va-1", "name": "Anna Hansen"}]}});
+        let stamp = catalog_stamp(&config("ord-1", setup.clone()), day);
+
+        assert_eq!(stamp, catalog_stamp(&config("ord-1", setup.clone()), day));
+        assert_ne!(
+            stamp,
+            catalog_stamp(
+                &config("ord-1", setup.clone()),
+                day.succ_opt().expect("next day")
+            )
+        );
+        assert_ne!(stamp, catalog_stamp(&config("ord-2", setup), day));
+        assert_ne!(
+            stamp,
+            catalog_stamp(
+                &config(
+                    "ord-1",
+                    json!({"catalog": {"mithf": [{"id": "va-1", "name": "Anna Hansen Nielsen"}]}})
+                ),
+                day,
+            )
+        );
+    }
+
+    /// One batched answer covers several shifts, so each shift must take the
+    /// records filed under its own id and no other's.
+    #[test]
+    fn a_batched_extras_answer_is_read_per_shift() {
+        let config = config("ord-1", json!({}));
+        let row = |day: &str| {
+            json!({"startFaktisk": day, "start": "08:00", "slutdato": day, "slut": "16:00",
+                   "daekket": 1, "navn": "Anna Hansen"})
+        };
+        let record = |id: &str, name: &str, day: &str, from: &str, to: &str| json!({"id": id, "navn": name, "fraDato": day, "fra": from, "tilDato": day, "til": to});
+        let extra = json!({"ekstra": {
+            "11": {"paa": [record("r-1", "SPS timer", "2026-09-14", "09:00", "10:00")]},
+            "12": {"paa": [record("r-2", "Vagtmøde", "2026-09-15", "12:00", "13:00")]},
+        }});
+
+        let first = mithf_shift(&config, "11", &row("2026-09-14"), &extra).expect("first shift");
+        let second = mithf_shift(&config, "12", &row("2026-09-15"), &extra).expect("second shift");
+
+        assert_eq!(first.sps_record_ids, ["r-1"]);
+        assert!(first.meeting_record_ids.is_empty());
+        assert_eq!(second.meeting_record_ids, ["r-2"]);
+        assert!(second.sps_record_ids.is_empty());
+        // A shift the answer does not cover is a failed read, never "no hours".
+        assert!(mithf_shift(&config, "13", &row("2026-09-16"), &extra).is_err());
     }
 
     #[test]

@@ -51,6 +51,18 @@ const ENTER_CALENDAR: &str = r#"() => {
   return false;
 }"#;
 
+/// Whether the DUOS app has restored the session the profile already holds.
+/// Presence only: no token, role or account value leaves the page.
+const DUOS_SESSION: &str = r#"() => localStorage.getItem('role') === 'citizen'
+  && !!localStorage.getItem('token')"#;
+
+/// Whether MitHF's calendar page has parsed the request token its own API
+/// calls carry. Navigation commits before the document finishes loading, so a
+/// matching URL alone does not mean a request can be served. Presence only:
+/// the token never leaves the page.
+const MITHF_SESSION: &str = r#"() => [...document.scripts].filter(s => !s.src)
+  .some(s => /var TOK=("[^"]*"|'[^']*')/.test(s.textContent))"#;
+
 /// Chromium visibility for a launch. Interactive login and its two-factor step
 /// need a window; every other launch reuses the saved profile without one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -102,6 +114,10 @@ pub struct BrowserSessions {
     data_dir: PathBuf,
     sessions: BTreeMap<Service, Session>,
     client: reqwest::Client,
+    /// The destination catalog check this session has already passed, as an
+    /// opaque digest of what was checked. It lives and dies with the session,
+    /// so a new login always checks again.
+    catalog: std::sync::Mutex<Option<[u8; 32]>>,
     _lock: std::fs::File,
 }
 
@@ -128,6 +144,7 @@ impl BrowserSessions {
             data_dir,
             sessions: BTreeMap::new(),
             client,
+            catalog: std::sync::Mutex::new(None),
             _lock: lock,
         })
     }
@@ -212,8 +229,49 @@ impl BrowserSessions {
                             visibility,
                         },
                     );
+                    if service == Service::Duos && visibility == Visibility::Background {
+                        self.await_duos_session().await;
+                    }
                     return Ok(());
                 }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Whether this session already validated exactly this catalog check.
+    pub(crate) fn catalog_validated(&self, stamp: &[u8; 32]) -> bool {
+        self.catalog
+            .lock()
+            .is_ok_and(|remembered| remembered.as_ref() == Some(stamp))
+    }
+    /// Record a passed catalog check, so a repeated read can skip it.
+    pub(crate) fn remember_catalog(&self, stamp: [u8; 32]) {
+        if let Ok(mut remembered) = self.catalog.lock() {
+            *remembered = Some(stamp);
+        }
+    }
+
+    /// Give a freshly launched DUOS browser time to restore its saved session.
+    ///
+    /// A launch is debuggable before the app has read its profile, so a request
+    /// sent straight afterwards sees no session and is rejected as a missing
+    /// login. MitHF waits for its calendar page through `enter_calendar`; this
+    /// is the same handshake for DUOS.
+    ///
+    /// Best effort on purpose: waiting cannot create a session, so a profile
+    /// that really is signed out falls through to the ordinary login error
+    /// instead of a new one.
+    async fn await_duos_session(&self) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Ok(page) = self.page(Service::Duos, false).await {
+                if present(&page, DUOS_SESSION).await {
+                    return;
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -311,21 +369,35 @@ impl BrowserSessions {
 
     /// Reach MitHF's shift calendar through the site's own entry action, so a
     /// restored session does not depend on someone clicking it in a window.
+    ///
+    /// A freshly launched browser is debuggable before its entry page has
+    /// rendered, so the action is retried until the calendar appears rather
+    /// than given up on the first attempt. The entry action is only repeated
+    /// after the previous one has had time to navigate, so a ticket exchange
+    /// already under way is never cut short.
     async fn enter_calendar(&self) -> Result<(), LiveError> {
-        let page = self.page(Service::Mithf, false).await?;
-        let result = cdp(
-            &page,
-            "Runtime.evaluate",
-            json!({"expression": format!("({ENTER_CALENDAR})()"), "returnByValue": true}),
-        )
-        .await?;
-        if result["result"]["value"] != json!(true) {
-            return Err(INVALID);
-        }
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        let mut entered_at: Option<tokio::time::Instant> = None;
         loop {
-            if self.page(Service::Mithf, true).await.is_ok() {
-                return Ok(());
+            // The calendar page has to be able to serve a request, not merely
+            // exist: it carries the token every MitHF call sends.
+            if let Ok(page) = self.page(Service::Mithf, true).await {
+                if present(&page, MITHF_SESSION).await {
+                    return Ok(());
+                }
+            }
+            if entered_at.is_none_or(|at| at.elapsed() >= Duration::from_secs(3)) {
+                if let Ok(page) = self.page(Service::Mithf, false).await {
+                    let result = cdp(
+                        &page,
+                        "Runtime.evaluate",
+                        json!({"expression": format!("({ENTER_CALENDAR})()"), "returnByValue": true}),
+                    )
+                    .await;
+                    if result.is_ok_and(|result| result["result"]["value"] == json!(true)) {
+                        entered_at = Some(tokio::time::Instant::now());
+                    }
+                }
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(INVALID);
@@ -361,10 +433,27 @@ impl BrowserSessions {
             return Err(INVALID);
         }
         let result = &result["result"]["value"];
-        result.get("data").cloned().ok_or(LiveError(
-            "Tjenesten kunne ikke læses. Log ind igen, og prøv igen.",
-        ))
+        // Name the service: the person has two logins and has to know which
+        // one to renew.
+        result.get("data").cloned().ok_or(match service {
+            Service::Mithf => {
+                LiveError("MitHF kunne ikke læses. Log ind i MitHF igen, og prøv igen.")
+            }
+            Service::Duos => LiveError("DUOS kunne ikke læses. Log ind i DUOS igen, og prøv igen."),
+        })
     }
+}
+
+/// Answer a page-side presence probe. Any failure counts as "not ready", so a
+/// caller can poll this without turning a slow page into an error of its own.
+async fn present(page: &str, probe: &str) -> bool {
+    cdp(
+        page,
+        "Runtime.evaluate",
+        json!({"expression": format!("({probe})()"), "returnByValue": true}),
+    )
+    .await
+    .is_ok_and(|result| result["result"]["value"] == json!(true))
 }
 
 async fn cdp(socket: &str, method: &str, params: Value) -> Result<Value, LiveError> {

@@ -10,10 +10,10 @@ use std::{
 use teamup_shift_sync_core::{
     apply_plan, build_plan,
     live::{
-        load_saved_setup, read_destinations, read_shapes, read_teamup, BrowserSessions,
-        LiveDestinations, Service, Visibility,
+        load_saved_setup, read_shapes, read_teamup, read_week, BrowserSessions, LiveDestinations,
+        Service, Visibility,
     },
-    plan_digest, reconciliation_range, ApplyRequest, Outcome, PlanRequest, SyncPlan, SyncState,
+    plan_digest, ApplyRequest, Outcome, PlanRequest, SyncPlan, SyncState,
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
@@ -219,10 +219,17 @@ async fn run(cli: Cli) -> Result<u8> {
                 .map_err(|_| "Could not load setup")??;
             let range = dates.resolve(config.planning.timezone, Utc::now().fixed_offset())?;
             let browser = browsers(data_dir, Visibility::Background).await?;
-            let shifts = read_teamup(&config, range.from, range.to).await?;
             let now = Utc::now().fixed_offset();
-            let (start, end) = reconciliation_range(&shifts, range.start, range.end);
-            let destination = read_destinations(&browser, &config, start, end, now).await?;
+            let (shifts, destination) = read_week(
+                &browser,
+                &config,
+                range.from,
+                range.to,
+                range.start,
+                range.end,
+                now,
+            )
+            .await?;
             let plan = tokio::task::spawn_blocking(move || -> Result<_> {
                 let state = SyncState::open(&config.state_path)?;
                 Ok(build_plan(

@@ -16,11 +16,11 @@ use std::{
 use teamup_shift_sync_core::{
     apply_plan_controlled, build_plan,
     live::{
-        app_version, forget_logins, load_saved_setup, read_destinations, read_shapes, read_teamup,
+        app_version, forget_logins, load_saved_setup, read_shapes, read_teamup, read_week,
         redacted_report, BrowserSessions, LiveConfig, LiveDestinations, Service, Setup, Visibility,
     },
-    plan_digest, reconciliation_range, ApplyOutcome, ApplyRequest, Outcome, PlanItem, PlanRequest,
-    PlanSystem, SyncState, TransferEvent, TransferOperation,
+    plan_digest, ApplyOutcome, ApplyRequest, Outcome, PlanItem, PlanRequest, PlanSystem, SyncState,
+    TransferEvent, TransferOperation,
 };
 use teamup_shift_sync_gui::{files::app_data_dir, preview::build_week, protocol::Week};
 use tokio::sync::{Mutex, MutexGuard};
@@ -230,35 +230,32 @@ fn progress_line(verified: usize, total: usize) -> String {
 enum FetchStage {
     #[default]
     Sessions,
-    Teamup,
-    Destinations,
+    Reading,
     Planning,
 }
 
-/// The four stages are the whole fetch, so they are also the bar's scale.
-const FETCH_STAGES: f32 = 4.0;
+/// The three stages are the whole fetch, so they are also the bar's scale.
+const FETCH_STAGES: f32 = 3.0;
 
 impl FetchStage {
     /// Stages completed before this one: where the bar stands when it begins.
     fn done(self) -> f32 {
         match self {
             FetchStage::Sessions => 0.0,
-            FetchStage::Teamup => 1.0,
-            FetchStage::Destinations => 2.0,
-            FetchStage::Planning => 3.0,
+            FetchStage::Reading => 1.0,
+            FetchStage::Planning => 2.0,
         }
     }
     fn label(self) -> &'static str {
         match self {
             FetchStage::Sessions => "Åbner MitHF og DUOS",
-            FetchStage::Teamup => "Læser vagter i TeamUp",
-            FetchStage::Destinations => "Læser MitHF og DUOS",
+            FetchStage::Reading => "Læser TeamUp, MitHF og DUOS",
             FetchStage::Planning => "Beregner ugens ændringer",
         }
     }
 }
 
-/// How long a stage takes to creep most of the way across its own quarter.
+/// How long a stage takes to creep most of the way across its own section.
 /// A read that finishes quickly barely creeps; a slow one keeps moving.
 const FETCH_CREEP_SECONDS: f32 = 10.0;
 
@@ -286,9 +283,9 @@ impl Fetch {
     }
     /// Where the bar stands, on a scale of one unit per stage. Finishing a
     /// stage is the only thing that moves it a whole step; inside a stage it
-    /// creeps across that stage's own quarter, slower the longer the stage
-    /// lasts, and never into the next one. So the bar always says which of
-    /// the four steps is running, and it keeps moving while a read is slow.
+    /// creeps across that stage's own section, slower the longer the stage
+    /// lasts, and never into the next one. So the bar says which step is
+    /// running, and it keeps moving while a read is slow.
     fn bar(&self) -> f32 {
         let within = 1.0 - (-self.entered.elapsed().as_secs_f32() / FETCH_CREEP_SECONDS).exp();
         self.shown.done() + 0.9 * within
@@ -626,14 +623,9 @@ impl Engine {
         let guard = self.sessions().await?;
         let browser = guard.as_ref().ok_or("Log ind i MitHF og DUOS først.")?;
         let (to, start, end) = range(&account, from)?;
-        mark(&stage, FetchStage::Teamup);
-        let shifts = read_teamup(&account, from, to)
-            .await
-            .map_err(|e| e.to_string())?;
+        mark(&stage, FetchStage::Reading);
         let now = Utc::now().fixed_offset();
-        let (read_start, read_end) = reconciliation_range(&shifts, start, end);
-        mark(&stage, FetchStage::Destinations);
-        let destination = read_destinations(browser, &account, read_start, read_end, now)
+        let (shifts, destination) = read_week(browser, &account, from, to, start, end, now)
             .await
             .map_err(|e| e.to_string())?;
         mark(&stage, FetchStage::Planning);
@@ -2087,15 +2079,15 @@ mod tests {
         let _ = app.update(Message::ApplyTick);
         let first = app.fetch.as_ref().expect("fetch");
         assert_eq!(first.shown, FetchStage::Sessions);
-        // The first stage creeps inside its own quarter and no further.
+        // The first stage creeps inside its own section and no further.
         assert!(first.bar() >= 0.0 && first.bar() < 1.0);
-        mark(&stage, FetchStage::Destinations);
+        mark(&stage, FetchStage::Reading);
         let _ = app.update(Message::ApplyTick);
         let shown = app.fetch.as_ref().expect("fetch");
-        assert_eq!(shown.shown, FetchStage::Destinations);
-        assert!(shown.line().starts_with("Læser MitHF og DUOS …"));
-        // Two stages are done, so the bar stands in the third quarter.
-        assert!(shown.bar() >= 2.0 && shown.bar() < 3.0);
+        assert_eq!(shown.shown, FetchStage::Reading);
+        assert!(shown.line().starts_with("Læser TeamUp, MitHF og DUOS …"));
+        // One stage is done, so the bar stands in the second section.
+        assert!(shown.bar() >= 1.0 && shown.bar() < 2.0);
         let _ = app.view();
         let _ = app.update(Message::PreviewLoaded(
             Err("Ugen kunne ikke hentes.".into()),
