@@ -1,13 +1,13 @@
 //! Shared Danish week widgets: the hour grid and the quiet button style.
 //!
 //! The grid renders the [`Week`] the core-based preview builds. One status
-//! line above it (in `native.rs`) carries the week's state, so neither the
+//! notice above it (in `native.rs`) carries the week's state, so neither the
 //! cells nor extra lists repeat it.
 
 use chrono::{Datelike, NaiveDate};
-use iced::widget::{button, column, container, row, space, text};
+use iced::widget::{button, column, container, row, space, text, tooltip};
 use iced::{Color, Element, Length};
-use teamup_shift_sync_gui::protocol::{Block, Week};
+use teamup_shift_sync_gui::protocol::{Block, Notice, Tone, Week};
 
 pub const DANISH_MONTHS: [&str; 12] = [
     "januar",
@@ -62,6 +62,95 @@ pub fn outlined(theme: &iced::Theme, status: button::Status) -> button::Style {
             },
             ..base
         },
+    }
+}
+
+/// A compact notification: tone icon, short bold outcome, an optional
+/// detail line and a visible dismiss button. Every status and action result
+/// uses this one shape, so the page body never repeats it as prose.
+pub fn notice_card<'a, M: Clone + 'a>(notice: Notice, dismiss: M) -> Element<'a, M> {
+    let tone = notice.tone;
+    let icon = match tone {
+        Tone::Info => "ℹ",
+        Tone::Success => "✓",
+        Tone::Warning => "!",
+        Tone::Error => "✕",
+    };
+    let mut lines = column![text(notice.title).size(14).font(iced::Font {
+        weight: iced::font::Weight::Bold,
+        ..iced::Font::DEFAULT
+    })]
+    .spacing(2)
+    .width(Length::Fill);
+    if !notice.detail.is_empty() {
+        lines = lines.push(text(notice.detail).size(13).style(|theme: &iced::Theme| {
+            text::Style {
+                color: Some(
+                    theme
+                        .extended_palette()
+                        .background
+                        .base
+                        .text
+                        .scale_alpha(0.75),
+                ),
+            }
+        }));
+    }
+    let content = row![
+        text(icon)
+            .size(16)
+            .style(move |theme: &iced::Theme| text::Style {
+                color: Some(tone_color(theme, tone)),
+            }),
+        lines,
+    ]
+    .spacing(10)
+    .align_y(iced::alignment::Vertical::Top)
+    .push(tooltip(
+        button(text("×").size(14))
+            .style(|theme, status| {
+                let mut style = outlined(theme, status);
+                style.border.radius = 12.0.into();
+                style
+            })
+            .padding([0, 7])
+            .on_press(dismiss),
+        "Luk",
+        tooltip::Position::Bottom,
+    ));
+    container(content)
+        .padding([10, 12])
+        .max_width(560)
+        .style(move |theme: &iced::Theme| {
+            let palette = theme.extended_palette();
+            container::Style {
+                background: Some(palette.background.weak.color.into()),
+                border: iced::Border {
+                    color: palette.background.strong.color,
+                    width: 1.0,
+                    radius: 8.0.into(),
+                },
+                ..container::Style::default()
+            }
+        })
+        .into()
+}
+
+/// The theme's tone colour, moved away from the card background: the dark
+/// theme's success green is otherwise too dark to read as an icon.
+fn tone_color(theme: &iced::Theme, tone: Tone) -> Color {
+    use iced::theme::palette::{darken, lighten};
+    let palette = theme.extended_palette();
+    let base = match tone {
+        Tone::Info => palette.primary.base.color,
+        Tone::Success => palette.success.base.color,
+        Tone::Warning => palette.warning.base.color,
+        Tone::Error => palette.danger.base.color,
+    };
+    if palette.is_dark {
+        lighten(base, 0.25)
+    } else {
+        darken(base, 0.1)
     }
 }
 
@@ -328,11 +417,9 @@ mod tests {
                 ]}
             ],
             "attention": [],
-            "headline": "Ugen er klar til overførsel.",
-            "notice": "",
             "summary": ["1 ny vagt i MitHF"],
             "apply_summary": "Overfører 1 ny vagt til MitHF.",
-            "can_apply": true, "blocked_reason": "", "destination_read": true
+            "can_apply": true, "destination_read": true
         }))
         .unwrap()
     }

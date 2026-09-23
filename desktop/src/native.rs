@@ -24,7 +24,11 @@ use teamup_shift_sync_core::{
     plan_digest, ApplyOutcome, ApplyRequest, Outcome, PlanItem, PlanRequest, PlanSystem, SyncState,
     TransferEvent, TransferOperation,
 };
-use teamup_shift_sync_gui::{files::app_data_dir, preview::build_week, protocol::Week};
+use teamup_shift_sync_gui::{
+    files::app_data_dir,
+    preview::build_week,
+    protocol::{Notice, Tone, Week},
+};
 use tokio::sync::{Mutex, MutexGuard};
 
 type Result<T> = std::result::Result<T, String>;
@@ -32,6 +36,20 @@ type Result<T> = std::result::Result<T, String>;
 /// Project the setup document onto what the setup screen may display.
 fn view(document: &Setup) -> Result<setup::SetupState> {
     serde_json::from_value(document.view()).map_err(|_| "Opsætningen kunne ikke vises.".to_owned())
+}
+
+/// The state after a source check, carrying what the check found.
+fn checked(document: &Setup, found: &str) -> Result<setup::SetupState> {
+    let mut state = view(document)?;
+    state.result = Some(Notice::from_message(Tone::Info, found));
+    Ok(state)
+}
+
+/// The state after an action that saved its progress but then failed.
+fn reported(document: &Setup, error: &str) -> Result<setup::SetupState> {
+    let mut state = view(document)?;
+    state.result = Some(Notice::from_message(Tone::Error, error));
+    Ok(state)
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -169,6 +187,8 @@ struct ApplyDone {
 
 #[derive(Clone, Debug)]
 struct ApplyFailure {
+    /// The known cause, or empty when there is nothing more specific to say
+    /// than that the transfer did not finish.
     message: String,
     verified: usize,
     uncertain: usize,
@@ -207,15 +227,19 @@ fn format_verified_da(moment: DateTime<FixedOffset>, zone: chrono_tz::Tz) -> Str
     )
 }
 
-fn failure_summary(failure: &ApplyFailure) -> String {
-    let mut summary = format!(
-        "Overførslen blev ikke færdig. {} verificeret, {} uafklaret og {} ikke startet.",
-        failure.verified, failure.uncertain, failure.remaining
-    );
-    if failure.uncertain > 0 {
-        summary.push_str(" En uafklaret ændring kan allerede være gemt.");
+fn failure_notice(failure: &ApplyFailure) -> Notice {
+    let mut detail = failure.message.clone();
+    if !detail.is_empty() {
+        detail.push(' ');
     }
-    summary
+    detail.push_str(&format!(
+        "{} verificeret, {} uafklaret og {} ikke startet.",
+        failure.verified, failure.uncertain, failure.remaining
+    ));
+    if failure.uncertain > 0 {
+        detail.push_str(" En uafklaret ændring kan allerede være gemt.");
+    }
+    Notice::new(Tone::Error, "Overførslen blev ikke færdig", detail)
 }
 
 fn progress_line(verified: usize, total: usize) -> String {
@@ -320,22 +344,24 @@ fn moving_bar<'a>(value: f32, end: f32, label: String) -> Element<'a, Message> {
     .into()
 }
 
-fn completion_summary(done: &ApplyDone) -> String {
+/// Every counted change was read back and verified before it counted. The
+/// week already shows when the last transfer was, so this does not.
+fn completion_notice(done: &ApplyDone) -> Notice {
+    let counted = |count: usize, one: &str, many: &str, to: &str| {
+        let noun = if count == 1 { one } else { many };
+        format!("{count} {noun} overført til {to}")
+    };
     let mut parts = Vec::new();
     if done.mithf > 0 {
-        parts.push(format!("{} vagter i MitHF", done.mithf));
+        parts.push(counted(done.mithf, "vagt", "vagter", "MitHF"));
     }
     if done.duos > 0 {
-        parts.push(format!("{} registreringer i DUOS", done.duos));
+        parts.push(counted(done.duos, "registrering", "registreringer", "DUOS"));
     }
-    let what = if parts.is_empty() {
-        "Ingen nye ændringer.".to_owned()
+    if parts.is_empty() {
+        Notice::new(Tone::Success, "Ingen ændringer overført", "")
     } else {
-        parts.join(" og ") + " er læst tilbage og verificeret."
-    };
-    match &done.verified_label {
-        Some(label) => format!("Færdig. {what} Seneste overførsel: {label}."),
-        None => format!("Færdig. {what}"),
+        Notice::new(Tone::Success, parts.join(" og "), "")
     }
 }
 
@@ -468,11 +494,11 @@ impl Engine {
     async fn connect(&self, link: String, api_key: String) -> Result<setup::SetupState> {
         let mut guard = self.setup.lock().await;
         let document = guard.as_mut().ok_or("Opsætningen er ikke indlæst.")?;
-        document
+        let found = document
             .connect(&link, &api_key)
             .await
             .map_err(|e| e.to_string())?;
-        view(document)
+        checked(document, &found)
     }
     async fn connect_sheets(
         &self,
@@ -481,11 +507,11 @@ impl Engine {
     ) -> Result<setup::SetupState> {
         let mut guard = self.setup.lock().await;
         let document = guard.as_mut().ok_or("Opsætningen er ikke indlæst.")?;
-        document
+        let found = document
             .connect_sheets(&link, layout)
             .await
             .map_err(|e| e.to_string())?;
-        view(document)
+        checked(document, &found)
     }
     /// Apply one setup action. `discover` and `confirm` read both services, so
     /// they take the browser sessions first; the lock order is always browsers
@@ -514,9 +540,7 @@ impl Engine {
                     .map_err(|e| e.to_string())?;
                 if document.validate_choices().is_ok() {
                     if let Err(error) = document.confirm(browser).await {
-                        let mut state = view(document)?;
-                        state.notice = error.to_string();
-                        return Ok(state);
+                        return reported(document, &error.to_string());
                     }
                 }
                 return view(document);
@@ -527,6 +551,10 @@ impl Engine {
         }
         let mut guard = self.setup.lock().await;
         let document = guard.as_mut().ok_or("Opsætningen er ikke indlæst.")?;
+        if action == "retry_source" {
+            let found = document.refresh_source().await.map_err(|e| e.to_string())?;
+            return checked(document, &found);
+        }
         match action {
             "status" => Ok(()),
             "source" => document.edit_source(),
@@ -537,7 +565,6 @@ impl Engine {
                     teamup_shift_sync_core::live::LiveError("Standardtiderne kunne ikke læses.")
                 })
                 .and_then(|standard| document.set_standard_times(standard)),
-            "retry_source" => document.refresh_source().await,
             _ => Err(teamup_shift_sync_core::live::LiveError(
                 "Handlingen findes ikke.",
             )),
@@ -558,18 +585,17 @@ impl Engine {
             Ok(sessions) => sessions,
             Err(error) => {
                 let guard = self.setup.lock().await;
-                let mut state = view(guard.as_ref().ok_or("Opsætningen er ikke indlæst.")?)?;
-                state.notice = error;
-                return Ok(state);
+                return reported(
+                    guard.as_ref().ok_or("Opsætningen er ikke indlæst.")?,
+                    &error,
+                );
             }
         };
         let browser = sessions.as_ref().ok_or("Log ind i MitHF og DUOS først.")?;
         let mut guard = self.setup.lock().await;
         let document = guard.as_mut().ok_or("Opsætningen er ikke indlæst.")?;
         if let Err(error) = document.confirm(browser).await {
-            let mut state = view(document)?;
-            state.notice = error.to_string();
-            return Ok(state);
+            return reported(document, &error.to_string());
         }
         view(document)
     }
@@ -740,6 +766,7 @@ impl Engine {
                 .map_err(|_| "Ugens godkendelse kunne ikke beregnes.".to_owned())?;
             Ok(Preview {
                 week,
+                status_dismissed: false,
                 digest,
                 from,
                 state_path: account.state_path.clone(),
@@ -884,7 +911,7 @@ impl Engine {
                 teamup_shift_sync_core::TransferError::State(
                     teamup_shift_sync_core::StateError::ApplyInProgress,
                 ) => "En anden overførsel bruger denne konto. Vent, og hent ugen igen.".to_owned(),
-                _ => "Overførslen kunne ikke afsluttes og verificeres.".to_owned(),
+                _ => String::new(),
             };
             apply_failure(message, &progress)
         })?;
@@ -998,6 +1025,8 @@ fn range(config: &LiveConfig, from: NaiveDate) -> Result<Bounds> {
 #[derive(Clone)]
 struct Preview {
     week: Week,
+    /// The week's status notice was dismissed. A new preview shows it again.
+    status_dismissed: bool,
     digest: String,
     from: NaiveDate,
     state_path: PathBuf,
@@ -1014,6 +1043,8 @@ enum Message {
     SetupUpdated(Result<setup::SetupState>),
     AccountUpdated(Result<Arc<LiveConfig>>),
     Open(Screen),
+    DismissStatus,
+    DismissWeekStatus,
     SelectSettings(SettingsSection),
     AutosaveStandard(u64),
     Navigate(i64),
@@ -1106,8 +1137,8 @@ struct NativeApp {
     monday: NaiveDate,
     preview: Option<Preview>,
     activity: Activity,
-    notice: String,
-    error: Option<String>,
+    /// The last action's result or error, until the next action or dismissal.
+    status: Option<Notice>,
     last_verified: Option<String>,
     apply_progress: Option<Arc<StdMutex<TransferProgress>>>,
     apply_stop: Option<Arc<AtomicBool>>,
@@ -1149,8 +1180,7 @@ impl NativeApp {
             monday: Utc::now().date_naive(),
             preview: None,
             activity: Activity::Idle,
-            notice: String::new(),
-            error: None,
+            status: None,
             last_verified: None,
             apply_progress: None,
             apply_stop: None,
@@ -1279,6 +1309,17 @@ impl NativeApp {
             open_in_browser(setup::TEAMUP_KEYS_URL);
             return Task::none();
         }
+        // Dismissing only hides text, so it is safe at any time.
+        if matches!(message, Message::DismissStatus) {
+            self.status = None;
+            return Task::none();
+        }
+        if matches!(message, Message::DismissWeekStatus) {
+            if let Some(preview) = &mut self.preview {
+                preview.status_dismissed = true;
+            }
+            return Task::none();
+        }
         if matches!(message, Message::Setup(setup::Message::CopyOrganization)) {
             return iced::clipboard::write(setup::TEAMUP_ORG_SUGGESTION.to_owned());
         }
@@ -1298,8 +1339,7 @@ impl NativeApp {
             Message::Reload => {
                 self.preview = None;
                 self.account = None;
-                self.notice.clear();
-                self.error = None;
+                self.status = None;
                 self.last_verified = None;
                 self.apply_progress = None;
                 self.apply_stop = None;
@@ -1341,7 +1381,7 @@ impl NativeApp {
                             );
                         }
                     }
-                    Err(error) => self.error = Some(error),
+                    Err(error) => self.status = Some(Notice::from_message(Tone::Error, &error)),
                 }
                 if self.visible_screen() == Screen::Settings
                     && self.settings_section == SettingsSection::Helpers
@@ -1453,13 +1493,15 @@ impl NativeApp {
             Message::Setup(setup::Message::CopyOrganization) => {
                 // Already handled before the busy guard; kept for exhaustiveness.
             }
+            Message::DismissStatus | Message::DismissWeekStatus => {
+                // Already handled before the busy guard; kept for exhaustiveness.
+            }
             Message::Setup(setup::Message::CopyPurpose) => {
                 // Already handled before the busy guard; kept for exhaustiveness.
             }
             Message::Setup(setup::Message::Connect) => {
                 self.invalidate();
                 self.activity = Activity::Setup;
-                self.setup.error = None;
                 let engine = self.engine.clone();
                 let (link, key) = (self.setup.link.clone(), self.setup.key.clone());
                 return Task::perform(
@@ -1471,13 +1513,12 @@ impl NativeApp {
                 let layout = match self.setup.sheet_layout() {
                     Ok(layout) => layout,
                     Err(error) => {
-                        self.setup.error = Some(error);
+                        self.status = Some(Notice::from_message(Tone::Error, &error));
                         return Task::none();
                     }
                 };
                 self.invalidate();
                 self.activity = Activity::Setup;
-                self.setup.error = None;
                 let engine = self.engine.clone();
                 let link = self.setup.link.clone();
                 return Task::perform(
@@ -1497,7 +1538,6 @@ impl NativeApp {
                     self.invalidate();
                     self.activity = Activity::Setup;
                 }
-                self.setup.error = None;
                 let engine = self.engine.clone();
                 return Task::perform(
                     async move { engine.act(action, params).await },
@@ -1511,7 +1551,12 @@ impl NativeApp {
                 let was_save = self.activity == Activity::Save;
                 self.activity = Activity::Idle;
                 match result {
-                    Ok(state) => {
+                    Ok(mut state) => {
+                        // What the action found is an app status, not setup.
+                        let found = state.result.take();
+                        if found.is_some() {
+                            self.status = found.clone();
+                        }
                         // The link and key are only needed until they are stored.
                         self.setup.link.clear();
                         self.setup.key.clear();
@@ -1534,10 +1579,14 @@ impl NativeApp {
                                     Message::AccountUpdated,
                                 );
                             }
-                            return self.update(Message::Reload);
+                            // Reloading clears the status, so restore what
+                            // this action found once the reload has started.
+                            let reload = self.update(Message::Reload);
+                            self.status = found;
+                            return reload;
                         }
                     }
-                    Err(error) => self.setup.error = Some(error),
+                    Err(error) => self.status = Some(Notice::from_message(Tone::Error, &error)),
                 }
             }
             Message::AccountUpdated(result) => {
@@ -1565,7 +1614,7 @@ impl NativeApp {
                     }
                     Err(error) => {
                         self.account = None;
-                        self.error = Some(error);
+                        self.status = Some(Notice::from_message(Tone::Error, &error));
                     }
                 }
             }
@@ -1618,16 +1667,17 @@ impl NativeApp {
                 self.activity = Activity::Idle;
                 match result {
                     Ok(()) => {
-                        self.notice =
-                            "Gennemfør login i browseren, og vælg derefter Check forbindelse."
-                                .into()
+                        self.status = Some(Notice::new(
+                            Tone::Info,
+                            "Browseren er åbnet",
+                            "Log ind, og vælg derefter Check forbindelse.",
+                        ))
                     }
-                    Err(e) => self.error = Some(e),
+                    Err(e) => self.status = Some(Notice::from_message(Tone::Error, &e)),
                 }
             }
             Message::CheckLogin(service) => {
-                self.error = None;
-                self.notice.clear();
+                self.status = None;
                 self.activity = Activity::Login;
                 let engine = self.engine.clone();
                 return Task::perform(
@@ -1643,7 +1693,11 @@ impl NativeApp {
                 match result {
                     Ok(()) => {
                         self.helpers_auto_fetch_attempted = false;
-                        self.notice = format!("{} er forbundet.", service.name());
+                        self.status = Some(Notice::new(
+                            Tone::Success,
+                            format!("{} er forbundet", service.name()),
+                            "",
+                        ));
                         if self.settings_section == SettingsSection::Helpers {
                             if self
                                 .setup
@@ -1668,7 +1722,7 @@ impl NativeApp {
                     }
                     Err(e) => {
                         self.preview = None;
-                        self.error = Some(e);
+                        self.status = Some(Notice::from_message(Tone::Error, &e));
                     }
                 }
             }
@@ -1688,20 +1742,20 @@ impl NativeApp {
                 self.activity = Activity::Idle;
                 match result {
                     Ok(()) => {
-                        self.notice = format!(
-                            "Appen har glemt loginnet til {}. Log ind igen for at fortsætte.",
-                            service.name()
-                        )
+                        self.status = Some(Notice::new(
+                            Tone::Info,
+                            format!("Logget ud af {}", service.name()),
+                            "Log ind igen for at fortsætte.",
+                        ))
                     }
-                    Err(e) => self.error = Some(e),
+                    Err(e) => self.status = Some(Notice::from_message(Tone::Error, &e)),
                 }
             }
             Message::Capture => {
                 let Some(account) = self.account.clone() else {
                     return Task::none();
                 };
-                self.error = None;
-                self.notice.clear();
+                self.status = None;
                 self.activity = Activity::Capture;
                 let engine = self.engine.clone();
                 let from = self.monday;
@@ -1717,17 +1771,20 @@ impl NativeApp {
                 self.activity = Activity::Idle;
                 match result {
                     Ok(path) => {
-                        self.notice = format!(
-                            "Fejlrapporten om MitHF og DUOS er gemt i {}. Den beskriver kun, hvilke felter tjenesterne sender, og indeholder ingen navne, vagter eller kontooplysninger.",
-                            path.display()
-                        )
+                        self.status = Some(Notice::new(
+                            Tone::Success,
+                            "Fejlrapporten er gemt",
+                            format!(
+                                "Den ligger i {}. Den beskriver kun, hvilke felter MitHF og DUOS sender, og indeholder ingen navne, vagter eller kontooplysninger.",
+                                path.display()
+                            ),
+                        ))
                     }
-                    Err(e) => self.error = Some(e),
+                    Err(e) => self.status = Some(Notice::from_message(Tone::Error, &e)),
                 }
             }
             Message::ShareProblem => {
-                self.error = None;
-                self.notice.clear();
+                self.status = None;
                 self.activity = Activity::Capture;
                 let engine = self.engine.clone();
                 return Task::perform(
@@ -1742,18 +1799,26 @@ impl NativeApp {
                 self.activity = Activity::Idle;
                 match result {
                     Ok(shared) if shared.opened => {
-                        self.notice = format!(
-                            "Din browser er åbnet med et opslag, du selv kan læse igennem og sende. Oplysningerne er også gemt i {}, hvis du hellere vil sende filen.",
-                            shared.path.display()
-                        )
+                        self.status = Some(Notice::new(
+                            Tone::Success,
+                            "Opslaget er åbnet i din browser",
+                            format!(
+                                "Læs det igennem, og send det selv. Oplysningerne er også gemt i {}, hvis du hellere vil sende filen.",
+                                shared.path.display()
+                            ),
+                        ))
                     }
                     Ok(shared) => {
-                        self.notice = format!(
-                            "Browseren kunne ikke åbnes. Oplysningerne er gemt i {}. Send filen til den, der vedligeholder appen.",
-                            shared.path.display()
-                        )
+                        self.status = Some(Notice::new(
+                            Tone::Warning,
+                            "Browseren kunne ikke åbnes",
+                            format!(
+                                "Oplysningerne er gemt i {}. Send filen til den, der vedligeholder appen.",
+                                shared.path.display()
+                            ),
+                        ))
                     }
-                    Err(e) => self.error = Some(e),
+                    Err(e) => self.status = Some(Notice::from_message(Tone::Error, &e)),
                 }
             }
             Message::Preview => {
@@ -1781,7 +1846,7 @@ impl NativeApp {
                 match result {
                     Ok(preview) if preview.from == self.monday => self.preview = Some(*preview),
                     Ok(_) => {}
-                    Err(e) => self.error = Some(e),
+                    Err(e) => self.status = Some(Notice::from_message(Tone::Error, &e)),
                 }
             }
             Message::AllowRetransfer(source_key) => {
@@ -1794,8 +1859,7 @@ impl NativeApp {
                         .any(|item| item.can_allow_retransfer && item.source_key == source_key)
                 });
                 if offered {
-                    self.error = None;
-                    self.notice.clear();
+                    self.status = None;
                     self.forget_source = Some(source_key);
                 }
             }
@@ -1806,8 +1870,7 @@ impl NativeApp {
                 else {
                     return Task::none();
                 };
-                self.error = None;
-                self.notice.clear();
+                self.status = None;
                 self.activity = Activity::Recover;
                 let engine = self.engine.clone();
                 return Task::perform(
@@ -1826,13 +1889,21 @@ impl NativeApp {
                         // The approval is gone with the records it was built on.
                         self.preview = None;
                         self.needs_recheck = true;
-                        self.notice = if count == 0 {
-                            "Der var ingen lokale registreringer for vagten. Hent ugen igen, og gennemgå den.".into()
+                        self.status = Some(if count == 0 {
+                            Notice::new(
+                                Tone::Info,
+                                "Der var ingen lokale registreringer for vagten",
+                                "Vælg Kontrollér igen, og gennemgå ugen.",
+                            )
                         } else {
-                            "Appen har glemt sine egne registreringer for vagten. Intet er slettet i MitHF eller DUOS. Hent ugen igen, og godkend den på ny.".into()
-                        };
+                            Notice::new(
+                                Tone::Success,
+                                "Lokale registreringer er glemt",
+                                "Intet er slettet i MitHF eller DUOS. Vælg Kontrollér igen, og godkend ugen på ny.",
+                            )
+                        });
                     }
-                    Err(error) => self.error = Some(error),
+                    Err(error) => self.status = Some(Notice::from_message(Tone::Error, &error)),
                 }
             }
             Message::Apply => {
@@ -1862,8 +1933,7 @@ impl NativeApp {
                 self.apply_progress = Some(progress.clone());
                 self.apply_stop = Some(stop.clone());
                 self.preview = None;
-                self.error = None;
-                self.notice.clear();
+                self.status = None;
                 self.needs_recheck = false;
                 self.apply_stopping = false;
                 self.activity = Activity::Apply;
@@ -1888,19 +1958,22 @@ impl NativeApp {
                         self.apply_verified = done.mithf + done.duos;
                         if done.stopped {
                             self.needs_recheck = true;
-                            self.notice = format!(
-                                "Overførslen blev stoppet sikkert. {} af {} ændringer er verificeret. Kontrollér igen, før du overfører resten.",
-                                self.apply_verified, self.apply_total
-                            );
+                            self.status = Some(Notice::new(
+                                Tone::Warning,
+                                "Overførslen er stoppet sikkert",
+                                format!(
+                                    "{} af {} ændringer er overført. Vælg Kontrollér igen, før du overfører resten.",
+                                    self.apply_verified, self.apply_total
+                                ),
+                            ));
                         } else {
                             self.last_verified = done.verified_label.clone();
-                            self.notice = completion_summary(&done);
+                            self.status = Some(completion_notice(&done));
                         }
                     }
                     Err(failure) => {
                         self.needs_recheck = true;
-                        self.notice = failure_summary(&failure);
-                        self.error = Some(failure.message);
+                        self.status = Some(failure_notice(&failure));
                     }
                 }
                 self.apply_stopping = false;
@@ -1914,8 +1987,7 @@ impl NativeApp {
                 {
                     return Task::none();
                 }
-                self.error = None;
-                self.notice = "Søger efter opdatering …".into();
+                self.status = None;
                 self.update_manual = true;
                 return Task::perform(update::check_latest(), Message::UpdateChecked);
             }
@@ -1934,23 +2006,20 @@ impl NativeApp {
                 match result {
                     Ok(Some(offer)) => {
                         self.update_offer = Some(offer);
-                        if manual && self.notice == "Søger efter opdatering …" {
-                            self.notice.clear();
-                        }
                     }
                     Ok(None) => {
                         self.update_offer = None;
                         if manual {
-                            self.notice =
-                                format!("Du har allerede den nyeste version ({}).", app_version());
+                            self.status = Some(Notice::new(
+                                Tone::Success,
+                                "Du har den nyeste version",
+                                format!("Version {}.", app_version()),
+                            ));
                         }
                     }
                     Err(error) => {
                         if manual {
-                            self.error = Some(error);
-                            if self.notice == "Søger efter opdatering …" {
-                                self.notice.clear();
-                            }
+                            self.status = Some(Notice::from_message(Tone::Error, &error));
                         }
                     }
                 }
@@ -1959,8 +2028,7 @@ impl NativeApp {
                 let Some(offer) = self.update_offer.clone() else {
                     return Task::none();
                 };
-                self.error = None;
-                self.notice.clear();
+                self.status = None;
                 self.activity = Activity::Update;
                 self.update_frame = 0;
                 return Task::perform(
@@ -1977,13 +2045,21 @@ impl NativeApp {
                 match result {
                     Ok(ready) => {
                         self.update_offer = None;
-                        self.notice = match ready {
-                            update::ApplyOutcome::Restart(_) => "Opdateringen er hentet. Genstart appen fra ikonet i sidepanelet.".into(),
-                            update::ApplyOutcome::OpenInstaller(_) => "Opdateringen er hentet. Åbn installationsprogrammet fra ikonet i sidepanelet.".into(),
-                        };
+                        self.status = Some(Notice::new(
+                            Tone::Success,
+                            "Opdateringen er hentet",
+                            match ready {
+                                update::ApplyOutcome::Restart(_) => {
+                                    "Genstart appen fra ikonet i sidepanelet."
+                                }
+                                update::ApplyOutcome::OpenInstaller(_) => {
+                                    "Åbn installationsprogrammet fra ikonet i sidepanelet."
+                                }
+                            },
+                        ));
                         self.update_ready = Some(ready);
                     }
-                    Err(error) => self.error = Some(error),
+                    Err(error) => self.status = Some(Notice::from_message(Tone::Error, &error)),
                 }
             }
             Message::RestartUpdate => {
@@ -1993,16 +2069,22 @@ impl NativeApp {
                 match ready {
                     update::ApplyOutcome::Restart(path) => match update::restart(path) {
                         Ok(()) => return iced::exit(),
-                        Err(error) => self.error = Some(error),
+                        Err(error) => self.status = Some(Notice::from_message(Tone::Error, &error)),
                     },
                     update::ApplyOutcome::OpenInstaller(path) => {
                         #[cfg(target_os = "macos")]
                         match update::open_installer(path) {
                             Ok(()) => {
                                 self.update_ready = None;
-                                self.notice = "Installationsprogrammet er åbnet. Følg trinnene, og åbn Vagtplanlægning igen bagefter.".into();
+                                self.status = Some(Notice::new(
+                                    Tone::Info,
+                                    "Installationsprogrammet er åbnet",
+                                    "Følg trinnene, og åbn Vagtplanlægning igen bagefter.",
+                                ));
                             }
-                            Err(error) => self.error = Some(error),
+                            Err(error) => {
+                                self.status = Some(Notice::from_message(Tone::Error, &error))
+                            }
                         }
                         #[cfg(not(target_os = "macos"))]
                         let _ = path;
@@ -2014,8 +2096,7 @@ impl NativeApp {
     }
     fn invalidate(&mut self) {
         self.preview = None;
-        self.error = None;
-        self.notice.clear();
+        self.status = None;
         self.needs_recheck = false;
         self.forget_source = None;
     }
@@ -2113,12 +2194,6 @@ impl NativeApp {
             .width(Length::Fill)
             .height(Length::Fill)
             .max_width(1100);
-        if let Some(error) = &self.error {
-            page = page.push(text(error));
-        }
-        if !self.notice.is_empty() {
-            page = page.push(text(&self.notice));
-        }
         page = match self.visible_screen() {
             Screen::Home => self.home(page),
             Screen::Settings => page.push(self.settings()),
@@ -2130,24 +2205,38 @@ impl NativeApp {
         };
         if self.activity == Activity::Apply {
             page = self.apply_status(page);
-        } else if self.activity != Activity::Preview {
-            let busy = match self.activity {
-                Activity::Idle | Activity::Save | Activity::Apply | Activity::Preview => "",
-                Activity::Setup => "Indlæser opsætning …",
-                Activity::Login => "Kontakter browseren …",
-                Activity::Capture => "Forbereder fejlrapporten …",
-                Activity::Recover => "Glemmer lokale registreringer …",
-                Activity::Update => "Henter opdatering …",
-            };
-            if !busy.is_empty() {
-                page = page.push(text(busy));
-            }
         }
-        container(page)
+        let base = container(page)
             .center_x(Length::Fill)
             .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
+            .height(Length::Fill);
+        // Notices float in the bottom-right corner over the page, so showing
+        // or dismissing one never moves anything under it.
+        let mut notices = column![]
+            .spacing(8)
+            .align_x(iced::alignment::Horizontal::Right);
+        if self.visible_screen() == Screen::Home {
+            if let Some(preview) = self.preview.as_ref().filter(|p| !p.status_dismissed) {
+                notices = notices.push(super::widgets::notice_card(
+                    preview.week.status.clone(),
+                    Message::DismissWeekStatus,
+                ));
+            }
+        }
+        if let Some(status) = &self.status {
+            notices = notices.push(super::widgets::notice_card(
+                status.clone(),
+                Message::DismissStatus,
+            ));
+        }
+        iced::widget::stack![
+            base,
+            container(notices)
+                .align_right(Length::Fill)
+                .align_bottom(Length::Fill)
+                .padding(20),
+        ]
+        .into()
     }
 
     fn apply_status<'a>(&'a self, mut page: Column<'a, Message>) -> Column<'a, Message> {
@@ -2165,19 +2254,23 @@ impl NativeApp {
         } else {
             page.push(text(format!("{}.", self.apply_current)))
         };
-        page = page.push(text(
-            "Du kan trygt stoppe eller lukke appen. Den igangværende ændring gøres færdig først.",
-        ));
+        // The button already says a stop waits for the current change, so
+        // the line beside it only adds that closing the app is just as safe.
         if self.apply_stopping {
             page.push(text(
-                "Stopper sikkert efter den igangværende ændring er kontrolleret …",
+                "Stopper, når den igangværende ændring er kontrolleret …",
             ))
         } else {
             page.push(
-                button(text("Stop efter denne ændring"))
-                    .style(iced::widget::button::secondary)
-                    .padding([8, 12])
-                    .on_press(Message::StopApply),
+                row![
+                    button(text("Stop efter denne ændring"))
+                        .style(iced::widget::button::secondary)
+                        .padding([8, 12])
+                        .on_press(Message::StopApply),
+                    text("Det er også sikkert at lukke appen.").size(13),
+                ]
+                .spacing(12)
+                .align_y(iced::alignment::Vertical::Center),
             )
         }
     }
@@ -2237,12 +2330,9 @@ impl NativeApp {
         let mut body = column![].spacing(12).width(Length::Fill);
         if let Some(preview) = &self.preview {
             let week = &preview.week;
-            body = body.push(text(&week.headline).size(18));
-            if week.can_apply {
-                body = body.push(text(&week.apply_summary));
-            } else if !week.blocked_reason.is_empty() {
-                body = body.push(text(&week.blocked_reason));
-            }
+            // The week's status floats with the other notices (see `view`).
+            // Dismissed, it stays gone for this preview only; what blocks a
+            // transfer is still listed here and marked in the grid.
             if !week.attention.is_empty() {
                 body = body.push(text("Kræver opmærksomhed").size(18));
             }
@@ -2281,27 +2371,6 @@ impl NativeApp {
             if week.days.iter().any(|d| !d.blocks.is_empty()) {
                 body = body.push(super::widgets::week_grid(week));
             }
-            let standard_blocks: Vec<_> = week
-                .days
-                .iter()
-                .flat_map(|day| {
-                    day.blocks
-                        .iter()
-                        .filter(|block| block.standard_time)
-                        .map(move |block| {
-                            format!(
-                                "{} · {} · {} · standardtid",
-                                day.label, block.helper, block.time_label
-                            )
-                        })
-                })
-                .collect();
-            if !standard_blocks.is_empty() {
-                body = body.push(text("Vagter med standardtid").size(16));
-                for line in standard_blocks {
-                    body = body.push(text(line));
-                }
-            }
         }
         content.push(scrollable(body).height(Length::Fill).width(Length::Fill))
     }
@@ -2331,18 +2400,15 @@ impl NativeApp {
     }
 
     fn settings(&self) -> Element<'_, Message> {
-        let mut sidebar = column![row![
-            text("Indstillinger").size(20),
-            space::horizontal(),
-            tooltip(
-                self.circular_icon("⌂", Message::Open(Screen::Home)),
-                "Tilbage til ugen",
-                tooltip::Position::Bottom,
-            ),
-        ]
-        .spacing(8)
-        .align_y(iced::alignment::Vertical::Center),]
-        .spacing(10);
+        let mut header = row![text("Indstillinger").size(20), space::horizontal()]
+            .spacing(8)
+            .align_y(iced::alignment::Vertical::Center);
+        header = header.push(tooltip(
+            self.circular_icon("⌂", Message::Open(Screen::Home)),
+            "Tilbage til ugen",
+            tooltip::Position::Bottom,
+        ));
+        let mut sidebar = column![header].spacing(10);
         for (section, icon, label) in [
             (SettingsSection::Helpers, "👥", "Hjælpere"),
             (SettingsSection::StandardTimes, "◷", "Standardtider"),
@@ -2507,6 +2573,14 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// The shown status as one line of text, or empty when there is none.
+    fn shown(app: &NativeApp) -> String {
+        app.status
+            .as_ref()
+            .map(|status| format!("{} {}", status.title, status.detail))
+            .unwrap_or_default()
+    }
+
     fn setup_state(stage: &str) -> setup::SetupState {
         serde_json::from_value(json!({
             "stage": stage, "week_start": "2026-09-14", "calendars": [], "arrangements": [],
@@ -2534,14 +2608,14 @@ mod tests {
     fn a_local_setup_edit_keeps_the_screen_still_but_blocks_other_work() {
         let mut app = app();
         app.screen = Screen::Settings;
-        app.notice = "MitHF er forbundet.".into();
+        app.status = Some(Notice::new(Tone::Success, "MitHF er forbundet", ""));
         let _ = app.update(Message::Setup(setup::Message::Action(
             "edit",
             json!({"registration_type": "t1"}),
         )));
         assert_eq!(app.activity, Activity::Save);
         assert!(app.buttons_enabled());
-        assert_eq!(app.notice, "MitHF er forbundet.");
+        assert_eq!(shown(&app).trim(), "MitHF er forbundet");
         // Still one operation at a time.
         let _ = app.update(Message::Setup(setup::Message::Action(
             "discover",
@@ -2553,7 +2627,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_setup_action_reports_on_the_setup_panel_and_allows_another_try() {
+    fn a_failed_setup_action_reports_its_cause_and_allows_another_try() {
         let mut app = app();
         app.activity = Activity::Setup;
         app.setup.link = "https://teamup.com/ksAbc123".into();
@@ -2564,10 +2638,9 @@ mod tests {
         assert_eq!(app.setup.link, "https://teamup.com/ksAbc123");
         assert_eq!(app.setup.key, "an-api-key");
         assert_eq!(
-            app.setup.error.as_deref(),
-            Some("Kalenderlinket er ugyldigt.")
+            app.status,
+            Some(Notice::new(Tone::Error, "Kalenderlinket er ugyldigt", ""))
         );
-        assert!(app.error.is_none());
         assert_eq!(app.activity, Activity::Idle);
     }
 
@@ -2579,6 +2652,28 @@ mod tests {
         let _ = app.update(Message::Setup(setup::Message::Action("confirm", json!({}))));
         assert!(app.setup.key.is_empty());
         assert_eq!(app.activity, Activity::Apply);
+    }
+
+    /// A source check result is shown once as the app status, including when
+    /// the check confirmed the setup and the app reloads.
+    #[test]
+    fn a_source_check_result_survives_the_reload_it_triggers() {
+        let mut app = app();
+        app.activity = Activity::Setup;
+        let mut state = setup_state("ready");
+        state.result = Some(Notice::new(
+            Tone::Info,
+            "Vagter og kommentarer er kontrolleret",
+            "",
+        ));
+        let _ = app.update(Message::SetupUpdated(Ok(state)));
+        assert_eq!(app.activity, Activity::Setup);
+        assert_eq!(shown(&app).trim(), "Vagter og kommentarer er kontrolleret");
+        assert!(app
+            .setup
+            .state
+            .as_ref()
+            .is_some_and(|state| state.result.is_none()));
     }
 
     /// The fetch line follows what the task reports and disappears with the
@@ -2622,8 +2717,7 @@ mod tests {
             monday: NaiveDate::from_ymd_opt(2026, 9, 14).unwrap(),
             preview: None,
             activity: Activity::Idle,
-            notice: String::new(),
-            error: None,
+            status: None,
             last_verified: None,
             apply_progress: None,
             apply_stop: None,
@@ -2669,6 +2763,7 @@ mod tests {
             from: app.monday,
             state_path: "synthetic-account.sqlite3".into(),
             standard_times: Default::default(),
+            status_dismissed: false,
             items: vec![
                 write_item("s", "mithf.create_shift"),
                 write_item("s", "mithf.assign_helper"),
@@ -2712,8 +2807,11 @@ mod tests {
         })));
         assert_eq!(app.activity, Activity::Idle);
         assert!(app.preview.is_none());
-        assert!(app.error.is_some());
-        assert!(app.notice.contains("1 uafklaret"));
+        let status = app.status.as_ref().expect("failure notice");
+        assert_eq!(status.tone, Tone::Error);
+        assert_eq!(status.title, "Overførslen blev ikke færdig");
+        assert!(status.detail.starts_with("Uafklaret ændring "));
+        assert!(status.detail.contains("1 uafklaret"));
         assert!(app.needs_recheck);
         let _ = app.update(Message::Apply);
         assert_eq!(app.activity, Activity::Idle);
@@ -2756,7 +2854,7 @@ mod tests {
         })));
         assert_eq!(app.activity, Activity::Idle);
         assert!(app.needs_recheck);
-        assert!(app.notice.contains("stoppet sikkert"));
+        assert!(shown(&app).contains("stoppet sikkert"));
         assert!(app.last_verified.is_none());
     }
     fn conflicted(app: &NativeApp, source_key: &str) -> Preview {
@@ -2801,7 +2899,7 @@ mod tests {
         assert!(app.preview.is_none());
         assert!(app.forget_source.is_none());
         assert!(app.needs_recheck);
-        assert!(app.notice.contains("Intet er slettet i MitHF eller DUOS"));
+        assert!(shown(&app).contains("Intet er slettet i MitHF eller DUOS"));
         let _ = app.view();
     }
     #[test]
@@ -2818,7 +2916,10 @@ mod tests {
         assert_eq!(app.activity, Activity::Idle);
         assert!(app.preview.is_some());
         assert!(app.forget_source.is_none());
-        assert!(app.error.is_some());
+        assert_eq!(
+            app.status.as_ref().map(|status| status.tone),
+            Some(Tone::Error)
+        );
     }
     #[test]
     fn settings_are_reachable_from_the_week_and_revoke_a_shown_approval() {
@@ -2928,7 +3029,7 @@ mod tests {
         assert!(app.preview.is_none());
         let _ = app.update(Message::LoginsForgotten(Service::Mithf, Ok(())));
         assert_eq!(app.activity, Activity::Idle);
-        assert!(app.notice.contains("Log ind igen"));
+        assert!(shown(&app).contains("Log ind igen"));
         let _ = app.view();
     }
     #[test]
@@ -2938,7 +3039,7 @@ mod tests {
         assert_eq!(app.activity, Activity::Login);
         let _ = app.update(Message::LoginChecked(Service::Duos, Ok(())));
         assert_eq!(app.activity, Activity::Idle);
-        assert!(app.notice.contains("DUOS er forbundet"));
+        assert!(shown(&app).contains("DUOS er forbundet"));
     }
     #[test]
     fn help_and_its_diagnostics_stay_reachable_before_setup_is_finished() {
@@ -2955,7 +3056,7 @@ mod tests {
             opened: true,
         })));
         assert_eq!(app.activity, Activity::Idle);
-        assert!(app.notice.contains("fejlrapport.json"));
+        assert!(shown(&app).contains("fejlrapport.json"));
 
         // Without a browser the file is still there to send by hand.
         app.activity = Activity::Capture;
@@ -2963,7 +3064,7 @@ mod tests {
             path: "fejlrapport.json".into(),
             opened: false,
         })));
-        assert!(app.notice.contains("Send filen"));
+        assert!(shown(&app).contains("Send filen"));
     }
     fn newer_offer() -> update::Offer {
         update::offer_from_release(
@@ -3017,16 +3118,16 @@ mod tests {
         let mut app = app();
         app.activity = Activity::Apply;
         let _ = app.update(Message::PeriodicUpdateCheck);
-        assert!(app.notice.is_empty());
+        assert!(app.status.is_none());
 
         app.activity = Activity::Idle;
         let _ = app.update(Message::PeriodicUpdateCheck);
-        assert!(app.notice.is_empty());
+        assert!(app.status.is_none());
         assert!(!app.update_manual);
 
         app.update_offer = Some(newer_offer());
         let _ = app.update(Message::PeriodicUpdateCheck);
-        assert!(app.notice.is_empty());
+        assert!(app.status.is_none());
         assert!(app.update_offer.is_some());
     }
     #[test]
@@ -3077,7 +3178,10 @@ mod tests {
         assert!(app.preview.is_none());
         let _ = app.update(Message::PreviewLoaded(Ok(Box::new(old))));
         assert!(app.preview.is_none());
-        assert!(app.notice.contains("verificeret"));
+        assert_eq!(
+            shown(&app).trim(),
+            "1 vagt overført til MitHF og 1 registrering overført til DUOS"
+        );
         assert_eq!(app.last_verified.as_deref(), Some("20. sep kl. 20.00"));
         let _ = app.view();
     }
@@ -3119,9 +3223,10 @@ mod tests {
         let _ = app.update(Message::Applied(Ok(done())));
         assert_eq!(app.activity, Activity::Idle);
         assert!(app.apply_progress.is_none());
-        assert!(app.notice.contains("MitHF"));
-        assert!(app.notice.contains("DUOS"));
-        assert!(app.notice.contains("20. sep kl. 20.00"));
+        assert!(shown(&app).contains("MitHF"));
+        assert!(shown(&app).contains("DUOS"));
+        // The week shows the last transfer time; the notice does not repeat it.
+        assert!(!shown(&app).contains("20. sep"));
     }
     #[test]
     fn step_labels_stay_plain_and_count_by_destination() {
@@ -3131,7 +3236,38 @@ mod tests {
         assert_eq!(verb_of(Outcome::WouldUpdate), "Opdaterer");
         assert_eq!(short_date_da(28, 8), "28. sep");
         assert_eq!(progress_line(1, 2), "1 af 2 ændringer overført.");
-        assert!(completion_summary(&done()).contains("Seneste overførsel: 20. sep kl. 20.00."));
+    }
+    #[test]
+    fn a_completed_transfer_names_each_destination_with_its_own_count() {
+        let title = |mithf, duos| {
+            completion_notice(&ApplyDone {
+                mithf,
+                duos,
+                verified_label: Some("20. sep kl. 20.00".into()),
+                stopped: false,
+            })
+            .title
+        };
+        assert_eq!(title(1, 0), "1 vagt overført til MitHF");
+        assert_eq!(title(0, 3), "3 registreringer overført til DUOS");
+        assert_eq!(
+            title(2, 1),
+            "2 vagter overført til MitHF og 1 registrering overført til DUOS"
+        );
+        assert_eq!(title(0, 0), "Ingen ændringer overført");
+    }
+    #[test]
+    fn a_dismissed_week_status_stays_dismissed_until_the_next_preview() {
+        let mut app = app();
+        app.preview = Some(preview(&app, true));
+        // Dismissing is only text, so it works while other work is running.
+        app.activity = Activity::Login;
+        let _ = app.update(Message::DismissWeekStatus);
+        assert!(app.preview.as_ref().is_some_and(|p| p.status_dismissed));
+        app.activity = Activity::Preview;
+        let _ = app.update(Message::PreviewLoaded(Ok(Box::new(preview(&app, true)))));
+        assert!(app.preview.as_ref().is_some_and(|p| !p.status_dismissed));
+        let _ = app.view();
     }
     #[test]
     fn verification_time_uses_the_configured_timezone() {
@@ -3198,11 +3334,11 @@ mod tests {
                            "action": "Ret konflikten i MitHF.",
                            "source_key": "shift-b",
                            "can_allow_retransfer": false}],
-            "headline": "1 punkt kræver opmærksomhed, før ugen kan overføres.",
-            "notice": "", "summary": [],
+            "status": {"tone": "warning", "title": "Ugen kan ikke overføres endnu",
+                       "detail": "Løs punktet herunder først."},
+            "summary": [],
             "apply_summary": "Der er ingen ændringer at overføre.",
-            "can_apply": false, "blocked_reason": "Løs punkterne under Kræver opmærksomhed først.",
-            "destination_read": true,
+            "can_apply": false, "destination_read": true,
         }))
         .expect("week");
         let mut app = app();
@@ -3212,6 +3348,7 @@ mod tests {
             from: app.monday,
             state_path: "synthetic-account.sqlite3".into(),
             standard_times: Default::default(),
+            status_dismissed: false,
             items: vec![],
         });
         let _ = app.view();

@@ -57,6 +57,55 @@ pub struct Attention {
     pub can_allow_retransfer: bool,
 }
 
+/// How a notice reads at a glance. The card shows it as an icon and text as
+/// well as a colour, so it never depends on colour alone.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Tone {
+    #[default]
+    Info,
+    Success,
+    Warning,
+    Error,
+}
+
+/// One status or action result: a short outcome and, only when needed, the
+/// next step. The detail never restates the title.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct Notice {
+    pub tone: Tone,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+}
+
+impl Notice {
+    pub fn new(tone: Tone, title: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            tone,
+            title: title.into(),
+            detail: detail.into(),
+        }
+    }
+
+    /// A Danish message from the core or the engine. They are written as
+    /// "Outcome. Next step.", so the first sentence is the title and the rest
+    /// the detail. A sentence ends where the next word starts with a capital
+    /// or a count ("… 3 hjælpere. 1 vagt …"), but not after a day number, so
+    /// "23. sep" stays whole.
+    pub fn from_message(tone: Tone, message: &str) -> Self {
+        let message = message.trim();
+        let end = message.match_indices(". ").map(|(at, _)| at).find(|&at| {
+            !message[..at].ends_with(|c: char| c.is_ascii_digit())
+                && message[at + 2..].starts_with(|c: char| c.is_uppercase() || c.is_ascii_digit())
+        });
+        match end {
+            Some(at) => Self::new(tone, &message[..at], message[at + 2..].trim()),
+            None => Self::new(tone, message.strip_suffix('.').unwrap_or(message), ""),
+        }
+    }
+}
+
 /// The readable week: grid, attention items and the exact approval summary.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Week {
@@ -64,18 +113,15 @@ pub struct Week {
     pub days: Vec<Day>,
     #[serde(default)]
     pub attention: Vec<Attention>,
+    /// The week's one status, shown as a notice above the grid.
     #[serde(default)]
-    pub headline: String,
-    #[serde(default)]
-    pub notice: String,
+    pub status: Notice,
     #[serde(default)]
     pub summary: Vec<String>,
     #[serde(default)]
     pub apply_summary: String,
     #[serde(default)]
     pub can_apply: bool,
-    #[serde(default)]
-    pub blocked_reason: String,
     #[serde(default)]
     pub destination_read: bool,
 }
@@ -99,9 +145,10 @@ mod tests {
                            "explanation": "…", "action": "…",
                            "source_key": "cal:event:2026-09-14T07:30:00+02:00",
                            "can_allow_retransfer": true}],
-            "headline": "Ugen er klar til overførsel.", "notice": "",
+            "status": {"tone": "info", "title": "Ugen er klar til overførsel",
+                       "detail": "Overfører …"},
             "summary": ["1 ny vagt i MitHF"], "apply_summary": "Overfører …",
-            "can_apply": true, "blocked_reason": "", "destination_read": true,
+            "can_apply": true, "destination_read": true,
         }))
         .unwrap();
         assert!(week.can_apply);
@@ -109,5 +156,27 @@ mod tests {
         assert_eq!(week.days[0].blocks[0].helper_color, "#4770d8");
         assert_eq!(week.attention.len(), 1);
         assert!(week.attention[0].can_allow_retransfer);
+    }
+
+    #[test]
+    fn a_message_splits_into_outcome_and_next_step() {
+        let notice = Notice::from_message(
+            Tone::Error,
+            "MitHF kunne ikke læses. Log ind i MitHF igen, og prøv igen.",
+        );
+        assert_eq!(notice.title, "MitHF kunne ikke læses");
+        assert_eq!(notice.detail, "Log ind i MitHF igen, og prøv igen.");
+        let single = Notice::from_message(Tone::Info, "Tilslut vagtkilden først.");
+        assert_eq!(
+            (single.title.as_str(), single.detail.as_str()),
+            ("Tilslut vagtkilden først", "")
+        );
+        let dated = Notice::from_message(Tone::Info, "Hentet 23. sep. Intet ændret.");
+        assert_eq!(dated.title, "Hentet 23. sep");
+        let counted = Notice::from_message(
+            Tone::Info,
+            "Regnearket er læst: 12 vagter og 3 hjælpere. 1 vagt skal rettes, før deres uge kan overføres.",
+        );
+        assert_eq!(counted.title, "Regnearket er læst: 12 vagter og 3 hjælpere");
     }
 }

@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use teamup_shift_sync_core::live::Service;
 use teamup_shift_sync_core::sheets::SheetLayout;
 use teamup_shift_sync_core::standard_time::StandardTimes;
+use teamup_shift_sync_gui::protocol::Notice;
 
 use crate::template::{self, Template};
 
@@ -49,7 +50,11 @@ pub struct SetupState {
     pub arrangement: String,
     pub registration_type: String,
     pub account: String,
-    pub notice: String,
+    /// What the action that produced this state found, when it has something
+    /// to report beyond the state itself. The engine sets it; the app moves it
+    /// to its own status notice.
+    #[serde(skip)]
+    pub result: Option<Notice>,
     pub has_credentials: bool,
     #[serde(default)]
     pub other_source_has_credentials: bool,
@@ -129,6 +134,8 @@ pub struct SetupUi {
     pub link: String,
     pub key: String,
     pub template: Template,
+    /// Why the typed standard times cannot be saved. Shown beside the fields;
+    /// action results and errors go to the app's status notice instead.
     pub error: Option<String>,
     pub standard_default: String,
     pub standard_days: [String; 7],
@@ -243,10 +250,7 @@ impl SetupUi {
     }
 
     pub fn view(&self, section: Section) -> Element<'_, Message> {
-        let mut content = column![].spacing(8);
-        if let Some(error) = &self.error {
-            content = content.push(text(error));
-        }
+        let content = column![].spacing(8);
         // The form stays on screen while an action runs, so a quick save does
         // not blink. The app ignores input until the action has finished and
         // shows its own status line below the page.
@@ -258,22 +262,16 @@ impl SetupUi {
                 ))
                 .into();
         };
-        if !state.notice.is_empty() {
-            content = content.push(text(&state.notice));
-        }
-        if section == Section::Helpers && state.stage == "source" {
-            return content
-                .push(text("Tilslut en vagtplan under Udbydere først."))
-                .into();
-        }
         if section == Section::Integrations {
             return content.push(self.provider_groups(state)).into();
         }
+        // Only the helpers section is left, and it needs a connected source.
         if state.stage == "source" {
             return content
                 .push(text("Tilslut en vagtplan under Udbydere først."))
                 .into();
         }
+        let mut content = content;
         if state.mappings.is_empty() {
             content = content.push(text(
                 "Hjælperne hentes automatisk, når forbindelserne er klar.",
@@ -331,9 +329,8 @@ impl SetupUi {
                     Message::Action("retry_source", json!({})),
                 ));
             }
-            content = content
-                .push(text("Forbindelsen er gemt.").size(13))
-                .push(resume);
+            // The source row already says whether it is connected.
+            content = content.push(resume);
         }
         content.into()
     }
@@ -386,12 +383,11 @@ impl SetupUi {
                         .padding(12),
                 )
                 .push(text("Del arket som »Alle med linket kan se«.").size(12));
-            if self.template.is_empty() && state.sheet_layout.is_some() {
-                content = content.push(
-                    text("Vagtens opbygning er gemt. Indsæt en ny vagt for at ændre den.").size(13),
-                );
-            }
-            content = content.push(self.template.view().map(Message::Template));
+            content = content.push(
+                self.template
+                    .view(state.sheet_layout.is_some())
+                    .map(Message::Template),
+            );
             content = content.push(
                 primary_button("Tilslut regneark", Message::ConnectSheets).on_press_maybe(
                     self.sheet_layout()
@@ -742,7 +738,7 @@ mod tests {
             arrangement: String::new(),
             registration_type: String::new(),
             account: String::new(),
-            notice: String::new(),
+            result: None,
             has_credentials: true,
             other_source_has_credentials: false,
         }
