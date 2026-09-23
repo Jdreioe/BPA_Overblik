@@ -133,7 +133,7 @@ impl SheetLayout {
         };
         let parsed = parse_cells(cells, &layout, "template", zone, today)?;
         if let Some(issue) = parsed.issues.first() {
-            return Err(issue.reason);
+            return Err(issue.kind.reason());
         }
         if parsed.shifts.len() != 1 {
             return Err("Kopiér kun cellerne for én vagt.");
@@ -149,14 +149,76 @@ impl SheetLayout {
     }
 }
 
-/// Coordinates and a reason are safe to display. Cell contents stay private.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IssueKind {
+    MissingHelper,
+    MissingTime,
+    UnreadableTime,
+    UnreadableSps,
+    ImpossibleDate,
+    RepeatedDate,
+}
+
+impl IssueKind {
+    /// A short reason without names, for checking a pasted template.
+    pub fn reason(self) -> &'static str {
+        match self {
+            IssueKind::MissingHelper => "Hjælperen mangler.",
+            IssueKind::MissingTime => "Tiden mangler.",
+            IssueKind::UnreadableTime => "Tiden skal være som 8-24 eller 08:30-16:00.",
+            IssueKind::UnreadableSps => "SPS-feltet følger ikke skabelonens skrivemåde.",
+            IssueKind::ImpossibleDate => "Datoen findes ikke.",
+            IssueKind::RepeatedDate => "Datoen står ved flere vagter i regnearket.",
+        }
+    }
+}
+
+/// A shift the sheet does not describe clearly enough to transfer. Cell
+/// contents other than the helper's name are never kept.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SheetIssue {
     pub cell: String,
-    pub reason: &'static str,
+    pub kind: IssueKind,
     /// The shift's date, when it could be read. `None` means the issue could
     /// belong to any week.
     pub date: Option<NaiveDate>,
+    pub helper: Option<String>,
+}
+
+impl SheetIssue {
+    /// Name the helper and date, so the shift can be found without looking
+    /// up a cell. Only an impossible date, with neither, points at its cell.
+    /// Shown on screen only; it names a helper, so never put it in a report.
+    pub fn message(&self, sps_label: &str) -> String {
+        let Some(date) = self.date else {
+            return format!("Datoen i celle {} findes ikke.", self.cell);
+        };
+        let day = format!("d. {}/{}", date.day(), date.month());
+        let shift = match &self.helper {
+            Some(helper) if helper.ends_with(['s', 'x', 'z', 'S', 'X', 'Z']) => {
+                format!("{helper}' vagt {day}")
+            }
+            Some(helper) => format!("{helper}s vagt {day}"),
+            None => format!("Vagten {day}"),
+        };
+        match self.kind {
+            IssueKind::MissingHelper => format!("Vagten {day} mangler en hjælper."),
+            IssueKind::MissingTime => format!("{shift} mangler tid."),
+            IssueKind::UnreadableTime => format!(
+                "{shift} har en tid, der ikke kan læses. Skriv den som 8-24 eller 08:30-16:00."
+            ),
+            IssueKind::UnreadableSps => {
+                let label = if sps_label.is_empty() { "" } else { " " };
+                format!(
+                    "{shift} har SPS-timer, der ikke kan læses. Skriv dem som »{sps_label}{label}8-10«."
+                )
+            }
+            IssueKind::RepeatedDate => {
+                format!("Der står flere vagter {day}. Hver dato må kun have én vagt.")
+            }
+            IssueKind::ImpossibleDate => format!("Datoen i celle {} findes ikke.", self.cell),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -248,8 +310,9 @@ pub fn parse_cells(
                 }
                 None if looks_like_date(value) => parsed.issues.push(SheetIssue {
                     cell: a1(row, col),
-                    reason: "Datoen findes ikke.",
+                    kind: IssueKind::ImpossibleDate,
                     date: None,
+                    helper: None,
                 }),
                 None => {}
             }
@@ -278,8 +341,9 @@ pub fn parse_cells(
                 } else {
                     parsed.issues.push(SheetIssue {
                         cell: reading.date_cell,
-                        reason: "Datoen står ved flere vagter i regnearket.",
+                        kind: IssueKind::RepeatedDate,
                         date: Some(reading.date),
+                        helper: None,
                     });
                 }
             }
@@ -335,13 +399,14 @@ fn read_shift(
         TimeCells::Range { .. } => split_range(time),
         TimeCells::Separate { .. } => (time, end),
     };
-    let issue = |offset: Option<CellOffset>, reason| SheetIssue {
+    let issue = |offset: Option<CellOffset>, kind| SheetIssue {
         cell: offset.map_or_else(String::new, |o| position_of(date_row, date_col, o)),
-        reason,
+        kind,
         date: Some(date),
+        helper: (!helper.is_empty()).then(|| helper.to_owned()),
     };
     let result = if helper.is_empty() {
-        Err(issue(offsets[0], "Hjælperen mangler."))
+        Err(issue(offsets[0], IssueKind::MissingHelper))
     } else if let Some((starts_at, ends_at)) = interval(date, start_text, end_text, zone) {
         match sps_notes(sps, &layout.sps_label) {
             Some(notes) => {
@@ -360,18 +425,12 @@ fn read_shift(
                     source_version: None,
                 })
             }
-            None => Err(issue(
-                layout.sps,
-                "SPS-feltet følger ikke skabelonens skrivemåde.",
-            )),
+            None => Err(issue(layout.sps, IssueKind::UnreadableSps)),
         }
     } else if start_text.is_empty() || end_text.is_empty() {
-        Err(issue(offsets[1], "Tiden mangler."))
+        Err(issue(offsets[1], IssueKind::MissingTime))
     } else {
-        Err(issue(
-            offsets[1],
-            "Tiden skal være som 8-24 eller 08:30-16:00.",
-        ))
+        Err(issue(offsets[1], IssueKind::UnreadableTime))
     };
     Some(Reading {
         result,
@@ -578,7 +637,10 @@ mod tests {
         .unwrap();
         let parsed = parse_cells(&sheet, &layout, "sheet", TZ, day(2026, 9, 21)).unwrap();
         assert_eq!(parsed.shifts.len(), 1);
-        assert_eq!(parsed.issues[0].reason, "Tiden mangler.");
+        assert_eq!(
+            parsed.issues[0].message("SPS"),
+            "Ninkes vagt d. 22/9 mangler tid."
+        );
         assert_eq!(
             parsed
                 .helpers
@@ -609,6 +671,34 @@ mod tests {
         assert!(parsed.issues.is_empty());
         assert_eq!(parsed.shifts.len(), 2);
         assert_eq!(parsed.shifts[1].event_id, "20260922");
+    }
+
+    #[test]
+    fn issues_name_the_helper_and_date_instead_of_a_cell() {
+        let issue = |kind, helper: Option<&str>, date| SheetIssue {
+            cell: "Q4".into(),
+            kind,
+            date,
+            helper: helper.map(str::to_owned),
+        };
+        let sunday = Some(day(2026, 9, 27));
+        assert_eq!(
+            issue(IssueKind::MissingTime, Some("Zain"), sunday).message("SPS"),
+            "Zains vagt d. 27/9 mangler tid."
+        );
+        assert_eq!(
+            issue(IssueKind::UnreadableSps, Some("Jonas"), sunday).message("SPS"),
+            "Jonas' vagt d. 27/9 har SPS-timer, der ikke kan læses. Skriv dem som »SPS 8-10«."
+        );
+        assert_eq!(
+            issue(IssueKind::MissingHelper, None, sunday).message("SPS"),
+            "Vagten d. 27/9 mangler en hjælper."
+        );
+        // Without a date there is nothing else to point at.
+        assert_eq!(
+            issue(IssueKind::ImpossibleDate, None, None).message("SPS"),
+            "Datoen i celle Q4 findes ikke."
+        );
     }
 
     #[test]

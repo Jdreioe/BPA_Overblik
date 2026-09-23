@@ -57,8 +57,10 @@ shift per date is supported.
 
 Setup needs at least one filled shift to discover helper names. Each source
 helper must be mapped to a MitHF helper before confirmation. An unreadable
-cell, or a date that appears twice, blocks every week it can touch and reports
-its coordinate without its contents; other weeks still work, and setup skips it.
+cell, or a date that appears twice, blocks every week it can touch; other weeks
+still work, and setup skips it. The message names the helper and date, such as
+"Zains vagt d. 27/9 mangler tid.", and only an impossible date points at its
+cell. These messages are shown on screen only and never go into a report.
 A shift's identity is its date. Editing cells in place updates the same
 shift. Moving a shift to another date is treated like deleting and
 recreating a TeamUp event: the new position is a new shift, and the app never

@@ -188,8 +188,8 @@ pub(crate) async fn read(
         .find(|issue| touches_week(issue, from, to))
     {
         return Err(format!(
-            "Regnearket kræver rettelse i celle {}. {} Intet er overført.",
-            issue.cell, issue.reason
+            "{} Ret det i regnearket. Intet er overført.",
+            issue.message(&access.layout.sps_label)
         ));
     }
     week_shifts(parsed.shifts, zone, from, to)
@@ -227,7 +227,7 @@ fn week_shifts(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sheets::{CellOffset, TimeCells};
+    use crate::sheets::{CellOffset, IssueKind, TimeCells};
 
     /// Date, helper two rows below it, time three rows below it.
     fn layout() -> SheetLayout {
@@ -294,8 +294,9 @@ mod tests {
         let day = |d| NaiveDate::from_ymd_opt(2026, 11, d);
         let issue = |date| SheetIssue {
             cell: "A1".into(),
-            reason: "",
+            kind: IssueKind::MissingTime,
             date,
+            helper: None,
         };
         let (from, to) = (day(9).unwrap(), day(15).unwrap());
         // Sunday's shift can run past midnight into Monday.
