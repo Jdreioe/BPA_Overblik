@@ -468,7 +468,7 @@ async fn read_duos(
     let mut pages = 0;
     let mut skip = 0;
     loop {
-        let response = browser.request(Service::Duos, "search", json!({"skip":skip,"take":100,"includeFields":["id","portfolioId","helperId","dutyTypeId","startDate","endDate","statusId"]})).await?;
+        let response = browser.request(Service::Duos, "search", json!({"skip":skip,"take":500,"includeFields":["id","portfolioId","helperId","dutyTypeId","startDate","endDate","statusId"]})).await?;
         let page = rows(&response["data"])?;
         pages += 1;
         let has_more = response["hasMore"].as_bool().ok_or(INVALID)?;
