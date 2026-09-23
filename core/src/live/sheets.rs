@@ -188,7 +188,7 @@ pub(crate) async fn read(
         .find(|issue| touches_week(issue, from, to))
     {
         return Err(format!(
-            "{} Ret det i regnearket. Intet er overført.",
+            "{} Ret det i regnearket, så kan ugen overføres.",
             issue.message(&access.layout.sps_label)
         ));
     }

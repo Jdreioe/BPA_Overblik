@@ -81,7 +81,7 @@ pub async fn read_week(
 pub struct LiveError(pub &'static str);
 
 const INVALID: LiveError = LiveError(
-    "Tjenesten returnerede ufuldstændige eller ugyldige data. Prøv igen; intet er overført.",
+    "Tjenesten svarede ikke som forventet. Prøv igen om lidt – der er ikke ændret noget.",
 );
 
 fn rows(value: &Value) -> Result<&[Value], LiveError> {
