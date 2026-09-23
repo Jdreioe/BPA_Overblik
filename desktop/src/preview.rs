@@ -345,6 +345,7 @@ pub fn build_week(
                 } else {
                     String::new()
                 },
+                standard_time: shift.standard_time,
                 continues_before: false,
                 continues_after: false,
                 details,

@@ -988,6 +988,7 @@ mod tests {
             state_path: "state.sqlite3".into(),
             helper_names: BTreeMap::new(),
             helper_colors: BTreeMap::new(),
+            standard_times: Default::default(),
         }
     }
 

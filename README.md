@@ -38,10 +38,28 @@ cargo run -p teamup-shift-sync-gui
 ```
 
 Connect TeamUp or Google Sheets, log in to MitHF, optionally enable DUOS,
-confirm helpers, and review the week. Credentials live in the OS credential store;
+map helpers, and review the week. Credentials live in the OS credential store;
 setup and sync history live in the per-user application data directory
 (`TEAMUP_SHIFT_SYNC_DATA_DIR` overrides it). Do not commit API keys, `setup.json`
 or browser session data.
+
+In **Indstillinger → Standardtider**, enter a shared shift time such as `6-22` if shifts
+may have no times of their own. Each weekday can use that time, override it
+(for example `8-20`), or say `ingen` to have no standard that day. Leaving the
+shared field empty means there is no standard unless a weekday overrides it.
+Both sources use the same rule: a single-day TeamUp all-day event on a confirmed
+helper calendar, or a Sheets shift with a helper and an empty time field, uses
+that date's standard. A Sheets row with separate start and end cells uses it
+only when both cells are empty. The preview marks these shifts `standardtid`.
+An unset weekday, a multi-day TeamUp all-day event, or a clock time invalid
+on a daylight-saving transition requires correction before transfer.
+Reminder titles remain excluded. Ordinary timed shifts keep their own hours.
+Valid times save automatically. Changing the setting revokes approval of the
+currently shown week. **Indstillinger** opens on **Hjælpere**; use its sidebar
+for **Udbydere** and **Standardtider**. Under **Udbydere**, the **Vagtplan**
+group holds the shift source (only one active at a time) and the **Løn** group
+the MitHF and DUOS services, each with its own login. DUOS registration always
+uses the ordinary shift type.
 
 The desktop needs a system Chromium, or the `TEAMUP_BROWSER_PATH` executable.
 It never downloads a browser.

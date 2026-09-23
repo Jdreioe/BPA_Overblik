@@ -29,6 +29,7 @@ fn shift(starts_at: &str, ends_at: &str, notes: &str, comment: Option<&str>) -> 
             .collect(),
         recurrence_start: None,
         source_version: None,
+        standard_time: false,
     }
 }
 

@@ -10,10 +10,10 @@ Fixture previews are CLI-only; the desktop app never opens example data.
    including each event's comments. Account-only, password-protected and
    restricted links need a shared link with suitable access from the calendar
    owner. Empty weeks cannot prove comment visibility; later previews check it.
-2. Sign in to MitHF and, if SPS registration is enabled, DUOS in their app-managed browsers. Fetch helpers and
-   arrangements after login completes.
-3. If DUOS is enabled, choose an active SPS arrangement and registration type. A unique choice
-   is a proposal requiring confirmation. Multiple MitHF customers or selectable
+2. Under **Indstillinger → Udbydere**, sign in to MitHF under **Løn**, and, if SPS registration is enabled, to DUOS in its own pane. Each pane has **Log ind**, **Check forbindelse** and **Log ud**.
+   The app fetches helpers and arrangements on the first **Hjælpere** visit after the connections are ready. Use its round refresh icon to fetch them again.
+3. If DUOS is enabled, choose an active SPS arrangement. The registration type
+   is always the ordinary one. Multiple MitHF customers or selectable
    grants block setup because the existing adapter does not validate arbitrary
    customer/grant combinations.
 4. Review source, MitHF and, when enabled, DUOS names together. Unique exact names are proposed;
@@ -22,9 +22,9 @@ Fixture previews are CLI-only; the desktop app never opens example data.
    dropdown; users select an existing entry and never type an employee number.
    MitHF duplicate names block confirmation because its current assignment
    read-back cannot distinguish them safely.
-5. Confirm the customer, grant, enabled DUOS choices and helpers.
-   The app re-reads discovery before saving confirmation and opens this week's
-   live preview. This flow does not create or approve registrations.
+5. Choices and exclusions save as they change. When the mappings are valid, the
+   app re-reads the services and activates the setup automatically. Review the
+   week before any transfer. This flow does not create or approve registrations.
 
 Closing the app preserves submitted credentials, discovery and each dropdown
 or exclusion edit. Failed discovery can be retried.
@@ -61,6 +61,25 @@ cell, or a date that appears twice, blocks every week it can touch; other weeks
 still work, and setup skips it. The message names the helper and date, such as
 "Zains vagt d. 27/9 mangler tid.", and only an impossible date points at its
 cell. These messages are shown on screen only and never go into a report.
+
+## Standard shift time
+
+Under **Indstillinger → Standardtider**, enter a common time such as `6-22` for days where a
+shift has no hours of its own. Leave a weekday field empty to inherit that
+time, enter another range to override it, or enter `ingen` to clear it for that
+weekday. The common field may be empty if only some weekdays need a standard.
+Ranges accept `8-24`, `08:30-16:00`, and overnight hours such as `22-8`.
+The app uses Copenhagen local time and refuses ambiguous or nonexistent times
+at daylight-saving changes.
+
+A TeamUp all-day event on exactly one date and a confirmed helper calendar uses
+that date's standard. A multi-day all-day event needs its own times before the
+week can be transferred. A Sheets shift with a helper and no time uses the
+standard; when start and end are separate cells, both must be empty. A weekday
+without a standard is reported with the shift date. The week preview marks
+every such shift `standardtid`. The ordinary reminder, meeting and SPS rules
+still apply. Valid times save automatically, and a changed standard requires a
+fresh week review.
 A shift's identity is its date. Editing cells in place updates the same
 shift. Moving a shift to another date is treated like deleting and
 recreating a TeamUp event: the new position is a new shift, and the app never
@@ -111,9 +130,9 @@ current user's application-data directory and inherited user ACLs. Browser
 profiles remain inside that protected directory. Setup values never go into
 the repository.
 
-Before confirmation and every live preview, the app checks calendars, helper
+Before activating changed mappings and every live preview, the app checks calendars, helper
 IDs and names, active employment, the selected arrangement and type, and the
-MitHF customer/grant. Changes require renewed confirmation. Each confirmed
+MitHF customer/grant. Changes require a fresh check. Each confirmed
 account/mapping combination uses a separate SQLite state filename. Credentials,
 response bodies, names and URLs are omitted from error diagnostics.
 

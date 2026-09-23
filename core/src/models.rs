@@ -24,6 +24,13 @@ pub struct SourceShift {
     pub comments: Vec<SourceComment>,
     pub recurrence_start: Option<DateTime<FixedOffset>>,
     pub source_version: Option<String>,
+    /// The source supplied no hours, so setup supplied this interval.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub standard_time: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 impl SourceShift {

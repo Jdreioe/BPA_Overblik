@@ -9,7 +9,7 @@ mod sheets;
 mod teamup;
 mod timing;
 
-pub use browser::{forget_logins, BrowserSessions, Service, Visibility};
+pub use browser::{forget_login, BrowserSessions, Service, Visibility};
 pub use capture::read_shapes;
 pub use config::{load_saved_setup, LiveConfig};
 pub use destinations::LiveDestinations;
@@ -29,6 +29,8 @@ pub enum SourceReadError {
     Service(#[from] LiveError),
     #[error("{0}")]
     Sheet(String),
+    #[error("{0}")]
+    Review(String),
 }
 
 /// Read the selected source, preserving the same SourceShift contract for
@@ -39,13 +41,17 @@ pub async fn read_source(
     to: NaiveDate,
 ) -> Result<Vec<SourceShift>, SourceReadError> {
     if let Some(sheet) = &config.sheet {
-        sheets::read(sheet, config.planning.timezone, from, to)
-            .await
-            .map_err(SourceReadError::Sheet)
+        sheets::read(
+            sheet,
+            config.planning.timezone,
+            from,
+            to,
+            &config.standard_times,
+        )
+        .await
+        .map_err(SourceReadError::Sheet)
     } else {
-        teamup::read_teamup(config, from, to)
-            .await
-            .map_err(Into::into)
+        teamup::read_teamup(config, from, to).await
     }
 }
 

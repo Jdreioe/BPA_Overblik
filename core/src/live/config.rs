@@ -8,6 +8,7 @@ use super::{
     sheets::{parse_link, SheetAccess},
     text, LiveError, INVALID,
 };
+use crate::standard_time::StandardTimes;
 use crate::{HelperMapping, PlanningConfig};
 use serde_json::{json, Value};
 
@@ -24,6 +25,7 @@ pub struct LiveConfig {
     pub state_path: PathBuf,
     pub helper_names: BTreeMap<String, String>,
     pub helper_colors: BTreeMap<String, String>,
+    pub standard_times: StandardTimes,
 }
 
 impl LiveConfig {
@@ -166,6 +168,14 @@ fn config_from_setup(
         )
     };
     let hash = account_scope(&setup, &scope_source)?;
+    let standard_times: StandardTimes = serde_json::from_value(
+        setup
+            .get("standard_times")
+            .cloned()
+            .unwrap_or_else(|| json!({})),
+    )
+    .map_err(|_| LiveError("De gemte standardtider er ugyldige."))?;
+    standard_times.validate().map_err(LiveError)?;
     let planning = PlanningConfig {
         timezone: setup["timezone"]
             .as_str()
@@ -204,6 +214,7 @@ fn config_from_setup(
         .collect();
     Ok(LiveConfig {
         helper_colors,
+        standard_times,
         planning,
         calendar,
         api_key,

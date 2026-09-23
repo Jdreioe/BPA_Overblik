@@ -84,6 +84,37 @@ fn grid_lanes(blocks: &[Block]) -> Vec<Vec<&Block>> {
     lanes
 }
 
+/// One labelled settings block: a heading row above a bordered box holding
+/// that section's controls. The heading is an element so a group can carry
+/// an action beside its title.
+pub fn group<'a, M: 'a>(
+    heading: impl Into<Element<'a, M>>,
+    content: impl Into<Element<'a, M>>,
+) -> Element<'a, M> {
+    column![
+        heading.into(),
+        container(content.into())
+            .padding(12)
+            .width(Length::Fill)
+            .style(group_box),
+    ]
+    .spacing(6)
+    .width(Length::Fill)
+    .into()
+}
+
+fn group_box(theme: &iced::Theme) -> container::Style {
+    let palette = theme.extended_palette();
+    container::Style {
+        border: iced::Border {
+            color: palette.background.strong.color,
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        ..container::Style::default()
+    }
+}
+
 /// Seven day columns with each shift drawn over the hours it covers.
 pub fn week_grid<'a, M: 'a>(week: &'a Week) -> Element<'a, M> {
     let mut hours = column![].width(Length::Fixed(28.0));
@@ -162,6 +193,9 @@ fn block_body<'a, M: 'a>(block: &'a Block) -> Element<'a, M> {
     }
     if !block.sps_label.is_empty() {
         marks.push("◆ SPS");
+    }
+    if block.standard_time {
+        marks.push("standardtid");
     }
     if !block.part_label.is_empty() {
         marks.push(&block.part_label);

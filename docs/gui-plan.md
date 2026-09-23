@@ -85,10 +85,11 @@ writes remain and allow work to stop safely between operations.
 
 ## Secondary screens
 
-- **Indstillinger:** reconnect services, change the calendar, edit helper
-  mappings and arrangement choices. Scope local state to the connected accounts
+- **Indstillinger:** the providers tab (shift source under Vagtplan, MitHF
+  and DUOS under Løn, each with its own login), helper mappings and
+  arrangement choices. Scope local state to the connected accounts
   so switching accounts cannot reuse another account's approvals or sync history.
-- **Hjælp:** short Danish guidance and explicit export of redacted diagnostics.
+- **Support:** short Danish guidance and explicit export of redacted diagnostics.
   Never include tokens, cookies, calendar capability links, names or shift text.
 - **Recovery:** on a conflict caused by a manually deleted destination entry,
   offer "Tillad overførsel igen" for that shift. Explain that it forgets local
