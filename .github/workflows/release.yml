@@ -5,7 +5,9 @@
 # the release is published only when all three succeed.
 #
 # Running this workflow manually builds the selected commit, creates today's
-# dated tag after all packages pass, and publishes the release.
+# dated tag after all packages pass, and publishes the release. If today's
+# tag already exists, a numeric suffix is appended (v2026.09.21.2,
+# v2026.09.21.3, ...) so multiple releases can be cut on the same day.
 name: Release
 
 on:
@@ -36,22 +38,38 @@ jobs:
       - id: resolve
         name: Resolve the dated release version
         run: |
+          set -euo pipefail
+
           if [ "$GITHUB_EVENT_NAME" = "push" ]; then
             version="${GITHUB_REF_NAME#v}"
           else
             version="$(date -u +%Y.%m.%d)"
-          fi
-          TEAMUP_SHIFT_SYNC_VERSION="$version" ./scripts/release-version.sh
-          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
-            tag="v$version"
-            if git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null; then
-              echo "Tag $tag already exists; dated releases are limited to one per day" >&2
-              exit 1
-            else
-              status=$?
-              if [ "$status" -ne 2 ]; then exit "$status"; fi
+
+            if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+              # Find the first unused tag for today: v$version, then
+              # v$version.2, v$version.3, ... This lets the workflow be
+              # dispatched more than once per day instead of failing once
+              # today's plain tag is taken.
+              tag="v$version"
+              n=1
+              while true; do
+                if git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null 2>&1; then
+                  n=$((n + 1))
+                  tag="v$version.$n"
+                else
+                  status=$?
+                  if [ "$status" -ne 2 ]; then
+                    echo "Failed to check for tag $tag (git ls-remote exited $status)" >&2
+                    exit "$status"
+                  fi
+                  break
+                fi
+              done
+              version="${tag#v}"
             fi
           fi
+
+          TEAMUP_SHIFT_SYNC_VERSION="$version" ./scripts/release-version.sh
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
   linux:
