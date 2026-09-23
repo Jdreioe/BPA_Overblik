@@ -68,7 +68,10 @@ pub fn outlined(theme: &iced::Theme, status: button::Status) -> button::Style {
 /// A compact notification: tone icon, short bold outcome, an optional
 /// detail line and a visible dismiss button. Every status and action result
 /// uses this one shape, so the page body never repeats it as prose.
-pub fn notice_card<'a, M: Clone + 'a>(notice: Notice, dismiss: M) -> Element<'a, M> {
+///
+/// Without `dismiss` there is no button: a reason that blocks the next step
+/// stays until it is resolved.
+pub fn notice_card<'a, M: Clone + 'a>(notice: Notice, dismiss: Option<M>) -> Element<'a, M> {
     let tone = notice.tone;
     let icon = match tone {
         Tone::Info => "ℹ",
@@ -96,7 +99,7 @@ pub fn notice_card<'a, M: Clone + 'a>(notice: Notice, dismiss: M) -> Element<'a,
             }
         }));
     }
-    let content = row![
+    let mut content = row![
         text(icon)
             .size(16)
             .style(move |theme: &iced::Theme| text::Style {
@@ -105,19 +108,21 @@ pub fn notice_card<'a, M: Clone + 'a>(notice: Notice, dismiss: M) -> Element<'a,
         lines,
     ]
     .spacing(10)
-    .align_y(iced::alignment::Vertical::Top)
-    .push(tooltip(
-        button(text("×").size(14))
-            .style(|theme, status| {
-                let mut style = outlined(theme, status);
-                style.border.radius = 12.0.into();
-                style
-            })
-            .padding([0, 7])
-            .on_press(dismiss),
-        "Luk",
-        tooltip::Position::Bottom,
-    ));
+    .align_y(iced::alignment::Vertical::Top);
+    if let Some(dismiss) = dismiss {
+        content = content.push(tooltip(
+            button(text("×").size(14))
+                .style(|theme, status| {
+                    let mut style = outlined(theme, status);
+                    style.border.radius = 12.0.into();
+                    style
+                })
+                .padding([0, 7])
+                .on_press(dismiss),
+            "Luk",
+            tooltip::Position::Bottom,
+        ));
+    }
     container(content)
         .padding([10, 12])
         .max_width(560)

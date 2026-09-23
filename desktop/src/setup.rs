@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use teamup_shift_sync_core::live::Service;
 use teamup_shift_sync_core::sheets::SheetLayout;
 use teamup_shift_sync_core::standard_time::StandardTimes;
-use teamup_shift_sync_gui::protocol::Notice;
+use teamup_shift_sync_gui::protocol::{Notice, Tone};
 
 use crate::template::{self, Template};
 
@@ -55,6 +55,10 @@ pub struct SetupState {
     /// to its own status notice.
     #[serde(skip)]
     pub result: Option<Notice>,
+    /// Why the reviewed helper choices cannot be confirmed yet. Until this is
+    /// resolved there is no account, so no week to go back to.
+    #[serde(skip)]
+    pub blocked: Option<String>,
     pub has_credentials: bool,
     #[serde(default)]
     pub other_source_has_credentials: bool,
@@ -289,6 +293,12 @@ impl SetupUi {
             .spacing(8);
             if state.duos_enabled {
                 header = header.push(text("DUOS").width(Length::FillPortion(2)));
+            }
+            if let Some(blocked) = &state.blocked {
+                content = content.push(crate::widgets::notice_card(
+                    Notice::from_message(Tone::Warning, blocked),
+                    None,
+                ));
             }
             content = content.push(header);
             for mapping in &state.mappings {
@@ -739,6 +749,7 @@ mod tests {
             registration_type: String::new(),
             account: String::new(),
             result: None,
+            blocked: None,
             has_credentials: true,
             other_source_has_credentials: false,
         }

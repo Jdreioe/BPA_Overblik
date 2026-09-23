@@ -35,7 +35,17 @@ type Result<T> = std::result::Result<T, String>;
 
 /// Project the setup document onto what the setup screen may display.
 fn view(document: &Setup) -> Result<setup::SetupState> {
-    serde_json::from_value(document.view()).map_err(|_| "Opsætningen kunne ikke vises.".to_owned())
+    let mut state: setup::SetupState = serde_json::from_value(document.view())
+        .map_err(|_| "Opsætningen kunne ikke vises.".to_owned())?;
+    // Confirmation runs by itself once the helper choices are valid, so an
+    // invalid choice is the one thing standing between setup and the week.
+    if state.stage != "ready" && !state.mappings.is_empty() {
+        state.blocked = document
+            .validate_choices()
+            .err()
+            .map(|error| error.0.to_owned());
+    }
+    Ok(state)
 }
 
 /// The state after a source check, carrying what the check found.
@@ -2160,6 +2170,12 @@ impl NativeApp {
             iced::time::every(Self::UPDATE_CHECK_INTERVAL).map(|_| Message::PeriodicUpdateCheck),
         ])
     }
+    fn helpers_blocked(&self) -> bool {
+        self.setup
+            .state
+            .as_ref()
+            .is_some_and(|state| state.blocked.is_some())
+    }
     /// A local save is too short to show, so buttons keep their look. A press
     /// during it is still ignored by the one-operation guard in `update`.
     fn buttons_enabled(&self) -> bool {
@@ -2219,14 +2235,14 @@ impl NativeApp {
             if let Some(preview) = self.preview.as_ref().filter(|p| !p.status_dismissed) {
                 notices = notices.push(super::widgets::notice_card(
                     preview.week.status.clone(),
-                    Message::DismissWeekStatus,
+                    Some(Message::DismissWeekStatus),
                 ));
             }
         }
         if let Some(status) = &self.status {
             notices = notices.push(super::widgets::notice_card(
                 status.clone(),
-                Message::DismissStatus,
+                Some(Message::DismissStatus),
             ));
         }
         iced::widget::stack![
@@ -2415,8 +2431,21 @@ impl NativeApp {
             (SettingsSection::Integrations, "⇄", "Udbydere"),
         ] {
             let selected = self.settings_section == section;
+            let mut entry = row![text(icon).size(18), text(label).size(14)]
+                .spacing(10)
+                .align_y(iced::alignment::Vertical::Center);
+            // Blocked helper choices keep the whole setup from confirming, so
+            // the mark shows from every section, not only on Hjælpere.
+            if section == SettingsSection::Helpers && self.helpers_blocked() {
+                entry = entry
+                    .push(space::horizontal())
+                    .push(text("! Ret").size(13).font(iced::Font {
+                        weight: iced::font::Weight::Bold,
+                        ..iced::Font::DEFAULT
+                    }));
+            }
             sidebar = sidebar.push(
-                button(row![text(icon).size(18), text(label).size(14)].spacing(10))
+                button(entry)
                     .style(move |theme, status| {
                         if selected {
                             iced::widget::button::primary(theme, status)
