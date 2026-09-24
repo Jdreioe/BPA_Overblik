@@ -104,6 +104,41 @@ fn day_cell(value: &str) -> Option<(char, u32)> {
         .then(|| Some((initial, day.parse().ok()?)))?
 }
 
+/// The holidays ugenr.dk writes in the cell next to a day, longest first so
+/// `2. pinsedag/grundlovsdag` is not read as `2. pinsedag`.
+const HOLIDAYS: [&str; 15] = [
+    "2. pinsedag/grundlovsdag",
+    "Kristi himmelfartsdag",
+    "Grundlovsdag",
+    "Nytårsaften",
+    "Skærtorsdag",
+    "2. påskedag",
+    "2. pinsedag",
+    "Første maj",
+    "Langfredag",
+    "2. juledag",
+    "Nytårsdag",
+    "Juleaften",
+    "Påskedag",
+    "Pinsedag",
+    "Juledag",
+];
+
+/// The helper written after a holiday, such as `Alex` in `Juleaften Alex`.
+/// A holiday alone leaves nothing, so that day has no shift.
+fn without_holiday(value: &str) -> &str {
+    HOLIDAYS
+        .iter()
+        .find_map(|holiday| {
+            let start = value.get(..holiday.len())?;
+            let rest = &value[holiday.len()..];
+            (start.to_lowercase() == holiday.to_lowercase()
+                && rest.chars().next().is_none_or(char::is_whitespace))
+            .then(|| rest.trim())
+        })
+        .unwrap_or(value)
+}
+
 /// The Danish weekday initial ugenr.dk shows: `T` is both tirsdag and torsdag.
 fn initial(date: NaiveDate) -> char {
     match date.weekday() {
@@ -550,6 +585,11 @@ fn read_shift(
         })
     };
     let [helper, time, end, sps, title] = offsets.map(value);
+    let helper = if layout.date_format == DAY_UNDER_MONTH {
+        without_holiday(helper)
+    } else {
+        helper
+    };
     if [helper, time, end, sps, title].iter().all(|v| v.is_empty()) {
         return None;
     }
@@ -1005,8 +1045,8 @@ mod tests {
         assert_eq!(layout.time, None);
         let sheet = csv_cells(
             "Januar 2026,,,Februar 2026,,\n\
-             F  2,Alex,,S  1,Joe,\n\
-             L  3,,,M  2,Zain,6\u{a0}\n\
+             T  1,Nytårsdag,,S  1,Joe,\n\
+             F  2,Alex,,M  2,2. pinsedag Zain,6\u{a0}\n\
              S  4,,,M  3,Ninke,\n"
                 .as_bytes(),
         )
@@ -1019,8 +1059,11 @@ mod tests {
             parse_cells_with_standard(&sheet, &layout, "sheet", TZ, day(2026, 1, 1), &standard)
                 .unwrap();
         let ids: Vec<_> = parsed.shifts.iter().map(|s| s.event_id.as_str()).collect();
-        assert_eq!(ids, ["20260102", "20260201", "20260202"]);
+        assert_eq!(ids, ["20260201", "20260102", "20260202"]);
         assert!(parsed.shifts.iter().all(|shift| shift.standard_time));
+        // A holiday alone is no shift; before a name, it is not the helper.
+        assert_eq!(parsed.shifts[2].helper_key, "Zain");
+        assert!(!parsed.helpers.contains("Nytårsdag"));
         // 3 February 2026 is a Tuesday, so `M  3` is reported, not guessed.
         assert_eq!(parsed.issues.len(), 1);
         assert_eq!(parsed.issues[0].kind, IssueKind::ImpossibleDate);

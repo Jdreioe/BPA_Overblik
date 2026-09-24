@@ -27,7 +27,10 @@ Fixture previews are CLI-only; the desktop app never opens example data.
    week before any transfer. This flow does not create or approve registrations.
 
 Closing the app preserves submitted credentials, discovery and each dropdown
-or exclusion edit. Failed discovery can be retried.
+or exclusion edit. Failed discovery can be retried. **Opdatér hjælpere** after
+adding a helper to the source keeps every unchanged helper's choices; only a
+new or renamed helper is proposed again. A changed MitHF or DUOS catalog still
+proposes every mapping again.
 
 
 ## Spreadsheet source
@@ -108,7 +111,9 @@ weekday's initial and day of the month, such as `F  2`, below a month heading
 such as `Januar 2026`. A template pasted from it learns that format, and each
 day then takes its month and year from the nearest heading above it. A day
 that does not match its weekday, such as `M  3` in February 2026, is reported
-as an impossible date. Only a template learned from such a day reads them.
+as an impossible date. Only a template learned from such a day reads them. The
+holiday ugenr.dk writes next to a day, such as `Juleaften`, is not a helper:
+`Juleaften Alex` reads as `Alex`, and a holiday alone is no shift.
 
 Setup needs at least one filled shift to discover helper names. Each source
 helper must be mapped to a MitHF helper before confirmation. An unreadable

@@ -84,7 +84,7 @@ fn defaults() -> Value {
         "standard_times": {"everyday": "", "weekdays": {}},
         "markers": super::config::DEFAULT_MARKERS,
         "arrangements": [], "types": [], "mithf": [], "duos": [], "mappings": [],
-        "arrangement": "", "registration_type": "", "account": "",
+        "arrangement": "", "registration_type": "", "account": "", "catalog": null,
     })
 }
 
@@ -409,18 +409,14 @@ impl Setup {
         Ok(notice)
     }
 
-    /// Record freshly read TeamUp calendars. Split from the request so the
-    /// state transition can be checked against Python without a network call.
+    /// Record freshly read source calendars. Split from the request so the
+    /// state transition can be checked without a network call.
     pub(crate) fn apply_source(
         &mut self,
         calendars: Value,
         colors: Value,
     ) -> Result<(), LiveError> {
-        if calendars != self.data["calendars"] {
-            self.data["mappings"] = json!([]);
-            self.data["catalog"] = Value::Null;
-        }
-        self.data["calendars"] = calendars;
+        self.adopt_calendars(calendars)?;
         self.data["colors"] = colors;
         // Documents saved before check results became return values.
         if let Some(object) = self.data.as_object_mut() {
@@ -432,6 +428,58 @@ impl Setup {
             object.remove("resume_stage");
         }
         self.save()
+    }
+
+    /// Take freshly read source calendars. A calendar whose id and name are
+    /// unchanged keeps its reviewed mapping, so adding a helper to the sheet
+    /// does not undo the others. A new or renamed calendar gets a fresh
+    /// proposal and a removed one is dropped.
+    fn adopt_calendars(&mut self, calendars: Value) -> Result<(), LiveError> {
+        let previous = rows(&self.data["calendars"])?;
+        let kept: Vec<Value> = rows(&self.data["mappings"])?
+            .iter()
+            .filter(|row| {
+                rows(&calendars).is_ok_and(|fresh| {
+                    fresh
+                        .iter()
+                        .any(|c| c["id"] == row["source"] && previous.contains(c))
+                })
+            })
+            .cloned()
+            .collect();
+        self.data["calendars"] = calendars;
+        self.data["mappings"] = Value::Array(kept);
+        self.propose_missing()
+    }
+
+    /// Propose a mapping for every calendar without one, in calendar order.
+    /// Before the helpers are first fetched there is nothing to propose from,
+    /// so the mappings stay empty until then.
+    fn propose_missing(&mut self) -> Result<(), LiveError> {
+        if self.data["catalog"].is_null() {
+            return Ok(());
+        }
+        let mut mappings = Vec::new();
+        for source in rows(&self.data["calendars"])? {
+            let id = text(&source["id"])?;
+            let existing = rows(&self.data["mappings"])?
+                .iter()
+                .find(|row| row["source"] == id);
+            mappings.push(match existing {
+                Some(row) => row.clone(),
+                None => {
+                    let name = text(&source["name"])?;
+                    json!({
+                        "source": id,
+                        "mithf": suggested(name, &self.data["mithf"]),
+                        "duos": if self.duos_enabled() { suggested(name, &self.data["duos"]) } else { String::new() },
+                        "excluded": false,
+                    })
+                }
+            });
+        }
+        self.data["mappings"] = Value::Array(mappings);
+        Ok(())
     }
 
     /// Re-read the source, read MitHF and DUOS, and propose helper mappings
@@ -516,19 +564,10 @@ impl Setup {
         }
         // Keep reviewed edits only while every identity and account choice is
         // unchanged; otherwise propose again from the fresh catalog.
-        if previous != catalog || rows(&self.data["mappings"])?.is_empty() {
-            let mut mappings = Vec::new();
-            for source in rows(&self.data["calendars"])? {
-                let name = text(&source["name"])?;
-                mappings.push(json!({
-                    "source": text(&source["id"])?,
-                    "mithf": suggested(name, &catalog["mithf"]),
-                    "duos": if self.duos_enabled() { suggested(name, &catalog["duos"]) } else { String::new() },
-                    "excluded": false,
-                }));
-            }
-            self.data["mappings"] = Value::Array(mappings);
+        if previous != catalog {
+            self.data["mappings"] = json!([]);
         }
+        self.propose_missing()?;
         self.save()
     }
 
@@ -597,6 +636,14 @@ impl Setup {
         } {
             let mut chosen = std::collections::BTreeSet::new();
             for row in &included {
+                // Not chosen yet is a step left, not a stale choice.
+                if row[service] == "" {
+                    return Err(LiveError(if service == "mithf" {
+                        "Vælg en MitHF-hjælper for hver kalender, eller udelad kalenderen."
+                    } else {
+                        "Vælg en aktiv DUOS-hjælper for hver kalender, eller udelad kalenderen."
+                    }));
+                }
                 let person = selected(&self.data[service], &row[service])?;
                 // MitHF read-back identifies assignments by name, so duplicate
                 // names cannot be reconciled even with a stable id chosen here.
@@ -643,11 +690,19 @@ impl Setup {
         }
         let arrangement = self.data["arrangement"].as_str().unwrap_or("").to_owned();
         let fresh = build_catalog(browser, &arrangement, self.today(), self.duos_enabled()).await?;
-        if calendars != self.data["calendars"] || fresh != self.data["catalog"] {
+        if fresh != self.data["catalog"] {
             self.data["calendars"] = calendars;
             self.data["stage"] = json!("destinations");
             self.data["catalog"] = Value::Null;
             self.data["mappings"] = json!([]);
+            self.save()?;
+            return Err(LiveError(CHANGED));
+        }
+        if calendars != self.data["calendars"] {
+            // Only the source changed: unchanged helpers keep their choices,
+            // and the new ones are proposed for review.
+            self.adopt_calendars(calendars)?;
+            self.data["stage"] = json!("helpers");
             self.save()?;
             return Err(LiveError(CHANGED));
         }
@@ -990,6 +1045,37 @@ mod tests {
         let mut now = Setup::load(dir.path()).unwrap().data;
         now.as_object_mut().unwrap().remove("other_source");
         assert_eq!(now, sheets);
+    }
+
+    #[test]
+    fn a_helper_added_to_the_source_keeps_the_others_choices() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut setup = Setup::load(dir.path()).unwrap();
+        setup.data["duos_enabled"] = json!(false);
+        let catalog = json!({
+            "arrangements": [], "types": [], "duos": [], "account": "", "account_ids": {},
+            "mithf": [{"id": "m1", "name": "Alex Jensen"}, {"id": "m2", "name": "Bo"}],
+        });
+        setup
+            .apply_source(json!([{"id": "Alex", "name": "Alex"}]), json!({}))
+            .unwrap();
+        setup.apply_catalog(catalog.clone(), "").unwrap();
+        // `Alex` matches no MitHF name, so the person picks by hand.
+        setup
+            .edit(&json!({"source": "Alex", "mithf": "m1"}))
+            .unwrap();
+
+        // Opdatér hjælpere after Bo is added to the sheet.
+        setup
+            .apply_source(
+                json!([{"id": "Alex", "name": "Alex"}, {"id": "Bo", "name": "Bo"}]),
+                json!({}),
+            )
+            .unwrap();
+        setup.apply_catalog(catalog, "").unwrap();
+        assert_eq!(setup.data["mappings"][0]["mithf"], "m1");
+        assert_eq!(setup.data["mappings"][1]["mithf"], "m2");
+        setup.validate_choices().unwrap();
     }
 
     #[test]
