@@ -40,7 +40,8 @@ install -m 644 "packaging/linux/$app_id.desktop" "$appdir/$app_id.desktop"
 install -m 644 packaging/icons/teamup-shift-sync-256.png \
   "$appdir/usr/share/icons/hicolor/256x256/apps/$app_id.png"
 install -m 644 packaging/icons/teamup-shift-sync-256.png "$appdir/$app_id.png"
-sed -e "s/{{VERSION}}/$version/" -e "s/{{DATE}}/${version//./-}/" \
+release_date="${version:0:10}"
+sed -e "s/{{VERSION}}/$version/" -e "s/{{DATE}}/${release_date//./-}/" \
   "packaging/linux/$app_id.appdata.xml" > "$appdir/usr/share/metainfo/$app_id.appdata.xml"
 
 # The fixture paths only matter for --self-check, which is how a finished
