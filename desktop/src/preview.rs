@@ -384,7 +384,7 @@ pub fn build_week(
             if !blocker(item.outcome) || item.reason == "offline_preview" {
                 continue;
             }
-            let (explanation, action) = explanations::explanation(&item.reason);
+            let (explanation, action) = explanations::explanation(&item.reason, item.system);
             let start = shift.starts_at.with_timezone(&zone);
             let when = format!(
                 "{} {}",

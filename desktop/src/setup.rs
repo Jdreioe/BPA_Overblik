@@ -178,6 +178,9 @@ pub struct SetupUi {
     pub editing: std::collections::BTreeSet<String>,
     /// Providers collapsed on the providers tab. Everything starts open.
     pub collapsed: std::collections::BTreeSet<String>,
+    /// The blocked-helpers notice has had its time on screen. The app resets
+    /// this whenever the reason changes.
+    pub blocked_hidden: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -361,7 +364,7 @@ impl SetupUi {
             if state.duos_enabled {
                 header = header.push(text("DUOS").width(Length::FillPortion(2)));
             }
-            if let Some(blocked) = &state.blocked {
+            if let Some(blocked) = state.blocked.as_ref().filter(|_| !self.blocked_hidden) {
                 content = content.push(crate::widgets::notice_card(
                     Notice::from_message(Tone::Warning, blocked),
                     None,
