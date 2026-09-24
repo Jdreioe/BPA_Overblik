@@ -54,10 +54,10 @@ that date's standard. A Sheets row with separate start and end cells uses it
 only when both cells are empty. The preview marks these shifts `standardtid`.
 An unset weekday, a multi-day TeamUp all-day event, or a clock time invalid
 on a daylight-saving transition requires correction before transfer.
-Reminder titles remain excluded. Ordinary timed shifts keep their own hours.
+Marker titles (below) are never shifts. Ordinary timed shifts keep their own hours.
 Valid times save automatically. Changing the setting revokes approval of the
 currently shown week. **Indstillinger** opens on **Hjælpere**; use its sidebar
-for **Udbydere** and **Standardtider**. Under **Udbydere**, the **Vagtplan**
+for **Standardtider**, **Markeringer** and **Udbydere**. Under **Udbydere**, the **Vagtplan**
 group holds the shift source (only one active at a time) and the **Løn** group
 the MitHF and DUOS services, each with its own login. DUOS registration always
 uses the ordinary shift type.
@@ -153,6 +153,16 @@ require review. Fixture runs map helpers through the TOML `helpers` list instead
 Titles starting with `Husk at checke …` are shared reminders, not shifts.
 They are reported as excluded before helper matching or SPS parsing, in both
 live and fixture previews. Matching ignores surrounding whitespace and case.
+
+TeamUp events can also be calendar markers, such as a day-off wish. Their
+titles are listed in **Indstillinger → Markeringer**, starting with
+`Ønsker fri`. A title matches as a whole or as its first words, ignoring case
+and spacing: `Ønsker fri - tandlæge` matches, `Ønsker fridag` does not.
+`Husk at checke` reminders are always markers. The week shows each marker, on a
+confirmed helper calendar, above the day it falls on. Markers are never
+planned or transferred, and their text is never read for hours. A marker
+never fails the week or blocks approval, even over a shift. Changing the list revokes approval of the shown week.
+Sheets has no markers.
 
 An exact `P-MØDE` title (ignoring case and surrounding whitespace) maps to
 MitHF `Vagtmøde` for the event's interval. It does not imply SPS or DUOS hours.

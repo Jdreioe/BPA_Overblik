@@ -32,12 +32,26 @@ fn is_false(value: &bool) -> bool {
     !value
 }
 
+/// A calendar marker, such as a day-off wish, on each day it touches. It is
+/// never transferred, so it has no status and no position on the clock.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Marker {
+    pub helper: String,
+    #[serde(default)]
+    pub helper_color: String,
+    pub title: String,
+    /// "hele dagen", or the marker's own clock times.
+    pub time_label: String,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Day {
     pub date: String,
     pub label: String,
     #[serde(default)]
     pub blocks: Vec<Block>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub markers: Vec<Marker>,
 }
 
 /// An item the user must resolve, with its cause and next action.

@@ -989,6 +989,7 @@ mod tests {
             helper_names: BTreeMap::new(),
             helper_colors: BTreeMap::new(),
             standard_times: Default::default(),
+            markers: Vec::new(),
         }
     }
 

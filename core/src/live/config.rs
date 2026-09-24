@@ -26,7 +26,13 @@ pub struct LiveConfig {
     pub helper_names: BTreeMap<String, String>,
     pub helper_colors: BTreeMap<String, String>,
     pub standard_times: StandardTimes,
+    /// Titles shown as calendar markers instead of planned as shifts.
+    pub markers: Vec<String>,
 }
+
+/// Marker titles for a setup that has not chosen any, including one saved
+/// before markers existed.
+pub const DEFAULT_MARKERS: [&str; 1] = ["Ønsker fri"];
 
 impl LiveConfig {
     pub fn source_is_sheets(&self) -> bool {
@@ -179,6 +185,13 @@ fn config_from_setup(
     )
     .map_err(|_| LiveError("De gemte standardtider er ugyldige."))?;
     standard_times.validate().map_err(LiveError)?;
+    let markers = match setup.get("markers") {
+        None => DEFAULT_MARKERS.map(String::from).to_vec(),
+        Some(markers) => serde_json::from_value::<Vec<String>>(markers.clone())
+            .ok()
+            .and_then(|titles| crate::marker_titles(&titles).ok())
+            .ok_or(LiveError("De gemte markeringer er ugyldige."))?,
+    };
     let planning = PlanningConfig {
         timezone: setup["timezone"]
             .as_str()
@@ -218,6 +231,7 @@ fn config_from_setup(
     Ok(LiveConfig {
         helper_colors,
         standard_times,
+        markers,
         planning,
         calendar,
         api_key,

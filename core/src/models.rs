@@ -29,6 +29,18 @@ pub struct SourceShift {
     pub standard_time: bool,
 }
 
+/// A calendar note on a helper's calendar, such as a day-off wish. It is shown
+/// in the week but never planned or transferred, and its text is never read
+/// for hours.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SourceMarker {
+    pub helper_key: String,
+    pub title: String,
+    pub starts_at: DateTime<FixedOffset>,
+    pub ends_at: DateTime<FixedOffset>,
+    pub all_day: bool,
+}
+
 fn is_false(value: &bool) -> bool {
     !value
 }
