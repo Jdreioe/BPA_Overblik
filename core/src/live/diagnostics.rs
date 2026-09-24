@@ -17,6 +17,8 @@ use crate::{state::isoformat, SyncState};
 
 /// Counts and flags only, ready to write next to the application data.
 pub fn redacted_report(data_dir: &Path, now: DateTime<FixedOffset>) -> Result<Value, LiveError> {
+    // The browser's display name only; its path can contain the username.
+    let browser = browser_executable(data_dir).ok();
     Ok(json!({
         "version": 1,
         "recorded_at": isoformat(now),
@@ -28,7 +30,8 @@ pub fn redacted_report(data_dir: &Path, now: DateTime<FixedOffset>) -> Result<Va
         "setup": setup_summary(data_dir),
         "accounts": account_summaries(data_dir),
         "browser": {
-            "executable_found": browser_executable(data_dir).is_ok(),
+            "executable_found": browser.is_some(),
+            "name": browser.map(|browser| browser.name),
             "profiles": profiles(data_dir),
         },
     }))
