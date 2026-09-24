@@ -8,8 +8,8 @@ Set-Location $root
 
 $version = $env:TEAMUP_SHIFT_SYNC_VERSION
 if (-not $version) { $version = (Get-Date).ToUniversalTime().ToString("yyyy.MM.dd") }
-if ($version -notmatch '^\d{4}\.\d{2}\.\d{2}$') {
-    throw "Release version must be YYYY.MM.DD, got: $version"
+if ($version -cnotmatch '^[0-9]{4}\.[0-9]{2}\.[0-9]{2}(\.[2-9]|\.[1-9][0-9]+)?$') {
+    throw "Release version must be YYYY.MM.DD or YYYY.MM.DD.N (N >= 2), got: $version"
 }
 
 Write-Host "Building BPA Overblik $version for Windows/x86_64"

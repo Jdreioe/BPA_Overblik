@@ -8,10 +8,11 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
 version="$("$root/scripts/release-version.sh")"
-# CFBundleShortVersionString is read as period-separated integers, so the
-# dated release 2026.09.21 is written without its leading zeros.
-IFS=. read -r year month day <<< "$version"
-bundle_version="$year.$((10#$month)).$((10#$day))"
+# Apple bundle and package versions use at most three numeric components.
+# Put month and day together so the last component can count releases within
+# that day while keeping a later date greater than every earlier revision.
+IFS=. read -r year month day revision <<< "$version"
+bundle_version="$year.$((10#$month * 100 + 10#$day)).${revision:-1}"
 
 # The package is built from a staging root holding nothing but the app, so
 # pkgbuild's install location is exactly /Applications.

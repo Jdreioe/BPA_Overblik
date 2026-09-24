@@ -13,9 +13,10 @@ Linux wrap the desktop app, the CLI and the fixtures; Windows is the desktop
 The user-facing instructions live in [installation](installation.md); this file
 is the maintainer's side.
 
-## Versions are dates
+## Versions are dates with an optional revision
 
-A release is `YYYY.MM.DD`, tagged `vYYYY.MM.DD`. The tag is the only source:
+A day's first release is `YYYY.MM.DD`, tagged `vYYYY.MM.DD`. Later releases
+that day are `YYYY.MM.DD.2`, `YYYY.MM.DD.3`, and so on. The tag is the only source:
 `scripts/release-version.sh` reads `TEAMUP_SHIFT_SYNC_VERSION`, which the
 workflow sets from the tag, and falls back to today's date so a local packaging
 run needs no edit. Crate versions in `Cargo.toml` are not release versions and
@@ -29,19 +30,17 @@ Windows is a portable `.exe` so the in-app updater can replace the running file
 without administrator rights. Linux does the same to the AppImage. macOS still
 opens the `.pkg`, because writing into `/Applications` needs administrator
 rights. The file name carries the dated release; the app reports the same value.
+The macOS package and bundle use three numeric components: year, month and day
+combined, and the day's release number. For example, `2026.09.24.2` becomes
+`2026.924.2`. This keeps later dates and revisions increasing for macOS.
 
 ## Releasing
 
-```bash
-git tag v$(date -u +%Y.%m.%d)
-git push origin v$(date -u +%Y.%m.%d)
-```
-
-`.github/workflows/release.yml` then builds and verifies all three packages and
-publishes the release only if every platform succeeded. You can also run the
-workflow manually on a selected branch. It builds that commit, then creates
-today's UTC tag and publishes the release after all packages pass. A manual run
-stops before building if today's tag already exists. Merging a branch does not
+Run the Release workflow manually on the commit to release. It selects today's
+UTC date and the next unused revision, builds all three packages, then creates
+the tag and publishes the release after every platform passes. Manual runs are
+serialized so they cannot choose the same tag. You can also push an unused tag
+in the format above to start the same build. Merging a branch does not
 publish a release; pull requests that change packaging run the package checks
 without publishing.
 
