@@ -54,26 +54,28 @@ pub fn load_saved_setup(data_dir: &Path) -> Result<LiveConfig, LiveError> {
     config_from_setup(setup, &secret, data_dir)
 }
 
-/// Read TeamUp credentials from the OS keyring. The setup document itself
+/// Read a source's credentials from the OS keyring. The setup document itself
 /// never holds a secret, only the handle they are stored under.
 pub(crate) fn read_credential(credential: &str) -> Result<Value, LiveError> {
     let entry = keyring::Entry::new("teamup-shift-sync", credential).map_err(|_| {
         LiveError("Computerens nøglering kunne ikke åbnes. Lås den op, og prøv igen.")
     })?;
     let secret = entry.get_password().map_err(|_| {
-        LiveError("De gemte TeamUp-oplysninger kunne ikke læses. Tilslut kalenderen igen.")
+        LiveError("De gemte forbindelsesoplysninger kunne ikke læses. Tilslut vagtplanen igen under Indstillinger → Udbydere.")
     })?;
     serde_json::from_str(&secret).map_err(|_| INVALID)
 }
 
-/// Store TeamUp credentials under a fresh handle. Run on a blocking thread.
+/// Store a source's credentials under a fresh handle. Run on a blocking thread.
 pub(crate) fn store_credential(credential: &str, secret: &Value) -> Result<(), LiveError> {
     let entry = keyring::Entry::new("teamup-shift-sync", credential).map_err(|_| {
         LiveError("Computerens nøglering kunne ikke åbnes. Lås den op, og prøv igen.")
     })?;
-    entry
-        .set_password(&secret.to_string())
-        .map_err(|_| LiveError("TeamUp-oplysningerne kunne ikke gemmes i computerens nøglering."))
+    entry.set_password(&secret.to_string()).map_err(|_| {
+        LiveError(
+            "Forbindelsen kunne ikke gemmes i computerens nøglering. Lås den op, og prøv igen.",
+        )
+    })
 }
 
 pub(crate) fn selected<'a>(choices: &'a Value, identifier: &Value) -> Result<&'a Value, LiveError> {
@@ -108,7 +110,8 @@ pub(crate) fn account_scope(setup: &Value, calendar: &str) -> Result<String, Liv
 pub(crate) fn ical_access(setup: &Value, secret: &Value) -> Result<IcalAccess, LiveError> {
     let rule = serde_json::from_value(setup["ical_rule"].clone())
         .map_err(|_| LiveError("Kalenderens gemte opsætning er ugyldig."))?;
-    let links: Vec<String> = serde_json::from_value(secret["feeds"].clone()).map_err(|_| INVALID)?;
+    let links: Vec<String> =
+        serde_json::from_value(secret["feeds"].clone()).map_err(|_| INVALID)?;
     let excluded = setup["mappings"]
         .as_array()
         .into_iter()
@@ -177,7 +180,12 @@ fn config_from_setup(
             sheet.source_id(),
         )
     } else if let Some(ical) = &ical {
-        (String::new(), String::new(), String::new(), ical.source_id())
+        (
+            String::new(),
+            String::new(),
+            String::new(),
+            ical.source_id(),
+        )
     } else {
         let calendar = text(&secret["calendar"])?.to_owned();
         let api_key = text(&secret["api_key"])?.to_owned();
