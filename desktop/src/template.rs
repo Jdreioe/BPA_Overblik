@@ -56,16 +56,18 @@ impl Field {
         }
     }
 
-    /// The button for an optional field the shift does not have.
+    /// The button for an optional field the shift does not have. A shift
+    /// without a time takes the standard time.
     fn skip(self) -> &'static str {
         match self {
+            Field::Time => "Ingen tid – brug standardtid",
             Field::Sps => "Ingen SPS",
             _ => "Ingen titel",
         }
     }
 
     fn optional(self) -> bool {
-        matches!(self, Field::Sps | Field::Title)
+        matches!(self, Field::Time | Field::Sps | Field::Title)
     }
 }
 
@@ -149,17 +151,17 @@ impl Template {
     }
 
     /// The next field to point out. The end time is only asked for when the
-    /// time cell does not already hold a range such as `8-24`.
+    /// time cell does not already hold a range such as `8-24`, and not when
+    /// the shift has no time.
     fn current(&self) -> Option<Field> {
-        let time_is_range = self
-            .picks
-            .get(&Field::Time)
-            .copied()
-            .flatten()
-            .is_some_and(|(row, col)| self.cells[row][col].contains(['-', '–', '—']));
-        Field::ORDER.into_iter().find(|field| {
-            !self.picks.contains_key(field) && !(*field == Field::End && time_is_range)
-        })
+        let skip_end = match self.picks.get(&Field::Time) {
+            Some(Some((row, col))) => self.cells[*row][*col].contains(['-', '–', '—']),
+            Some(None) => true,
+            None => false,
+        };
+        Field::ORDER
+            .into_iter()
+            .find(|field| !self.picks.contains_key(field) && !(*field == Field::End && skip_end))
     }
 
     /// `None` until every field is answered.
@@ -171,7 +173,7 @@ impl Template {
         let picked = TemplateCells {
             date: at(Field::Date)?,
             helper: at(Field::Helper)?,
-            time: at(Field::Time)?,
+            time: at(Field::Time),
             end: at(Field::End),
             sps: at(Field::Sps),
             title: at(Field::Title),

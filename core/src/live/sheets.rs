@@ -465,9 +465,9 @@ mod tests {
             date_format: "%d/%m/%y".into(),
             sps_label: String::new(),
             helper: CellOffset { row: 2, column: 0 },
-            time: TimeCells::Range {
+            time: Some(TimeCells::Range {
                 cell: CellOffset { row: 3, column: 0 },
-            },
+            }),
             sps: None,
             title: None,
         }

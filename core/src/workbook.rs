@@ -806,7 +806,7 @@ mod tests {
         let picked = TemplateCells {
             date: (0, 0),
             helper: (2, 0),
-            time: (3, 0),
+            time: Some((3, 0)),
             ..Default::default()
         };
         let layout =

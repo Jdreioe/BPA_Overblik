@@ -85,8 +85,10 @@ once the one before is done. In step 2, copy the cells of one filled shift
 (for a weekly grid, one day's column: date, weekday, helper, time, SPS) and
 choose **Indsæt vagt**. The app then asks one question at a time, such as
 "Hvor står datoen?", answered by clicking the cell. SPS hours and a title such
-as `P-MØDE` can be answered with **Ingen SPS** or **Ingen titel**. If the time
-cell holds only a start time, the app also asks for the end time. **Start
+as `P-MØDE` can be answered with **Ingen SPS** or **Ingen titel**. A sheet
+that holds only the helper answers the time with **Ingen tid – brug
+standardtid**, and every shift takes the standard time. If the time cell holds
+only a start time, the app also asks for the end time. **Start
 forfra** goes back to pasting. A workbook with several tabs asks for one in
 step 3.
 The app learns the date format and the word before SPS hours (such as `Sps`)
@@ -100,6 +102,13 @@ ignored. A date written without a year, such as `23/9`, takes the year nearest
 the week being read, so `3/1` in the week after Christmas is next January. The
 year may only be left out with `/`, because `23.9` and `23-9` look like times. An impossible date such as `31/11/26` is reported, not skipped. One
 shift per date is supported.
+
+The [ugenr.dk](https://ugenr.dk/kalender) year calendar shows a day as its
+weekday's initial and day of the month, such as `F  2`, below a month heading
+such as `Januar 2026`. A template pasted from it learns that format, and each
+day then takes its month and year from the nearest heading above it. A day
+that does not match its weekday, such as `M  3` in February 2026, is reported
+as an impossible date. Only a template learned from such a day reads them.
 
 Setup needs at least one filled shift to discover helper names. Each source
 helper must be mapped to a MitHF helper before confirmation. An unreadable
