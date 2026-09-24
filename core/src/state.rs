@@ -153,6 +153,65 @@ impl SyncState {
         Ok(keys)
     }
 
+    /// Copy another database's records for one source into this one, keeping
+    /// the newer row where both hold the same key. `calendar_id` is the
+    /// `SourceShift::calendar_id` every copied source key starts with.
+    pub fn adopt_history(&mut self, other: &Path, calendar_id: &str) -> Result<(), StateError> {
+        self.connection.execute(
+            "ATTACH DATABASE ? AS other",
+            [other.to_string_lossy().as_ref()],
+        )?;
+        let prefix = format!("{calendar_id}:");
+        let copied = (|| {
+            let transaction = self.connection.transaction()?;
+            let own = "substr(source_key, 1, length(?1)) = ?1";
+            // Named columns: older files added some columns out of schema order.
+            let occurrence = "source_key, calendar_id, event_id, occurrence_id, \
+                recurrence_start, source_version, snapshot_hash, last_seen_at";
+            let comment = "source_key, comment_id, snapshot_hash, text, updated_at, last_seen_at";
+            let step = "source_key, step_key, status, destination_id, source_hash, \
+                synced_payload_json, error, updated_at";
+            transaction.execute(
+                &format!(
+                    "INSERT INTO source_occurrences ({occurrence}) SELECT {occurrence}
+                     FROM other.source_occurrences WHERE {own} ON CONFLICT(source_key) DO UPDATE SET
+                     calendar_id = excluded.calendar_id, event_id = excluded.event_id,
+                     occurrence_id = excluded.occurrence_id,
+                     recurrence_start = excluded.recurrence_start,
+                     source_version = excluded.source_version,
+                     snapshot_hash = excluded.snapshot_hash, last_seen_at = excluded.last_seen_at
+                     WHERE excluded.last_seen_at > source_occurrences.last_seen_at"
+                ),
+                [&prefix],
+            )?;
+            transaction.execute(
+                &format!(
+                    "INSERT INTO source_comments ({comment}) SELECT {comment}
+                     FROM other.source_comments WHERE {own} ON CONFLICT(source_key, comment_id) DO UPDATE SET
+                     snapshot_hash = excluded.snapshot_hash, text = excluded.text,
+                     updated_at = excluded.updated_at, last_seen_at = excluded.last_seen_at
+                     WHERE excluded.last_seen_at > source_comments.last_seen_at"
+                ),
+                [&prefix],
+            )?;
+            transaction.execute(
+                &format!(
+                    "INSERT INTO sync_steps ({step}) SELECT {step}
+                     FROM other.sync_steps WHERE {own} ON CONFLICT(source_key, step_key) DO UPDATE SET
+                     status = excluded.status, destination_id = excluded.destination_id,
+                     source_hash = excluded.source_hash,
+                     synced_payload_json = excluded.synced_payload_json,
+                     error = excluded.error, updated_at = excluded.updated_at
+                     WHERE excluded.updated_at > sync_steps.updated_at"
+                ),
+                [&prefix],
+            )?;
+            transaction.commit()
+        })();
+        self.connection.execute("DETACH DATABASE other", [])?;
+        Ok(copied?)
+    }
+
     /// Commit before returning, so an uncertain marker survives a process crash.
     pub fn record_step(
         &self,

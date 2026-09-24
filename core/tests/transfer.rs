@@ -372,6 +372,72 @@ fn split_sps_edit_updates_only_its_own_mithf_part() {
 }
 
 #[test]
+fn an_earlier_sps_interval_splits_a_transferred_shift_without_conflict() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut adapter = MemoryDestinations {
+        state_path: temp.path().join("sync.sqlite3"),
+        ..Default::default()
+    };
+    let mut request = request();
+    request.shifts[0].notes = "uni 13-14".into();
+    approve(&mut request, &adapter);
+    runtime()
+        .block_on(apply_plan(
+            request.clone(),
+            adapter.state_path.clone(),
+            &mut adapter,
+            |_| {},
+        ))
+        .unwrap();
+    let original = adapter.snapshot.mithf_shifts[0].clone();
+    let registration = adapter.snapshot.duos_registrations[0].id.clone();
+    adapter.writes.clear();
+
+    // The new first part moves the existing shift and registration; the
+    // second part overlaps them only until those updates are written.
+    request.shifts[0].notes = "uni 8-10 & 13-14".into();
+    let preview = preview_plan(&request, &adapter);
+    let outcome = |key: &str| {
+        preview
+            .items
+            .iter()
+            .find(|i| i.step_key == key)
+            .unwrap()
+            .outcome
+    };
+    assert_eq!(outcome("mithf.create_shift"), Outcome::WouldUpdate);
+    assert_eq!(outcome("mithf.create_shift#1"), Outcome::WouldCreate);
+    assert_eq!(outcome("duos.interval:notes:0"), Outcome::WouldUpdate);
+    assert_eq!(outcome("duos.interval:notes:1"), Outcome::WouldCreate);
+    approve(&mut request, &adapter);
+    runtime()
+        .block_on(apply_plan(
+            request,
+            adapter.state_path.clone(),
+            &mut adapter,
+            |_| {},
+        ))
+        .unwrap();
+
+    let shifts = &adapter.snapshot.mithf_shifts;
+    assert_eq!(shifts.len(), 2);
+    assert_eq!(shifts[0].id, original.id);
+    let bounds: Vec<_> = shifts.iter().map(|s| (s.starts_at, s.ends_at)).collect();
+    assert_eq!(
+        bounds,
+        [
+            (original.starts_at, moment("2026-09-14T13:00:00+02:00")),
+            (moment("2026-09-14T13:00:00+02:00"), original.ends_at),
+        ]
+    );
+    let registrations = &adapter.snapshot.duos_registrations;
+    assert_eq!(registrations.len(), 2);
+    assert!(registrations
+        .iter()
+        .any(|r| r.id == registration && r.starts_at == moment("2026-09-14T08:00:00+02:00")));
+}
+
+#[test]
 fn manual_mithf_changes_block_automatic_edits() {
     let temp = tempfile::tempdir().unwrap();
     let mut adapter = MemoryDestinations {
