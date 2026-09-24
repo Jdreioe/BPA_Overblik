@@ -114,7 +114,7 @@ pub async fn read_teamup(
         .map(|c| Ok(json!({"id": id(&c["id"])?, "name": text(&c["name"])?.split_whitespace().collect::<Vec<_>>().join(" ")})))
         .collect::<Result<_, LiveError>>()?;
     if Value::Array(calendars) != config.setup["calendars"] {
-        return Err(LiveError("TeamUp-kalendere eller navne er ændret. Bekræft opsætningen igen i den almindelige app.").into());
+        return Err(LiveError("TeamUp-kalendere eller navne er ændret. Bekræft hjælperne igen under Indstillinger → Hjælpere.").into());
     }
     let from = midnight(start, config.planning.timezone)?;
     let to = midnight(end.succ_opt().ok_or(INVALID)?, config.planning.timezone)?;
