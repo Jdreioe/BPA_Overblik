@@ -93,10 +93,9 @@ Choose how the calendar names its helpers:
 - **One calendar per helper.** Add one link per helper, like TeamUp
   sub-calendars. Each feed appears under **Hjælpere** by its calendar name and
   is mapped to a MitHF (and, when enabled, DUOS) helper.
-- **One shared calendar.** Every event's title names its helper. Choose
-  whether the name comes before a character (`Anna - Vagt`), after it
-  (`Vagt: Anna`), or is the whole title (`Anna`). Without the character in a
-  title, the whole title is the name. Names are matched ignoring case and
+- **One shared calendar.** Every event's title names its helper. The name
+  comes before a character, `-` by default (`Anna - Vagt`). Without the
+  character in a title, the whole title is the name (`Anna`). Names are matched ignoring case and
   spacing, and every name found from four weeks back to half a year ahead is
   listed under **Hjælpere**, so the chosen rule can be checked there. A name
   stays listed after its shifts have passed, so it does not reset the other

@@ -1439,7 +1439,6 @@ impl NativeApp {
                 | setup::Message::AddIcalLink
                 | setup::Message::RemoveIcalLink(_)
                 | setup::Message::IcalShared(_)
-                | setup::Message::IcalPart(_)
                 | setup::Message::IcalSeparator(_)),
             ) => self.setup.update_ical(&message),
             Message::Setup(setup::Message::StandardDefault(value)) => {

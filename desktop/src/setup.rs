@@ -89,7 +89,6 @@ pub enum Message {
     AddIcalLink,
     RemoveIcalLink(usize),
     IcalShared(bool),
-    IcalPart(TitlePart),
     IcalSeparator(String),
     ConnectIcal,
     OpenTeamupKeys,
@@ -267,7 +266,6 @@ impl SetupUi {
                 }
             }
             Message::IcalShared(shared) => self.ical_shared = *shared,
-            Message::IcalPart(part) => self.ical_part = *part,
             Message::IcalSeparator(separator) => self.ical_separator.clone_from(separator),
             _ => {}
         }
@@ -526,7 +524,6 @@ impl SetupUi {
     /// Links to one or more published calendars, and where the helper is.
     fn ical_connection(&self) -> Element<'_, Message> {
         let mut content = column![
-            text("Brug kalenderens private iCal-link.").size(12),
             radio(
                 "Én kalender pr. hjælper",
                 false,
@@ -561,39 +558,20 @@ impl SetupUi {
             content = content.push(line);
         }
         if self.ical_shared {
-            content = content
-                .push(radio(
-                    "Navn før tegnet",
-                    TitlePart::Before,
-                    Some(self.ical_part),
-                    Message::IcalPart,
-                ))
-                .push(radio(
-                    "Navn efter tegnet",
-                    TitlePart::After,
-                    Some(self.ical_part),
-                    Message::IcalPart,
-                ))
-                .push(radio(
-                    "Kun navn",
-                    TitlePart::Whole,
-                    Some(self.ical_part),
-                    Message::IcalPart,
-                ));
-            if self.ical_part != TitlePart::Whole {
-                content = content.push(
-                    row![
-                        text("Tegn").size(13).width(Length::Fixed(90.0)),
-                        text_input("-", &self.ical_separator)
-                            .id(iced::widget::Id::new(ICAL_SEPARATOR_ID))
-                            .on_input(Message::IcalSeparator)
-                            .padding(10)
-                            .width(Length::Fixed(80.0)),
-                    ]
-                    .spacing(10)
-                    .align_y(iced::alignment::Vertical::Center),
-                );
-            }
+            // The name comes before the separator, or is the whole title
+            // when there is none. A saved "after" rule still works.
+            content = content.push(
+                row![
+                    text("Tegn efter navnet").size(13),
+                    text_input("-", &self.ical_separator)
+                        .id(iced::widget::Id::new(ICAL_SEPARATOR_ID))
+                        .on_input(Message::IcalSeparator)
+                        .padding(10)
+                        .width(Length::Fixed(80.0)),
+                ]
+                .spacing(10)
+                .align_y(iced::alignment::Vertical::Center),
+            );
         } else {
             content = content.push(quiet_button("Tilføj kalender", Message::AddIcalLink));
         }
@@ -1028,7 +1006,6 @@ mod tests {
                 separator: "-".into()
             }
         );
-        ui.update_ical(&Message::IcalPart(TitlePart::After));
         ui.update_ical(&Message::IcalSeparator(":".into()));
         ui.update_ical(&Message::RemoveIcalLink(0));
         assert_eq!(ui.ical_links_to_connect(), ["webcal://b.example/b.ics"]);

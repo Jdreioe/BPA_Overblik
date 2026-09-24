@@ -69,8 +69,8 @@ nøgleringen. Sådan finder du det:
   linket, der starter med `webcal://`.
 
 Har hver hjælper sin egen kalender, så tilføj ét link pr. hjælper. Står alle
-vagter i én fælles kalender, så vælg det og fortæl appen, hvor hjælperens navn
-står i titlen, for eksempel før tegnet i »Anna - Vagt«. Navnene, appen finder,
+vagter i én fælles kalender, så vælg det. Hjælperens navn skal stå først i
+titlen, før et tegn, for eksempel »Anna - Vagt«, eller udgøre hele titlen. Navnene, appen finder,
 vises under **Hjælpere**.
 
 ## Hvad systemet spørger om
