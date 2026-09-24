@@ -1,6 +1,6 @@
 # One dated tag, one release, one file per system.
 #
-# Push a tag named vYYYY.MM.DD (for example v2026.09.21). Every platform is
+# Push a tag named vYYYY.MM.DD or vYYYY.MM.DD.N (N >= 2). Every platform is
 # packaged from that one tag, each package is verified on a clean runner, and
 # the release is published only when all three succeed.
 #
@@ -28,6 +28,12 @@ on:
 permissions:
   contents: write
 
+# Manual runs choose the next free suffix at the start, so serialize them to
+# keep two runs from building packages with the same version.
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && 'manual' || github.run_id }}
+  cancel-in-progress: false
+
 jobs:
   version:
     runs-on: ubuntu-latest
@@ -46,26 +52,23 @@ jobs:
             version="$(date -u +%Y.%m.%d)"
 
             if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
-              # Find the first unused tag for today: v$version, then
-              # v$version.2, v$version.3, ... This lets the workflow be
-              # dispatched more than once per day instead of failing once
-              # today's plain tag is taken.
-              tag="v$version"
-              n=1
-              while true; do
-                if git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null 2>&1; then
-                  n=$((n + 1))
-                  tag="v$version.$n"
-                else
-                  status=$?
-                  if [ "$status" -ne 2 ]; then
-                    echo "Failed to check for tag $tag (git ls-remote exited $status)" >&2
-                    exit "$status"
+              # Use the highest revision, even if an earlier number is missing.
+              # That keeps the newest release newer than every existing one.
+              refs="$(git ls-remote --tags origin)"
+              highest=0
+              while read -r _ ref; do
+                if [ "$ref" = "refs/tags/v$version" ]; then
+                  highest=$((highest > 1 ? highest : 1))
+                elif [[ "$ref" == "refs/tags/v$version."* ]]; then
+                  revision="${ref##*.}"
+                  if [[ "$revision" =~ ^[1-9][0-9]*$ ]] && (( revision >= 2 && revision > highest )); then
+                    highest="$revision"
                   fi
-                  break
                 fi
-              done
-              version="${tag#v}"
+              done <<< "$refs"
+              if (( highest > 0 )); then
+                version="$version.$((highest + 1))"
+              fi
             fi
           fi
 

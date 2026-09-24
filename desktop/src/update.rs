@@ -27,19 +27,39 @@ pub enum ApplyOutcome {
     OpenInstaller(PathBuf),
 }
 
-pub fn is_release_version(version: &str) -> bool {
-    let bytes = version.as_bytes();
-    bytes.len() == 10
-        && bytes[4] == b'.'
-        && bytes[7] == b'.'
-        && bytes
+fn release_order(version: &str) -> Option<(&str, u64)> {
+    let date = version.get(..10)?;
+    let suffix = version.get(10..)?;
+    let bytes = date.as_bytes();
+    if bytes.len() != 10
+        || bytes[4] != b'.'
+        || bytes[7] != b'.'
+        || !bytes
             .iter()
             .enumerate()
             .all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let revision = match suffix.strip_prefix('.') {
+        None if suffix.is_empty() => 1,
+        None => return None,
+        Some(suffix) => {
+            let number = suffix.parse::<u64>().ok()?;
+            if number < 2 || number.to_string() != suffix {
+                return None;
+            }
+            number
+        }
+    };
+    Some((date, revision))
 }
 
 pub fn is_newer(current: &str, latest: &str) -> bool {
-    is_release_version(current) && is_release_version(latest) && latest > current
+    match (release_order(current), release_order(latest)) {
+        (Some(current), Some(latest)) => latest > current,
+        _ => false,
+    }
 }
 
 pub fn asset_suffix(os: &str) -> Option<&'static str> {
@@ -339,6 +359,30 @@ mod tests {
         assert_eq!(
             offer_from_release(BODY, "2026.10.01", "linux").unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn revisions_are_ordered_within_the_day_and_before_the_next_day() {
+        assert!(is_newer("2026.09.24", "2026.09.24.2"));
+        assert!(is_newer("2026.09.24.9", "2026.09.24.10"));
+        assert!(is_newer("2026.09.24.10", "2026.09.25"));
+        assert!(!is_newer("2026.09.24.2", "2026.09.24"));
+        assert!(!is_newer("2026.09.24.10", "2026.09.24.9"));
+        for invalid in ["2026.09.24.1", "2026.09.24.02", "2026.09.24.x"] {
+            assert!(release_order(invalid).is_none());
+        }
+
+        let body = r#"{
+            "tag_name": "v2026.09.24.2",
+            "assets": [{"name": "teamup-shift-sync-2026.09.24.2-x86_64.AppImage", "browser_download_url": "https://example.test/linux.AppImage"}]
+        }"#;
+        assert_eq!(
+            offer_from_release(body, "2026.09.24", "linux")
+                .unwrap()
+                .unwrap()
+                .version,
+            "2026.09.24.2"
         );
     }
 
