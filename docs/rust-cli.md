@@ -46,11 +46,11 @@ cargo run -p teamup-shift-sync-cli -- login --data-dir /path/to/app-data
 
 Log in through the opened browser window or windows, then press Enter in the terminal. DUOS opens only when enabled in setup.
 The command checks read access and closes its browsers. `login` is the only
-command that opens a window; every other command runs Chromium headless
+command that opens a window; every other command runs the browser headless
 against these separate Rust profiles, which preserve the login. MitHF's shift
 calendar is entered through the site's own "Åbn din vagtplan" action, so it
 does not have to be opened by hand.
-If Chromium cannot be found, set `TEAMUP_BROWSER_PATH` to its executable.
+If no browser is found, set `TEAMUP_BROWSER_PATH` to its executable.
 
 ```sh
 cargo run -p teamup-shift-sync-cli -- capture \

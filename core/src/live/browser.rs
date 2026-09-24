@@ -178,7 +178,7 @@ impl BrowserSessions {
         self.sessions.remove(&service);
         let data_dir = self.data_dir.clone();
         let (executable, profile) = tokio::task::spawn_blocking(move || {
-            let executable = browser_executable(&data_dir)?;
+            let executable = browser_executable(&data_dir)?.path;
             let profile = data_dir.join("rust-preview/profiles").join(service.key());
             private_dir(profile.parent().ok_or(INVALID)?)?;
             private_dir(&profile)?;
@@ -512,11 +512,26 @@ fn private_dir(path: &Path) -> Result<(), LiveError> {
     }
     Ok(())
 }
-pub(super) fn browser_executable(data_dir: &Path) -> Result<PathBuf, LiveError> {
+/// The browser the app launches: a display name for diagnostics and messages,
+/// never a profile or user path, and the executable itself.
+pub(super) struct Browser {
+    pub name: &'static str,
+    pub path: PathBuf,
+}
+
+/// Find a Chromium-based browser. They all speak the same DevTools protocol and
+/// accept the launch flags above. `TEAMUP_BROWSER_PATH` overrides the search;
+/// otherwise the app's old `browsers/` folder, then the standard install
+/// locations for this system in a fixed order. Flatpak and Snap browsers are
+/// left out: their sandbox cannot write to the app's private profile.
+pub(super) fn browser_executable(data_dir: &Path) -> Result<Browser, LiveError> {
     if let Some(path) = std::env::var_os("TEAMUP_BROWSER_PATH") {
         let path = PathBuf::from(path);
         if path.is_file() {
-            return Ok(path);
+            return Ok(Browser {
+                name: "TEAMUP_BROWSER_PATH",
+                path,
+            });
         }
         return Err(LiveError(
             "TEAMUP_BROWSER_PATH peger ikke på en browserfil.",
@@ -534,20 +549,81 @@ pub(super) fn browser_executable(data_dir: &Path) -> Result<PathBuf, LiveError> 
     for root in roots {
         for suffix in ["chrome-linux64/chrome", "chrome-linux/chrome", "chrome-win64/chrome.exe", "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"] {
             let path = root.join(suffix);
-            if path.is_file() { return Ok(path); }
+            if path.is_file() { return Ok(Browser { name: "Chromium", path }); }
         }
     }
-    for path in [
-        "/usr/bin/chromium",
-        "/usr/bin/chromium-browser",
-        "/usr/bin/google-chrome",
-        "/opt/google/chrome/chrome",
-    ] {
-        if Path::new(path).is_file() {
-            return Ok(path.into());
-        }
-    }
-    Err(LiveError("Chromium mangler. Installér Chromium, eller angiv browserfilen i TEAMUP_BROWSER_PATH, og prøv igen."))
+    let env = |name: &str| std::env::var_os(name).map(PathBuf::from);
+    let candidates = if cfg!(windows) {
+        windows_browsers(env)
+    } else if cfg!(target_os = "macos") {
+        macos_browsers(env("HOME"))
+    } else {
+        linux_browsers()
+    };
+    candidates
+        .into_iter()
+        .find(|(_, path)| path.is_file())
+        .map(|(name, path)| Browser { name, path })
+        .ok_or(LiveError("Ingen browser fundet. Installér Google Chrome eller Microsoft Edge, eller angiv browserfilen i TEAMUP_BROWSER_PATH, og prøv igen."))
+}
+
+/// Edge first: it ships with Windows 10 and 11, so no extra install is needed.
+fn windows_browsers(env: impl Fn(&str) -> Option<PathBuf>) -> Vec<(&'static str, PathBuf)> {
+    let (x86, programs, local) = (
+        env("ProgramFiles(x86)"),
+        env("ProgramFiles"),
+        env("LOCALAPPDATA"),
+    );
+    let edge = r"Microsoft\Edge\Application\msedge.exe";
+    let chrome = r"Google\Chrome\Application\chrome.exe";
+    let brave = r"BraveSoftware\Brave-Browser\Application\brave.exe";
+    [
+        ("Microsoft Edge", &x86, edge),
+        ("Microsoft Edge", &programs, edge),
+        ("Google Chrome", &programs, chrome),
+        ("Google Chrome", &x86, chrome),
+        ("Google Chrome", &local, chrome),
+        ("Brave", &programs, brave),
+        ("Brave", &local, brave),
+    ]
+    .into_iter()
+    .filter_map(|(name, root, rest)| Some((name, root.as_ref()?.join(rest))))
+    .collect()
+}
+
+fn macos_browsers(home: Option<PathBuf>) -> Vec<(&'static str, PathBuf)> {
+    let apps = [
+        (
+            "Google Chrome",
+            "Google Chrome.app/Contents/MacOS/Google Chrome",
+        ),
+        (
+            "Microsoft Edge",
+            "Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        ),
+        ("Chromium", "Chromium.app/Contents/MacOS/Chromium"),
+        ("Brave", "Brave Browser.app/Contents/MacOS/Brave Browser"),
+    ];
+    let roots = std::iter::once(PathBuf::from("/Applications"))
+        .chain(home.map(|home| home.join("Applications")));
+    roots
+        .flat_map(|root| apps.map(|(name, app)| (name, root.join(app))))
+        .collect()
+}
+
+fn linux_browsers() -> Vec<(&'static str, PathBuf)> {
+    [
+        ("Chromium", "/usr/bin/chromium"),
+        ("Chromium", "/usr/bin/chromium-browser"),
+        ("Google Chrome", "/usr/bin/google-chrome"),
+        ("Google Chrome", "/opt/google/chrome/chrome"),
+        ("Microsoft Edge", "/usr/bin/microsoft-edge"),
+        ("Microsoft Edge", "/opt/microsoft/msedge/msedge"),
+        ("Brave", "/usr/bin/brave-browser"),
+        ("Brave", "/opt/brave.com/brave/brave"),
+    ]
+    .map(|(name, path)| (name, PathBuf::from(path)))
+    .into()
 }
 
 #[cfg(test)]
@@ -577,5 +653,13 @@ mod tests {
         assert!(write_allowed(Service::Duos, "register"));
         assert!(!write_allowed(Service::Duos, "accept"));
         assert!(!write_allowed(Service::Duos, "approve"));
+    }
+
+    #[test]
+    fn a_missing_windows_folder_is_skipped_instead_of_searched_relative_to_the_app() {
+        // 32-bit layout: only ProgramFiles is set.
+        let found = super::windows_browsers(|name| (name == "ProgramFiles").then(|| "C:/P".into()));
+        assert!(found.iter().all(|(_, path)| path.starts_with("C:/P")));
+        assert_eq!(found[0].0, "Microsoft Edge");
     }
 }

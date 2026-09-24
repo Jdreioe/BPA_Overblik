@@ -17,8 +17,9 @@ Download the newest one from
 [installation guide](docs/installation.md) has the steps, including the
 one-time security prompt on Windows and macOS.
 
-A system Chromium is the only other requirement. The app never downloads a
-browser. Updating and uninstalling both leave credentials, mappings and sync
+An installed Chromium-based browser is the only other requirement: Microsoft
+Edge, which Windows already has, Google Chrome, Chromium or Brave. The app never
+downloads a browser. Updating and uninstalling both leave credentials, mappings and sync
 history in place. How the packages are built, verified and versioned is in
 [packaging](docs/packaging.md).
 
@@ -61,8 +62,9 @@ group holds the shift source (only one active at a time) and the **Løn** group
 the MitHF and DUOS services, each with its own login. DUOS registration always
 uses the ordinary shift type.
 
-The desktop needs a system Chromium, or the `TEAMUP_BROWSER_PATH` executable.
-It never downloads a browser.
+The desktop drives an installed Edge, Chrome, Chromium or Brave, or the
+`TEAMUP_BROWSER_PATH` executable, with its own profile per service. It never
+downloads a browser. The search order is in [desktop](docs/rust-desktop.md).
 
 ## Run the representative dry-run
 
