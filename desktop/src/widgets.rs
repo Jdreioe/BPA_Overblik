@@ -65,7 +65,7 @@ pub fn outlined(theme: &iced::Theme, status: button::Status) -> button::Style {
     }
 }
 
-/// A compact notification: tone icon, short bold outcome, an optional
+/// A compact notification: tone icon, short plain outcome, an optional
 /// detail line and a visible dismiss button. Every status and action result
 /// uses this one shape, so the page body never repeats it as prose.
 ///
@@ -79,12 +79,9 @@ pub fn notice_card<'a, M: Clone + 'a>(notice: Notice, dismiss: Option<M>) -> Ele
         Tone::Warning => "!",
         Tone::Error => "✕",
     };
-    let mut lines = column![text(notice.title).size(14).font(iced::Font {
-        weight: iced::font::Weight::Bold,
-        ..iced::Font::DEFAULT
-    })]
-    .spacing(2)
-    .width(Length::Fill);
+    let mut lines = column![text(notice.title).size(14)]
+        .spacing(2)
+        .width(Length::Fill);
     if !notice.detail.is_empty() {
         lines = lines.push(text(notice.detail).size(13).style(|theme: &iced::Theme| {
             text::Style {
