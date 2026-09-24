@@ -241,7 +241,11 @@ impl SetupUi {
 
     /// The links to connect. A shared calendar uses only the first field.
     pub fn ical_links_to_connect(&self) -> Vec<String> {
-        let fields = if self.ical_shared { 1 } else { self.ical_links.len() };
+        let fields = if self.ical_shared {
+            1
+        } else {
+            self.ical_links.len()
+        };
         self.ical_links.iter().take(fields).cloned().collect()
     }
 

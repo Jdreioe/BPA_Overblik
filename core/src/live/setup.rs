@@ -285,7 +285,9 @@ impl Setup {
     /// from the connection step, without the old source's mappings or approval.
     pub fn choose_source(&mut self, source: &str) -> Result<(), LiveError> {
         if !matches!(source, "teamup" | "sheets" | "ical") {
-            return Err(LiveError("Vælg TeamUp, Google Sheets eller en iCal-kalender."));
+            return Err(LiveError(
+                "Vælg TeamUp, Google Sheets eller en iCal-kalender.",
+            ));
         }
         if self.data["source"] == source {
             self.data["stage"] = json!("source");
@@ -296,7 +298,9 @@ impl Setup {
             Some(Value::Object(kept)) => kept,
             _ => Map::new(),
         };
-        let other = kept.remove(source).filter(|other| other["source"] == source);
+        let other = kept
+            .remove(source)
+            .filter(|other| other["source"] == source);
         let resume = object.remove("resume_stage");
         let mut left = self.data.clone();
         let standard_times = left["standard_times"].clone();
@@ -969,7 +973,10 @@ mod tests {
         setup.edit_source().unwrap();
         setup.choose_source("ical").unwrap();
         assert_eq!(setup.data["mappings"], json!([]));
-        assert_eq!(setup.view()["connected_sources"], json!(["sheets", "teamup"]));
+        assert_eq!(
+            setup.view()["connected_sources"],
+            json!(["sheets", "teamup"])
+        );
         setup.data["credential"] = json!("ical-handle");
         setup.data["stage"] = json!("ready");
         assert_eq!(
@@ -983,8 +990,14 @@ mod tests {
         let mut restored = setup.data.clone();
         restored.as_object_mut().unwrap().remove("other_sources");
         assert_eq!(restored, teamup);
-        assert_eq!(setup.data["other_sources"]["sheets"]["credential"], "sheet-handle");
-        assert_eq!(setup.data["other_sources"]["ical"]["credential"], "ical-handle");
+        assert_eq!(
+            setup.data["other_sources"]["sheets"]["credential"],
+            "sheet-handle"
+        );
+        assert_eq!(
+            setup.data["other_sources"]["ical"]["credential"],
+            "ical-handle"
+        );
 
         setup.edit_source().unwrap();
         setup.choose_source("sheets").unwrap();
@@ -1028,7 +1041,10 @@ mod tests {
         .unwrap();
         let mut setup = Setup::load(dir.path()).unwrap();
         assert!(setup.data.get("other_source").is_none());
-        assert_eq!(setup.view()["connected_sources"], json!(["sheets", "teamup"]));
+        assert_eq!(
+            setup.view()["connected_sources"],
+            json!(["sheets", "teamup"])
+        );
         setup.edit_source().unwrap();
         setup.choose_source("sheets").unwrap();
         assert_eq!(setup.data["credential"], "sheet-handle");
