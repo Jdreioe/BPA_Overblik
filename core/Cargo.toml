@@ -5,6 +5,7 @@ edition = "2021"
 description = "Shared domain and synchronization core for TeamUp shift sync"
 
 [dependencies]
+calcard = { version = "0.3.14", default-features = false }
 calamine = "0.36"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = { version = "0.10", features = ["serde"] }

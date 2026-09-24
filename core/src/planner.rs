@@ -99,6 +99,8 @@ pub fn build_plan(request: &PlanRequest<'_>, state: &SyncState) -> Result<SyncPl
                     "No confirmed destination mapping for {} helper {}",
                     if shift.calendar_id.starts_with("sheet-") {
                         "spreadsheet"
+                    } else if shift.calendar_id.starts_with("ical-") {
+                        "calendar"
                     } else {
                         "TeamUp"
                     },

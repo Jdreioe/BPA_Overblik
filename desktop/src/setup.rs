@@ -4,6 +4,7 @@ use iced::widget::{
 use iced::{Element, Length};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use teamup_shift_sync_core::ical::{HelperRule, TitlePart};
 use teamup_shift_sync_core::live::Service;
 use teamup_shift_sync_core::sheets::SheetLayout;
 use teamup_shift_sync_core::standard_time::StandardTimes;
@@ -43,6 +44,8 @@ pub struct SetupState {
     #[serde(default)]
     pub sheet_tabs: Vec<String>,
     #[serde(default)]
+    pub ical_rule: Option<HelperRule>,
+    #[serde(default)]
     pub standard_times: StandardTimes,
     /// Titles shown as markers instead of planned as shifts.
     #[serde(default = "default_markers")]
@@ -66,8 +69,9 @@ pub struct SetupState {
     #[serde(skip)]
     pub blocked: Option<String>,
     pub has_credentials: bool,
+    /// Sources with stored credentials, the active one included.
     #[serde(default)]
-    pub other_source_has_credentials: bool,
+    pub connected_sources: Vec<String>,
 }
 
 fn default_markers() -> Vec<String> {
@@ -95,6 +99,12 @@ pub enum Message {
     RemoveMarker(usize),
     Connect,
     ConnectSheets,
+    IcalLink(usize, String),
+    AddIcalLink,
+    RemoveIcalLink(usize),
+    IcalShared(bool),
+    IcalSeparator(String),
+    ConnectIcal,
     /// Open the OS file dialog for a local spreadsheet.
     ChooseFile,
     FileChosen(Option<String>),
@@ -150,6 +160,7 @@ const STANDARD_DAY_IDS: [&str; 7] = [
     "standard-sondag",
 ];
 const SOURCE_LINK_ID: &str = "source-link";
+const ICAL_SEPARATOR_ID: &str = "ical-separator";
 const MARKER_DRAFT_ID: &str = "marker-draft";
 const TEAMUP_KEY_ID: &str = "teamup-key";
 
@@ -178,6 +189,12 @@ pub struct SetupUi {
     pub editing: std::collections::BTreeSet<String>,
     /// Providers collapsed on the providers tab. Everything starts open.
     pub collapsed: std::collections::BTreeSet<String>,
+    /// iCal links being entered. Like `link`, only kept until stored.
+    pub ical_links: Vec<String>,
+    /// One shared calendar naming helpers in titles, not one per helper.
+    pub ical_shared: bool,
+    pub ical_part: TitlePart,
+    pub ical_separator: String,
     /// The blocked-helpers notice has had its time on screen. The app resets
     /// this whenever the reason changes.
     pub blocked_hidden: bool,
@@ -227,6 +244,64 @@ impl SetupUi {
             weekdays,
         }
     }
+    /// Show the saved helper rule, so reconnecting starts from it.
+    pub fn load_ical(&mut self, state: &SetupState) {
+        match &state.ical_rule {
+            Some(HelperRule::Title { part, separator }) => {
+                self.ical_shared = true;
+                self.ical_part = *part;
+                self.ical_separator.clone_from(separator);
+            }
+            Some(HelperRule::Feed) => self.ical_shared = false,
+            None => {}
+        }
+    }
+
+    /// How the entered iCal feeds name their helpers.
+    pub fn ical_rule(&self) -> HelperRule {
+        if !self.ical_shared {
+            return HelperRule::Feed;
+        }
+        let separator = self.ical_separator.trim();
+        HelperRule::Title {
+            part: self.ical_part,
+            separator: if separator.is_empty() { "-" } else { separator }.into(),
+        }
+    }
+
+    /// The links to connect. A shared calendar uses only the first field.
+    pub fn ical_links_to_connect(&self) -> Vec<String> {
+        let fields = if self.ical_shared {
+            1
+        } else {
+            self.ical_links.len()
+        };
+        self.ical_links.iter().take(fields).cloned().collect()
+    }
+
+    pub fn update_ical(&mut self, message: &Message) {
+        match message {
+            Message::IcalLink(index, link) => {
+                if self.ical_links.len() <= *index {
+                    self.ical_links.resize(index + 1, String::new());
+                }
+                self.ical_links[*index].clone_from(link);
+            }
+            Message::AddIcalLink => {
+                let fields = self.ical_links.len().max(1);
+                self.ical_links.resize(fields + 1, String::new());
+            }
+            Message::RemoveIcalLink(index) => {
+                if *index < self.ical_links.len() {
+                    self.ical_links.remove(*index);
+                }
+            }
+            Message::IcalShared(shared) => self.ical_shared = *shared,
+            Message::IcalSeparator(separator) => self.ical_separator.clone_from(separator),
+            _ => {}
+        }
+    }
+
     /// The layout learned from the pasted shift, or the saved one while no
     /// new shift has been pasted.
     pub fn sheet_layout(&self) -> Result<SheetLayout, String> {
@@ -244,8 +319,7 @@ impl SetupUi {
     pub fn standard_view(&self) -> Element<'_, Message> {
         let mut content = column![
             text("Standardtider").size(20),
-            text("Bruges når en TeamUp-vagt er heldags, eller når tiden mangler i regnearket.")
-                .size(13),
+            text("Bruges når en vagt ikke har egne tider.").size(13),
         ]
         .spacing(10);
         content = content
@@ -352,10 +426,10 @@ impl SetupUi {
             ));
         } else {
             let mut header = row![
-                text(if state.source == "sheets" {
-                    "Regneark"
-                } else {
-                    "TeamUp"
+                text(match state.source.as_str() {
+                    "sheets" => "Regneark",
+                    "ical" => "Kalender",
+                    _ => "TeamUp",
                 })
                 .width(Length::FillPortion(2)),
                 text("MitHF").width(Length::FillPortion(2)),
@@ -393,6 +467,7 @@ impl SetupUi {
         let mut content = column![
             self.source_row(state, "teamup", "TeamUp"),
             self.source_row(state, "sheets", "Regneark"),
+            self.source_row(state, "ical", "iCal-kalender"),
         ]
         .spacing(8);
         if state.stage == "source" {
@@ -427,7 +502,7 @@ impl SetupUi {
         let has_credentials = if active {
             state.has_credentials
         } else {
-            state.other_source_has_credentials
+            state.connected_sources.iter().any(|source| source == id)
         };
         row![
             radio(name, id, active.then_some(id), move |picked| {
@@ -453,6 +528,9 @@ impl SetupUi {
     /// The connection form for the not-yet-connected source.
     fn source_connection<'a>(&'a self, state: &'a SetupState) -> Element<'a, Message> {
         let mut content = column![].spacing(8);
+        if state.source == "ical" {
+            return self.ical_connection();
+        }
         if state.source == "sheets" {
             // One step at a time: where the sheet is, what a shift looks
             // like, then connect. A step shows once the one before is done.
@@ -542,6 +620,69 @@ impl SetupUi {
                 .push(primary_button("Tilslut kalender", Message::Connect));
         }
         content.into()
+    }
+
+    /// Links to one or more published calendars, and where the helper is.
+    fn ical_connection(&self) -> Element<'_, Message> {
+        let mut content = column![
+            radio(
+                "Én kalender pr. hjælper",
+                false,
+                Some(self.ical_shared),
+                Message::IcalShared,
+            ),
+            radio(
+                "Én fælles kalender",
+                true,
+                Some(self.ical_shared),
+                Message::IcalShared,
+            ),
+        ]
+        .spacing(8);
+        let fields = if self.ical_shared {
+            1
+        } else {
+            self.ical_links.len().max(1)
+        };
+        for index in 0..fields {
+            let value = self.ical_links.get(index).map_or("", String::as_str);
+            let mut line = row![text_input("iCal-link", value)
+                .id(iced::widget::Id::from(format!("ical-link-{index}")))
+                .on_input(move |link| Message::IcalLink(index, link))
+                .secure(true)
+                .padding(12)]
+            .spacing(8)
+            .align_y(iced::alignment::Vertical::Center);
+            if fields > 1 {
+                line = line.push(quiet_button("Fjern", Message::RemoveIcalLink(index)));
+            }
+            content = content.push(line);
+        }
+        if self.ical_shared {
+            // The name comes before the separator, or is the whole title
+            // when there is none. A saved "after" rule still works.
+            content = content.push(
+                row![
+                    text("Tegn efter navnet").size(13),
+                    text_input("-", &self.ical_separator)
+                        .id(iced::widget::Id::new(ICAL_SEPARATOR_ID))
+                        .on_input(Message::IcalSeparator)
+                        .padding(10)
+                        .width(Length::Fixed(80.0)),
+                ]
+                .spacing(10)
+                .align_y(iced::alignment::Vertical::Center),
+            );
+        } else {
+            content = content.push(quiet_button("Tilføj kalender", Message::AddIcalLink));
+        }
+        let ready = self.ical_links.iter().any(|link| !link.trim().is_empty());
+        content
+            .push(
+                primary_button("Tilslut kalender", Message::ConnectIcal)
+                    .on_press_maybe(ready.then_some(Message::ConnectIcal)),
+            )
+            .into()
     }
 
     fn service_section<'a>(&'a self, state: &'a SetupState) -> Element<'a, Message> {
@@ -862,7 +1003,8 @@ mod tests {
             result: None,
             blocked: None,
             has_credentials: true,
-            other_source_has_credentials: false,
+            connected_sources: vec!["teamup".into()],
+            ical_rule: None,
         }
     }
 
@@ -943,5 +1085,50 @@ mod tests {
         ui.state = Some(state);
         ui.collapsed.clear();
         let _ = ui.view(Section::Integrations);
+    }
+
+    #[test]
+    fn the_ical_form_renders_both_layouts_and_builds_the_rule() {
+        let mut state = confirmation_state();
+        state.source = "ical".into();
+        state.stage = "source".into();
+        let mut ui = SetupUi {
+            state: Some(state.clone()),
+            ..SetupUi::default()
+        };
+        let _ = ui.view(Section::Integrations);
+        assert_eq!(ui.ical_rule(), HelperRule::Feed);
+
+        // One calendar per helper: several links, each removable.
+        ui.update_ical(&Message::IcalLink(0, "https://a.example/a.ics".into()));
+        ui.update_ical(&Message::AddIcalLink);
+        ui.update_ical(&Message::IcalLink(1, "webcal://b.example/b.ics".into()));
+        let _ = ui.view(Section::Integrations);
+        assert_eq!(ui.ical_links_to_connect().len(), 2);
+
+        // A shared calendar uses the first link and a separator, "-" by default.
+        ui.update_ical(&Message::IcalShared(true));
+        let _ = ui.view(Section::Integrations);
+        assert_eq!(ui.ical_links_to_connect(), ["https://a.example/a.ics"]);
+        assert_eq!(
+            ui.ical_rule(),
+            HelperRule::Title {
+                part: TitlePart::Before,
+                separator: "-".into()
+            }
+        );
+        ui.update_ical(&Message::IcalSeparator(":".into()));
+        ui.update_ical(&Message::RemoveIcalLink(0));
+        assert_eq!(ui.ical_links_to_connect(), ["webcal://b.example/b.ics"]);
+
+        // A saved rule comes back when the setup is shown again.
+        state.ical_rule = Some(ui.ical_rule());
+        let mut fresh = SetupUi::default();
+        fresh.load_ical(&state);
+        assert_eq!(fresh.ical_rule(), ui.ical_rule());
+        // A connected source that is not active still says so.
+        state.connected_sources = vec!["ical".into(), "teamup".into()];
+        fresh.state = Some(state);
+        let _ = fresh.view(Section::Integrations);
     }
 }

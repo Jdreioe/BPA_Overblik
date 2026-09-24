@@ -554,6 +554,19 @@ impl Engine {
             .map_err(|e| e.to_string())?;
         checked(document, &found)
     }
+    async fn connect_ical(
+        &self,
+        links: Vec<String>,
+        rule: teamup_shift_sync_core::ical::HelperRule,
+    ) -> Result<setup::SetupState> {
+        let mut guard = self.setup.lock().await;
+        let document = guard.as_mut().ok_or("Opsætningen er ikke indlæst.")?;
+        let found = document
+            .connect_ical(&links, rule)
+            .await
+            .map_err(|e| e.to_string())?;
+        checked(document, &found)
+    }
     /// Apply one setup action. `discover` and `confirm` read both services, so
     /// they take the browser sessions first; the lock order is always browsers
     /// before the document.
@@ -1558,6 +1571,13 @@ impl NativeApp {
                 )));
             }
             Message::Setup(setup::Message::Key(key)) => self.setup.key = key,
+            Message::Setup(
+                message @ (setup::Message::IcalLink(..)
+                | setup::Message::AddIcalLink
+                | setup::Message::RemoveIcalLink(_)
+                | setup::Message::IcalShared(_)
+                | setup::Message::IcalSeparator(_)),
+            ) => self.setup.update_ical(&message),
             Message::Setup(setup::Message::StandardDefault(value)) => {
                 self.setup.standard_default = value;
                 self.setup.error = None;
@@ -1690,6 +1710,21 @@ impl NativeApp {
                     Message::SetupUpdated,
                 );
             }
+            Message::Setup(setup::Message::ConnectIcal) => {
+                let rule = self.setup.ical_rule();
+                if let Err(error) = rule.validate() {
+                    self.status = Some(Notice::from_message(Tone::Error, error));
+                    return Task::none();
+                }
+                self.invalidate();
+                self.activity = Activity::Setup;
+                let engine = self.engine.clone();
+                let links = self.setup.ical_links_to_connect();
+                return Task::perform(
+                    async move { engine.connect_ical(links, rule).await },
+                    Message::SetupUpdated,
+                );
+            }
             Message::Setup(setup::Message::ChooseFile) => {
                 return Task::perform(
                     async {
@@ -1750,14 +1785,15 @@ impl NativeApp {
                         if found.is_some() {
                             self.status = found.clone();
                         }
-                        // The link and key are only needed until they are
-                        // stored. A sheet waiting for its tab still needs them.
+                        // A sheet waiting for its tab still needs its link or file.
                         if state.stage != "source" {
                             self.setup.link.clear();
                             self.setup.key.clear();
                             self.setup.sheet_file = None;
                             self.setup.sheet_tab = None;
+                            self.setup.ical_links.clear();
                         }
+                        self.setup.load_ical(&state);
                         let confirmed = state.stage == "ready";
                         if !confirmed {
                             self.account = None;
