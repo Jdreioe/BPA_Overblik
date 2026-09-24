@@ -290,8 +290,7 @@ impl SetupUi {
     pub fn standard_view(&self) -> Element<'_, Message> {
         let mut content = column![
             text("Standardtider").size(20),
-            text("Bruges når en vagt i TeamUp eller kalenderen er heldags, eller når tiden mangler i regnearket.")
-                .size(13),
+            text("Bruges når en vagt ikke har egne tider.").size(13),
         ]
         .spacing(10);
         content = content
@@ -527,9 +526,7 @@ impl SetupUi {
     /// Links to one or more published calendars, and where the helper is.
     fn ical_connection(&self) -> Element<'_, Message> {
         let mut content = column![
-            text("Google Kalender: Indstillinger → din kalender → Integrer kalender → Hemmelig adresse i iCal-format").size(12),
-            text("Outlook: Indstillinger → Kalender → Delte kalendere → Udgiv en kalender → ICS").size(12),
-            text("iCloud: Del kalender → Offentlig kalender → Kopiér link").size(12),
+            text("Brug kalenderens private iCal-link.").size(12),
             radio(
                 "Én kalender pr. hjælper",
                 false,
@@ -537,7 +534,7 @@ impl SetupUi {
                 Message::IcalShared,
             ),
             radio(
-                "Én fælles kalender med hjælperens navn i titlen",
+                "Én fælles kalender",
                 true,
                 Some(self.ical_shared),
                 Message::IcalShared,
@@ -551,7 +548,7 @@ impl SetupUi {
         };
         for index in 0..fields {
             let value = self.ical_links.get(index).map_or("", String::as_str);
-            let mut line = row![text_input("iCal-link (https:// eller webcal://)", value)
+            let mut line = row![text_input("iCal-link", value)
                 .id(iced::widget::Id::from(format!("ical-link-{index}")))
                 .on_input(move |link| Message::IcalLink(index, link))
                 .secure(true)
@@ -565,21 +562,20 @@ impl SetupUi {
         }
         if self.ical_shared {
             content = content
-                .push(text("Hvor står hjælperens navn i titlen?").size(13))
                 .push(radio(
-                    "Før tegnet, f.eks. »Anna - Vagt«",
+                    "Navn før tegnet",
                     TitlePart::Before,
                     Some(self.ical_part),
                     Message::IcalPart,
                 ))
                 .push(radio(
-                    "Efter tegnet, f.eks. »Vagt: Anna«",
+                    "Navn efter tegnet",
                     TitlePart::After,
                     Some(self.ical_part),
                     Message::IcalPart,
                 ))
                 .push(radio(
-                    "Hele titlen er navnet, f.eks. »Anna«",
+                    "Kun navn",
                     TitlePart::Whole,
                     Some(self.ical_part),
                     Message::IcalPart,
@@ -598,14 +594,8 @@ impl SetupUi {
                     .align_y(iced::alignment::Vertical::Center),
                 );
             }
-            content = content.push(
-                text("Navnene, appen finder, vises under Hjælpere, så du kan tjekke dem.").size(12),
-            );
         } else {
-            content = content.push(quiet_button(
-                "Tilføj endnu en kalender",
-                Message::AddIcalLink,
-            ));
+            content = content.push(quiet_button("Tilføj kalender", Message::AddIcalLink));
         }
         let ready = self.ical_links.iter().any(|link| !link.trim().is_empty());
         content
