@@ -37,7 +37,8 @@ First-time setup happens in the desktop app, not in a config file:
 cargo run -p teamup-shift-sync-gui
 ```
 
-Connect TeamUp or Google Sheets, log in to MitHF, optionally enable DUOS,
+Connect TeamUp or a spreadsheet (Google Sheets, OneDrive, SharePoint, Nextcloud,
+Dropbox, a direct link, or a local `.xlsx`, `.ods` or `.csv`), log in to MitHF, optionally enable DUOS,
 map helpers, and review the week. Credentials live in the OS credential store;
 setup and sync history live in the per-user application data directory
 (`TEAMUP_SHIFT_SYNC_DATA_DIR` overrides it). Do not commit API keys, `setup.json`

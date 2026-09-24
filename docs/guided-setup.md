@@ -5,7 +5,7 @@ Fixture previews are CLI-only; the desktop app never opens example data.
 
 ## First run
 
-1. Choose TeamUp or Google Sheets. For TeamUp, paste a shared `https://teamup.com/ks…` calendar link and the one-time API
+1. Choose TeamUp or **Regneark** (a spreadsheet). For TeamUp, paste a shared `https://teamup.com/ks…` calendar link and the one-time API
    key. The app reads calendar configuration and the current week's events,
    including each event's comments. Account-only, password-protected and
    restricted links need a shared link with suitable access from the calendar
@@ -30,15 +30,56 @@ Closing the app preserves submitted credentials, discovery and each dropdown
 or exclusion edit. Failed discovery can be retried.
 
 
-## Google Sheets source
+## Spreadsheet source
 
-Paste the link for a specific tab of a Google Sheet shared as **Anyone with the
-link can view**. This route reads Google's CSV export without a Google account
-or API key. The link itself grants access, so the app stores it in the OS
-credential store. Only a `docs.google.com/spreadsheets/d/…/edit` link with a
-numeric tab ID is accepted. The app never edits the sheet.
+Choose **Regneark**, then paste a link or choose **Vælg fil …**. The app only
+reads the spreadsheet, never edits it, and needs no account or API key.
 
-Then show the app one shift. In the sheet, select the cells of one filled
+| Source | What to paste or choose |
+| --- | --- |
+| Google Sheets | The tab's `docs.google.com/spreadsheets/d/…/edit` link, shared as **Anyone with the link can view**. The app reads that tab's CSV export. |
+| Google Sheets, published | A **File → Share → Publish to web** link. `pubhtml` is read as the whole workbook. |
+| OneDrive, Excel for the web | A view-only **Anyone with the link** share link, including `1drv.ms` short links. |
+| SharePoint | A view-only **Anyone with the link** share link. |
+| Nextcloud, ownCloud | A public share link (`…/s/<token>`). |
+| Dropbox | A share link. |
+| Anything else | An `https://` link that downloads an `.xlsx`, `.ods` or `.csv` file itself. |
+| A file on this computer | **Vælg fil …**. This also covers a file in a synced OneDrive, Dropbox or iCloud Drive folder. |
+
+The app rewrites a known provider's share link to its download address. It
+fetches only `https://`, redirects included, and refuses files over 10 MB or
+downloads over 30 seconds. A link that returns a login page instead of a file
+says so. A chosen file is read again on every preview and before every
+transfer, just like a link.
+
+The file's type is judged by its content, not its name:
+
+- **CSV:** separated by `,` or by `;` (as Danish Excel saves it), with or
+  without a UTF-8 byte order mark.
+- **`.xlsx` and `.ods`:** each cell is read as the text the person sees, which
+  is what the template below is learned from. An `.ods` file stores that text.
+  An `.xlsx` file stores values and number formats, so dates, times and numbers
+  are shown the way Danish Excel and LibreOffice show them: `02-11-2026`,
+  `mandag`, `08:00`, `7,5`. A merged range keeps its value in the top-left cell.
+  Formulas use their saved result and are never recalculated.
+- **`.xls` and `.xlsb`:** refused with a request to save as `.xlsx`. Their number
+  formats can't be read, so a date cell that shows only a weekday or a month
+  would be read as a date.
+- **Apple Numbers:** not supported, and neither are iCloud share links. Export
+  to `.xlsx`, or keep the file in iCloud Drive and choose it as a local file.
+
+A workbook with several tabs asks which one to read, and the choice is kept by
+name. A renamed or removed tab gives a message instead of reading another tab.
+Choose it again under **Indstillinger → Udbydere**.
+
+The link or path and the tab are stored in the OS credential store, never in
+`setup.json` or a diagnostics report. A share link grants access, and a path
+can contain the user's name. Sync history belongs to the link or path and the
+tab, so a Google Sheets setup keeps its history. Moving the same plan to
+another provider, file or tab starts a new history. Its earlier transfers are
+then not recognised, so check the first week carefully.
+
+Then show the app one shift. In the spreadsheet, select the cells of one filled
 shift (for a weekly grid, one day's column: date, weekday, helper, time, SPS),
 copy them, and choose **Indsæt vagt**. Click the date, the helper and the time
 in turn, then the SPS hours and a title such as `P-MØDE`, or skip those two.
