@@ -8,7 +8,7 @@ use iced::widget::{
 use iced::{Element, Length, Subscription, Task};
 use serde_json::Value;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -97,6 +97,8 @@ struct ProgressUnit {
 #[derive(Clone, Debug)]
 struct StepLabels {
     unit: ProgressUnit,
+    /// Helper and date, e.g. "Anna 3. sep", naming the shift if it stays unresolved.
+    shift: String,
     started: String,
     verified: String,
 }
@@ -107,7 +109,8 @@ struct StepLabels {
 struct TransferProgress {
     expected: BTreeMap<ProgressUnit, usize>,
     current: String,
-    uncertain: BTreeSet<ProgressUnit>,
+    /// Submitted units without a verified outcome, with their shift label.
+    uncertain: BTreeMap<ProgressUnit, String>,
     verified: Vec<VerifiedStep>,
 }
 
@@ -201,7 +204,8 @@ struct ApplyFailure {
     /// than that the transfer did not finish.
     message: String,
     verified: usize,
-    uncertain: usize,
+    /// Shifts whose write may or may not have been saved, and where.
+    uncertain: Vec<(Destination, String)>,
     remaining: usize,
 }
 
@@ -237,19 +241,45 @@ fn format_verified_da(moment: DateTime<FixedOffset>, zone: chrono_tz::Tz) -> Str
     )
 }
 
+/// A short notice after a failed run. Unresolved shifts come first, since the
+/// user must check them in the service before anything else.
 fn failure_notice(failure: &ApplyFailure) -> Notice {
-    let mut detail = failure.message.clone();
-    if !detail.is_empty() {
-        detail.push(' ');
+    let rest = if failure.remaining == 0 {
+        "Resten er overført.".to_owned()
+    } else {
+        format!(
+            "{} af {} ændringer er overført. Vælg Kontrollér igen for at overføre resten.",
+            failure.verified,
+            failure.verified + failure.uncertain.len() + failure.remaining
+        )
+    };
+    if failure.uncertain.is_empty() {
+        let detail = if failure.message.is_empty() {
+            rest
+        } else {
+            format!("{} {rest}", failure.message)
+        };
+        return Notice::new(Tone::Error, "Overførslen blev ikke færdig", detail);
     }
-    detail.push_str(&format!(
-        "{} verificeret, {} uafklaret og {} ikke startet.",
-        failure.verified, failure.uncertain, failure.remaining
-    ));
-    if failure.uncertain > 0 {
-        detail.push_str(" En uafklaret ændring kan allerede være gemt.");
+    // Units sort by destination first, so each service's shifts are adjacent.
+    let mut checks: Vec<(Destination, Vec<&str>)> = Vec::new();
+    for (destination, shift) in &failure.uncertain {
+        match checks.last_mut() {
+            Some((last, shifts)) if last == destination => shifts.push(shift),
+            _ => checks.push((*destination, vec![shift])),
+        }
     }
-    Notice::new(Tone::Error, "Overførslen blev ikke færdig", detail)
+    let checks: Vec<String> = checks
+        .iter()
+        .map(|(destination, shifts)| {
+            format!("{} er inde på {}", shifts.join(" og "), destination.name())
+        })
+        .collect();
+    Notice::new(
+        Tone::Warning,
+        format!("Dobbelttjek at {}", checks.join(", og at ")),
+        rest,
+    )
 }
 
 fn progress_line(verified: usize, total: usize) -> String {
@@ -914,6 +944,7 @@ impl Engine {
                     (item.source_key.clone(), item.step_key.clone()),
                     StepLabels {
                         unit,
+                        shift: format!("{helper} {date}"),
                         started: format!("{} {helper} {date} i {service}", verb_of(item.outcome)),
                         verified: format!("Verificeret: {helper} {date} i {service}"),
                     },
@@ -999,7 +1030,7 @@ fn update_transfer_progress(
         match phase {
             Phase::Started => state.current = labels.started.clone(),
             Phase::Uncertain => {
-                state.uncertain.insert(unit);
+                state.uncertain.insert(unit, labels.shift.clone());
             }
             Phase::Verified => {
                 state.uncertain.remove(&unit);
@@ -1018,7 +1049,11 @@ fn apply_failure(message: String, progress: &Arc<StdMutex<TransferProgress>>) ->
         .map(|state| {
             (
                 state.verified_units(),
-                state.uncertain.len(),
+                state
+                    .uncertain
+                    .iter()
+                    .map(|(unit, shift)| (unit.destination, shift.clone()))
+                    .collect::<Vec<_>>(),
                 state.expected.len(),
             )
         })
@@ -1026,8 +1061,8 @@ fn apply_failure(message: String, progress: &Arc<StdMutex<TransferProgress>>) ->
     ApplyFailure {
         message,
         verified,
+        remaining: total.saturating_sub(verified + uncertain.len()),
         uncertain,
-        remaining: total.saturating_sub(verified + uncertain),
     }
 }
 
@@ -1104,6 +1139,7 @@ enum Message {
     Apply,
     StopApply,
     ApplyTick,
+    NoticeTick(std::time::Instant),
     Applied(ApplyResult),
     CloseRequested(iced::window::Id),
     CheckUpdates,
@@ -1181,8 +1217,14 @@ struct NativeApp {
     monday: NaiveDate,
     preview: Option<Preview>,
     activity: Activity,
-    /// The last action's result or error, until the next action or dismissal.
+    /// The last action's result or error, until the next action, dismissal
+    /// or `NOTICE_SECONDS`.
     status: Option<Notice>,
+    /// When `status`, the week's status notice and the blocked-helpers
+    /// notice last changed, so each hides a fixed time after it appears.
+    status_since: std::time::Instant,
+    week_status_since: std::time::Instant,
+    blocked_since: std::time::Instant,
     last_verified: Option<String>,
     apply_progress: Option<Arc<StdMutex<TransferProgress>>>,
     apply_stop: Option<Arc<AtomicBool>>,
@@ -1211,6 +1253,8 @@ struct NativeApp {
 impl NativeApp {
     /// Silent GitHub check while the window stays open. Startup already ran one.
     const UPDATE_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
+    /// How long a notice stays before it hides itself.
+    const NOTICE_SECONDS: std::time::Duration = std::time::Duration::from_secs(10);
 
     fn new() -> (Self, Task<Message>) {
         let mut app = Self {
@@ -1225,6 +1269,9 @@ impl NativeApp {
             preview: None,
             activity: Activity::Idle,
             status: None,
+            status_since: std::time::Instant::now(),
+            week_status_since: std::time::Instant::now(),
+            blocked_since: std::time::Instant::now(),
             last_verified: None,
             apply_progress: None,
             apply_stop: None,
@@ -1289,7 +1336,41 @@ impl NativeApp {
         }
         Task::none()
     }
+    /// Handles `message`, then restarts a notice's timer if it changed. Many
+    /// paths set `status`, so this is the one place that sees them all.
     fn update(&mut self, message: Message) -> Task<Message> {
+        let status = self.status.clone();
+        let week = self.week_notice();
+        let blocked = self.blocked_reason();
+        let task = self.handle(message);
+        let now = std::time::Instant::now();
+        if self.status != status {
+            self.status_since = now;
+        }
+        if self.week_notice() != week {
+            self.week_status_since = now;
+        }
+        if self.blocked_reason() != blocked {
+            self.blocked_since = now;
+            self.setup.blocked_hidden = false;
+        }
+        task
+    }
+    /// The week's status notice while shown, keyed by the preview it belongs
+    /// to so a new preview with the same text still counts as new.
+    fn week_notice(&self) -> Option<(NaiveDate, String, Notice)> {
+        self.preview
+            .as_ref()
+            .filter(|p| !p.status_dismissed)
+            .map(|p| (p.from, p.digest.clone(), p.week.status.clone()))
+    }
+    fn blocked_reason(&self) -> Option<String> {
+        self.setup
+            .state
+            .as_ref()
+            .and_then(|state| state.blocked.clone())
+    }
+    fn handle(&mut self, message: Message) -> Task<Message> {
         // One operation at a time. In particular, navigation/setup/login cannot
         // change the selected account or approval while an apply is running.
         let completion = matches!(
@@ -1323,6 +1404,20 @@ impl NativeApp {
                 Activity::Apply => self.refresh_progress(),
                 Activity::Preview => self.refresh_fetch(),
                 _ => {}
+            }
+            return Task::none();
+        }
+        if let Message::NoticeTick(now) = message {
+            if now.duration_since(self.status_since) >= Self::NOTICE_SECONDS {
+                self.status = None;
+            }
+            if now.duration_since(self.blocked_since) >= Self::NOTICE_SECONDS {
+                self.setup.blocked_hidden = true;
+            }
+            if now.duration_since(self.week_status_since) >= Self::NOTICE_SECONDS {
+                if let Some(preview) = &mut self.preview {
+                    preview.status_dismissed = true;
+                }
             }
             return Task::none();
         }
@@ -2057,7 +2152,7 @@ impl NativeApp {
                 let progress = Arc::new(StdMutex::new(TransferProgress {
                     expected,
                     current: String::new(),
-                    uncertain: BTreeSet::new(),
+                    uncertain: BTreeMap::new(),
                     verified: Vec::new(),
                 }));
                 let stop = Arc::new(AtomicBool::new(false));
@@ -2112,7 +2207,10 @@ impl NativeApp {
                     return iced::window::close(id);
                 }
             }
-            Message::StopApply | Message::ApplyTick | Message::CloseRequested(_) => {}
+            Message::StopApply
+            | Message::ApplyTick
+            | Message::NoticeTick(_)
+            | Message::CloseRequested(_) => {}
             Message::CheckUpdates => {
                 if self.update_manual || self.update_ready.is_some() || self.update_offer.is_some()
                 {
@@ -2284,6 +2382,14 @@ impl NativeApp {
             if self.activity == Activity::Update {
                 iced::time::every(std::time::Duration::from_millis(120))
                     .map(|_| Message::UpdateTick)
+            } else {
+                Subscription::none()
+            },
+            if self.status.is_some()
+                || self.week_notice().is_some()
+                || (self.blocked_reason().is_some() && !self.setup.blocked_hidden)
+            {
+                iced::time::every(std::time::Duration::from_secs(1)).map(Message::NoticeTick)
             } else {
                 Subscription::none()
             },
@@ -2906,6 +3012,9 @@ mod tests {
             preview: None,
             activity: Activity::Idle,
             status: None,
+            status_since: std::time::Instant::now(),
+            week_status_since: std::time::Instant::now(),
+            blocked_since: std::time::Instant::now(),
             last_verified: None,
             apply_progress: None,
             apply_stop: None,
@@ -2991,21 +3100,41 @@ mod tests {
         let _ = app.update(Message::Applied(Err(ApplyFailure {
             message: "Uafklaret ændring".into(),
             verified: 0,
-            uncertain: 1,
+            uncertain: vec![(Destination::Mithf, "Anna 3. sep".into())],
             remaining: 0,
         })));
         assert_eq!(app.activity, Activity::Idle);
         assert!(app.preview.is_none());
         let status = app.status.as_ref().expect("failure notice");
-        assert_eq!(status.tone, Tone::Error);
-        assert_eq!(status.title, "Overførslen blev ikke færdig");
-        assert!(status.detail.starts_with("Uafklaret ændring "));
-        assert!(status.detail.contains("1 uafklaret"));
+        assert_eq!(status.tone, Tone::Warning);
+        assert_eq!(status.title, "Dobbelttjek at Anna 3. sep er inde på MitHF");
+        assert_eq!(status.detail, "Resten er overført.");
         assert!(app.needs_recheck);
         let _ = app.update(Message::Apply);
         assert_eq!(app.activity, Activity::Idle);
         // Widget construction exercises the recoverable failure screen.
         let _ = app.view();
+    }
+    #[test]
+    fn notices_hide_ten_seconds_after_they_appear() {
+        let mut app = app();
+        app.preview = Some(preview(&app, true));
+        let _ = app.update(Message::Apply);
+        let _ = app.update(Message::Applied(Err(ApplyFailure {
+            message: String::new(),
+            verified: 0,
+            uncertain: vec![(Destination::Mithf, "Anna 3. sep".into())],
+            remaining: 0,
+        })));
+        let shown = std::time::Instant::now();
+        let _ = app.update(Message::NoticeTick(
+            shown + std::time::Duration::from_secs(5),
+        ));
+        assert!(app.status.is_some());
+        let _ = app.update(Message::NoticeTick(
+            shown + std::time::Duration::from_secs(11),
+        ));
+        assert!(app.status.is_none());
     }
     #[test]
     fn approved_duos_registration_can_start_apply() {
