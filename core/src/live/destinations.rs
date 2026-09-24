@@ -972,6 +972,7 @@ mod tests {
     fn config(arrangement: &str, setup: Value) -> LiveConfig {
         LiveConfig {
             sheet: None,
+            ical: None,
             planning: crate::PlanningConfig {
                 timezone: chrono_tz::Europe::Copenhagen,
                 default_helper_count: 1,

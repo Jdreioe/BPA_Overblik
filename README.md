@@ -1,7 +1,8 @@
 # TeamUp shift sync
 
 A local, manually triggered weekly importer for planning helper shifts from
-TeamUp or a shared Google Sheet in MitHF. SPS registration in DUOS is optional.
+TeamUp, a shared Google Sheet or any calendar's iCal feed in MitHF. SPS
+registration in DUOS is optional.
 
 One pure Rust core owns parsing, planning, approval, transfers and sync state.
 The Iced desktop app and a small CLI both use it. There is no Python
@@ -37,7 +38,7 @@ First-time setup happens in the desktop app, not in a config file:
 cargo run -p teamup-shift-sync-gui
 ```
 
-Connect TeamUp or Google Sheets, log in to MitHF, optionally enable DUOS,
+Connect TeamUp, Google Sheets or an iCal calendar, log in to MitHF, optionally enable DUOS,
 map helpers, and review the week. Credentials live in the OS credential store;
 setup and sync history live in the per-user application data directory
 (`TEAMUP_SHIFT_SYNC_DATA_DIR` overrides it). Do not commit API keys, `setup.json`
@@ -47,11 +48,11 @@ In **Indstillinger → Standardtider**, enter a shared shift time such as `6-22`
 may have no times of their own. Each weekday can use that time, override it
 (for example `8-20`), or say `ingen` to have no standard that day. Leaving the
 shared field empty means there is no standard unless a weekday overrides it.
-Both sources use the same rule: a single-day TeamUp all-day event on a confirmed
-helper calendar, or a Sheets shift with a helper and an empty time field, uses
-that date's standard. A Sheets row with separate start and end cells uses it
+All sources use the same rule: a single-day TeamUp or iCal all-day event on a
+confirmed helper calendar, or a Sheets shift with a helper and an empty time
+field, uses that date's standard. A Sheets row with separate start and end cells uses it
 only when both cells are empty. The preview marks these shifts `standardtid`.
-An unset weekday, a multi-day TeamUp all-day event, or a clock time invalid
+An unset weekday, a multi-day TeamUp or iCal all-day event, or a clock time invalid
 on a daylight-saving transition requires correction before transfer.
 Reminder titles remain excluded. Ordinary timed shifts keep their own hours.
 Valid times save automatically. Changing the setting revokes approval of the
@@ -227,8 +228,8 @@ its label. A shift split for several SPS intervals shows its parts. Under the
 grid, the same week is repeated as text with the values the grid has no room
 for, including old and new values for changes and the affected destination.
 
-For TeamUp, blocks use the helper's calendar colour. For Sheets, blocks
-use a neutral fill. Both have a status outline: new,
+For TeamUp, blocks use the helper's calendar colour. For Sheets and iCal,
+blocks use a neutral fill. Both have a status outline: new,
 changed, unchanged or needs attention. Status never depends on colour alone —
 each block also carries a text marker, and the day-by-day list below spells it
 out. The guided setup reads TeamUp colours automatically; a

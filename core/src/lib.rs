@@ -5,6 +5,7 @@
 
 mod approval;
 pub mod fixture;
+pub mod ical;
 pub mod live;
 mod models;
 mod parser;

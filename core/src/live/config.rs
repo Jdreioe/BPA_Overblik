@@ -4,6 +4,7 @@ use std::{
 };
 
 use super::{
+    ical::{self, IcalAccess},
     id, rows,
     sheets::{parse_link, SheetAccess},
     text, LiveError, INVALID,
@@ -20,6 +21,7 @@ pub struct LiveConfig {
     pub(crate) api_key: String,
     pub(crate) bearer: String,
     pub(crate) sheet: Option<SheetAccess>,
+    pub(crate) ical: Option<IcalAccess>,
     pub(crate) setup: Value,
     pub(crate) lookback_days: i64,
     pub state_path: PathBuf,
@@ -98,6 +100,22 @@ pub(crate) fn account_scope(setup: &Value, calendar: &str) -> Result<String, Liv
     Ok(hash[..24].to_owned())
 }
 
+/// The saved iCal feeds and helper rule. Shared with setup, which reads the
+/// same feeds before a configuration is confirmed.
+pub(crate) fn ical_access(setup: &Value, secret: &Value) -> Result<IcalAccess, LiveError> {
+    let rule = serde_json::from_value(setup["ical_rule"].clone())
+        .map_err(|_| LiveError("Kalenderens gemte opsætning er ugyldig."))?;
+    let links: Vec<String> = serde_json::from_value(secret["feeds"].clone()).map_err(|_| INVALID)?;
+    let excluded = setup["mappings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|row| row["excluded"] == json!(true))
+        .filter_map(|row| row["source"].as_str().map(str::to_owned))
+        .collect();
+    ical::access(&links, rule, excluded)
+}
+
 fn config_from_setup(
     setup: Value,
     secret: &Value,
@@ -136,15 +154,16 @@ fn config_from_setup(
     if helpers.is_empty() {
         return Err(LiveError("Opsætningen mangler bekræftede hjælpere."));
     }
-    let sheet = match setup["source"].as_str().unwrap_or("teamup") {
-        "teamup" => None,
+    let (sheet, ical) = match setup["source"].as_str().unwrap_or("teamup") {
+        "teamup" => (None, None),
         "sheets" => {
             let layout: crate::sheets::SheetLayout =
                 serde_json::from_value(setup["sheet_layout"].clone())
                     .map_err(|_| LiveError("Regnearkets gemte opsætning er ugyldig."))?;
             let link = text(&secret["link"])?;
-            Some(parse_link(link, layout)?)
+            (Some(parse_link(link, layout)?), None)
         }
+        "ical" => (None, Some(ical_access(&setup, secret)?)),
         _ => return Err(LiveError("Ukendt kilde i opsætningen.")),
     };
     let (calendar, api_key, bearer, scope_source) = if let Some(sheet) = &sheet {
@@ -154,6 +173,8 @@ fn config_from_setup(
             String::new(),
             sheet.source_id(),
         )
+    } else if let Some(ical) = &ical {
+        (String::new(), String::new(), String::new(), ical.source_id())
     } else {
         let calendar = text(&secret["calendar"])?.to_owned();
         let api_key = text(&secret["api_key"])?.to_owned();
@@ -220,6 +241,7 @@ fn config_from_setup(
         api_key,
         bearer,
         sheet,
+        ical,
         lookback_days,
         setup,
         helper_names: names,
