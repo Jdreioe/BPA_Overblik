@@ -7,7 +7,7 @@
 use chrono::{Datelike, NaiveDate};
 use iced::widget::{button, column, container, row, space, text, tooltip};
 use iced::{Color, Element, Length};
-use teamup_shift_sync_gui::protocol::{Block, Notice, Tone, Week};
+use teamup_shift_sync_gui::protocol::{Block, Marker, Notice, Tone, Week};
 
 pub const DANISH_MONTHS: [&str; 12] = [
     "januar",
@@ -209,8 +209,15 @@ fn group_box(theme: &iced::Theme) -> container::Style {
     }
 }
 
-/// Seven day columns with each shift drawn over the hours it covers.
+/// Height of one marker chip above a day column, including its gap.
+const MARKER_HEIGHT: f32 = 22.0;
+
+/// Seven day columns with each shift drawn over the hours it covers. Markers
+/// sit above the clock, never on it: they are not shifts. Every column gets
+/// the same marker area, so the hours stay aligned across the week.
 pub fn week_grid<'a, M: 'a>(week: &'a Week) -> Element<'a, M> {
+    let marker_rows = week.days.iter().map(|d| d.markers.len()).max().unwrap_or(0);
+    let marker_area = MARKER_HEIGHT * marker_rows as f32;
     let mut hours = column![].width(Length::Fixed(28.0));
     for hour in 0..24 {
         hours = hours.push(
@@ -221,6 +228,7 @@ pub fn week_grid<'a, M: 'a>(week: &'a Week) -> Element<'a, M> {
     }
     let mut columns = row![column![
         text(" ").size(11),
+        space::vertical().height(Length::Fixed(marker_area)),
         container(hours).height(Length::Fixed(GRID_HEIGHT)),
     ]
     .spacing(4)]
@@ -259,9 +267,27 @@ pub fn week_grid<'a, M: 'a>(week: &'a Week) -> Element<'a, M> {
             }
             lanes = lanes.push(lane);
         }
+        let mut markers = column![].spacing(2);
+        for marker in &day.markers {
+            markers = markers.push(tooltip(
+                container(
+                    text(format!("⚑ {}: {}", marker.helper, marker.title))
+                        .size(10)
+                        .wrapping(text::Wrapping::None),
+                )
+                .height(Length::Fixed(MARKER_HEIGHT - 2.0))
+                .width(Length::Fill)
+                .padding([2, 4])
+                .clip(true)
+                .style(marker_style(&marker.helper_color)),
+                marker_details(marker),
+                tooltip::Position::FollowCursor,
+            ));
+        }
         columns = columns.push(
             column![
                 text(&day.label).size(11),
+                container(markers).height(Length::Fixed(marker_area)),
                 container(lanes)
                     .height(Length::Fixed(GRID_HEIGHT))
                     .width(Length::Fill),
@@ -271,6 +297,45 @@ pub fn week_grid<'a, M: 'a>(week: &'a Week) -> Element<'a, M> {
         );
     }
     columns.into()
+}
+
+fn marker_details<'a, M: 'a>(marker: &'a Marker) -> Element<'a, M> {
+    container(
+        column![
+            text(&marker.title).size(13).font(iced::Font {
+                weight: iced::font::Weight::Bold,
+                ..iced::Font::DEFAULT
+            }),
+            text(format!(
+                "{} · {} · overføres ikke",
+                marker.helper, marker.time_label
+            ))
+            .size(12),
+        ]
+        .spacing(2),
+    )
+    .padding(8)
+    .max_width(320)
+    .style(container::bordered_box)
+    .into()
+}
+
+/// A marker is a note, not a shift: a thin grey outline around the helper's
+/// tint, with the ⚑ sign in its text so it never relies on colour.
+fn marker_style(helper_color: &str) -> impl Fn(&iced::Theme) -> container::Style + use<> {
+    let fill = parse_hex(helper_color)
+        .map(|color| tint(color, 0.85))
+        .unwrap_or(Color::from_rgb8(0xF0, 0xF0, 0xF0));
+    move |_theme: &iced::Theme| container::Style {
+        background: Some(fill.into()),
+        text_color: Some(Color::from_rgb8(0x1A, 0x1A, 0x1A)),
+        border: iced::Border {
+            color: Color::from_rgb8(0x75, 0x75, 0x75),
+            width: 1.0,
+            radius: 8.0.into(),
+        },
+        ..container::Style::default()
+    }
 }
 
 fn block_body<'a, M: 'a>(block: &'a Block) -> Element<'a, M> {

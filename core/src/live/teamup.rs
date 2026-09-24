@@ -3,12 +3,13 @@ use futures_util::{stream, StreamExt, TryStreamExt};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+use super::SourceWeek;
 use super::{
     choice, id, rows, text, timestamp, timing::Stage, unique, LiveConfig, LiveError,
     SourceReadError, INVALID,
 };
 use crate::standard_time::StandardTimes;
-use crate::{classify_source_title, SourceComment, SourceShift, SourceTitle};
+use crate::{is_marker, SourceComment, SourceMarker, SourceShift};
 
 /// The three TeamUp credentials a request needs. Setup holds these before a
 /// confirmed configuration exists, so requests take them directly.
@@ -101,7 +102,7 @@ pub async fn read_teamup(
     config: &LiveConfig,
     start: NaiveDate,
     end: NaiveDate,
-) -> Result<Vec<SourceShift>, SourceReadError> {
+) -> Result<SourceWeek, SourceReadError> {
     if end < start {
         return Err(LiveError("Slutdatoen skal være på eller efter startdatoen.").into());
     }
@@ -157,10 +158,32 @@ pub async fn read_teamup(
         .await?;
     stage.done(details.len());
     let mut shifts = Vec::new();
+    let mut markers = Vec::new();
     for detail in &details {
         let raw = &detail["event"];
         let shift = parse_occurrence(config, raw)?;
         let all_day = raw["all_day"].as_bool().unwrap_or(false);
+        // A marker is shown once per confirmed helper calendar it is on. It
+        // never fails the week: an unreadable calendar id only hides it.
+        if is_marker(&shift.title, &config.markers) {
+            if shift.ends_at > from && shift.starts_at < to {
+                let helpers: std::collections::BTreeSet<_> = raw["subcalendar_ids"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|calendar| id(calendar).ok())
+                    .filter(|calendar| config.planning.helpers.contains_key(calendar))
+                    .collect();
+                markers.extend(helpers.into_iter().map(|helper_key| SourceMarker {
+                    helper_key,
+                    title: shift.title.clone(),
+                    starts_at: shift.starts_at,
+                    ends_at: shift.ends_at,
+                    all_day,
+                }));
+            }
+            continue;
+        }
         if shift.starts_at >= to
             || (shift.ends_at <= from
                 && (!all_day
@@ -170,9 +193,6 @@ pub async fn read_teamup(
                         .date_naive()
                         < start.pred_opt().unwrap_or(start)))
         {
-            continue;
-        }
-        if classify_source_title(&shift.title) == SourceTitle::Reminder {
             continue;
         }
         let assignments: Vec<_> = rows(&raw["subcalendar_ids"])?
@@ -209,7 +229,7 @@ pub async fn read_teamup(
             shifts.push(shift);
         }
     }
-    Ok(shifts)
+    Ok(SourceWeek { shifts, markers })
 }
 
 fn use_standard_time(
