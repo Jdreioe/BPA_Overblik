@@ -346,6 +346,11 @@ pub fn midnight(date: NaiveDate, zone: chrono_tz::Tz) -> Result<DateTime<FixedOf
         .ok_or(INVALID)
 }
 
+/// The `SourceShift::calendar_id` of every shift read with this share key.
+pub(crate) fn calendar_id(calendar: &str) -> String {
+    format!("{:x}", Sha256::digest(calendar.as_bytes()))[..24].into()
+}
+
 fn parse_occurrence(config: &LiveConfig, raw: &Value) -> Result<SourceShift, LiveError> {
     let occurrence_id = id(&raw["id"])?;
     let title = raw["title"].as_str().unwrap_or("");
@@ -400,9 +405,8 @@ fn parse_occurrence(config: &LiveConfig, raw: &Value) -> Result<SourceShift, Liv
     if ends_at <= starts_at {
         return Err(INVALID);
     }
-    let hash = format!("{:x}", Sha256::digest(config.calendar.as_bytes()));
     Ok(SourceShift {
-        calendar_id: hash[..24].into(),
+        calendar_id: calendar_id(&config.calendar),
         event_id: if raw["series_id"].is_null() {
             occurrence_id.split("-rid-").next().unwrap().into()
         } else {
