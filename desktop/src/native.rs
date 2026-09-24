@@ -1125,6 +1125,7 @@ enum Message {
     Apply,
     StopApply,
     ApplyTick,
+    NoticeTick(std::time::Instant),
     Applied(ApplyResult),
     CloseRequested(iced::window::Id),
     CheckUpdates,
@@ -1202,8 +1203,14 @@ struct NativeApp {
     monday: NaiveDate,
     preview: Option<Preview>,
     activity: Activity,
-    /// The last action's result or error, until the next action or dismissal.
+    /// The last action's result or error, until the next action, dismissal
+    /// or `NOTICE_SECONDS`.
     status: Option<Notice>,
+    /// When `status`, the week's status notice and the blocked-helpers
+    /// notice last changed, so each hides a fixed time after it appears.
+    status_since: std::time::Instant,
+    week_status_since: std::time::Instant,
+    blocked_since: std::time::Instant,
     last_verified: Option<String>,
     apply_progress: Option<Arc<StdMutex<TransferProgress>>>,
     apply_stop: Option<Arc<AtomicBool>>,
@@ -1232,6 +1239,8 @@ struct NativeApp {
 impl NativeApp {
     /// Silent GitHub check while the window stays open. Startup already ran one.
     const UPDATE_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
+    /// How long a notice stays before it hides itself.
+    const NOTICE_SECONDS: std::time::Duration = std::time::Duration::from_secs(10);
 
     fn new() -> (Self, Task<Message>) {
         let mut app = Self {
@@ -1246,6 +1255,9 @@ impl NativeApp {
             preview: None,
             activity: Activity::Idle,
             status: None,
+            status_since: std::time::Instant::now(),
+            week_status_since: std::time::Instant::now(),
+            blocked_since: std::time::Instant::now(),
             last_verified: None,
             apply_progress: None,
             apply_stop: None,
@@ -1310,7 +1322,41 @@ impl NativeApp {
         }
         Task::none()
     }
+    /// Handles `message`, then restarts a notice's timer if it changed. Many
+    /// paths set `status`, so this is the one place that sees them all.
     fn update(&mut self, message: Message) -> Task<Message> {
+        let status = self.status.clone();
+        let week = self.week_notice();
+        let blocked = self.blocked_reason();
+        let task = self.handle(message);
+        let now = std::time::Instant::now();
+        if self.status != status {
+            self.status_since = now;
+        }
+        if self.week_notice() != week {
+            self.week_status_since = now;
+        }
+        if self.blocked_reason() != blocked {
+            self.blocked_since = now;
+            self.setup.blocked_hidden = false;
+        }
+        task
+    }
+    /// The week's status notice while shown, keyed by the preview it belongs
+    /// to so a new preview with the same text still counts as new.
+    fn week_notice(&self) -> Option<(NaiveDate, String, Notice)> {
+        self.preview
+            .as_ref()
+            .filter(|p| !p.status_dismissed)
+            .map(|p| (p.from, p.digest.clone(), p.week.status.clone()))
+    }
+    fn blocked_reason(&self) -> Option<String> {
+        self.setup
+            .state
+            .as_ref()
+            .and_then(|state| state.blocked.clone())
+    }
+    fn handle(&mut self, message: Message) -> Task<Message> {
         // One operation at a time. In particular, navigation/setup/login cannot
         // change the selected account or approval while an apply is running.
         let completion = matches!(
@@ -1344,6 +1390,20 @@ impl NativeApp {
                 Activity::Apply => self.refresh_progress(),
                 Activity::Preview => self.refresh_fetch(),
                 _ => {}
+            }
+            return Task::none();
+        }
+        if let Message::NoticeTick(now) = message {
+            if now.duration_since(self.status_since) >= Self::NOTICE_SECONDS {
+                self.status = None;
+            }
+            if now.duration_since(self.blocked_since) >= Self::NOTICE_SECONDS {
+                self.setup.blocked_hidden = true;
+            }
+            if now.duration_since(self.week_status_since) >= Self::NOTICE_SECONDS {
+                if let Some(preview) = &mut self.preview {
+                    preview.status_dismissed = true;
+                }
             }
             return Task::none();
         }
@@ -2073,7 +2133,10 @@ impl NativeApp {
                     return iced::window::close(id);
                 }
             }
-            Message::StopApply | Message::ApplyTick | Message::CloseRequested(_) => {}
+            Message::StopApply
+            | Message::ApplyTick
+            | Message::NoticeTick(_)
+            | Message::CloseRequested(_) => {}
             Message::CheckUpdates => {
                 if self.update_manual || self.update_ready.is_some() || self.update_offer.is_some()
                 {
@@ -2245,6 +2308,14 @@ impl NativeApp {
             if self.activity == Activity::Update {
                 iced::time::every(std::time::Duration::from_millis(120))
                     .map(|_| Message::UpdateTick)
+            } else {
+                Subscription::none()
+            },
+            if self.status.is_some()
+                || self.week_notice().is_some()
+                || (self.blocked_reason().is_some() && !self.setup.blocked_hidden)
+            {
+                iced::time::every(std::time::Duration::from_secs(1)).map(Message::NoticeTick)
             } else {
                 Subscription::none()
             },
@@ -2867,6 +2938,9 @@ mod tests {
             preview: None,
             activity: Activity::Idle,
             status: None,
+            status_since: std::time::Instant::now(),
+            week_status_since: std::time::Instant::now(),
+            blocked_since: std::time::Instant::now(),
             last_verified: None,
             apply_progress: None,
             apply_stop: None,
@@ -2966,6 +3040,27 @@ mod tests {
         assert_eq!(app.activity, Activity::Idle);
         // Widget construction exercises the recoverable failure screen.
         let _ = app.view();
+    }
+    #[test]
+    fn notices_hide_ten_seconds_after_they_appear() {
+        let mut app = app();
+        app.preview = Some(preview(&app, true));
+        let _ = app.update(Message::Apply);
+        let _ = app.update(Message::Applied(Err(ApplyFailure {
+            message: String::new(),
+            verified: 0,
+            uncertain: vec![(Destination::Mithf, "Anna 3. sep".into())],
+            remaining: 0,
+        })));
+        let shown = std::time::Instant::now();
+        let _ = app.update(Message::NoticeTick(
+            shown + std::time::Duration::from_secs(5),
+        ));
+        assert!(app.status.is_some());
+        let _ = app.update(Message::NoticeTick(
+            shown + std::time::Duration::from_secs(11),
+        ));
+        assert!(app.status.is_none());
     }
     #[test]
     fn approved_duos_registration_can_start_apply() {

@@ -69,8 +69,8 @@ pub fn outlined(theme: &iced::Theme, status: button::Status) -> button::Style {
 /// detail line and a visible dismiss button. Every status and action result
 /// uses this one shape, so the page body never repeats it as prose.
 ///
-/// Without `dismiss` there is no button: a reason that blocks the next step
-/// stays until it is resolved.
+/// Without `dismiss` there is no button. Callers hide every notice after
+/// `NativeApp::NOTICE_SECONDS` either way.
 pub fn notice_card<'a, M: Clone + 'a>(notice: Notice, dismiss: Option<M>) -> Element<'a, M> {
     let tone = notice.tone;
     let icon = match tone {
