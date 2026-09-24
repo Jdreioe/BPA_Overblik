@@ -306,8 +306,11 @@ fn marker_details<'a, M: 'a>(marker: &'a Marker) -> Element<'a, M> {
                 weight: iced::font::Weight::Bold,
                 ..iced::Font::DEFAULT
             }),
-            text(format!("{} · {}", marker.helper, marker.time_label)).size(12),
-            text("Markering. Overføres ikke til MitHF eller DUOS.").size(12),
+            text(format!(
+                "{} · {} · overføres ikke",
+                marker.helper, marker.time_label
+            ))
+            .size(12),
         ]
         .spacing(2),
     )

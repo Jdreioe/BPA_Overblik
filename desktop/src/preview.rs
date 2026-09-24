@@ -453,8 +453,8 @@ pub fn build_week(
             notes.push(Attention {
                 when,
                 who: helper.into(),
-                explanation: format!("»{}« overlapper en vagt, der overføres.", marker.title),
-                action: "Kontrollér vagten i TeamUp. Markeringen overføres ikke.".into(),
+                explanation: format!("»{}« ligger oven i en vagt.", marker.title),
+                action: String::new(),
                 source_key: String::new(),
                 can_allow_retransfer: false,
             });

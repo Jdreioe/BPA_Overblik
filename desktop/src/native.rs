@@ -2458,7 +2458,6 @@ impl NativeApp {
                     column![
                         text(format!("{} · {}", item.when, item.who)),
                         text(&item.explanation),
-                        text(format!("Gør sådan: {}", item.action))
                     ]
                     .spacing(4),
                 );

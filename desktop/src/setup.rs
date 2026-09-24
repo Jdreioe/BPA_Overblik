@@ -285,18 +285,13 @@ impl SetupUi {
                 .align_y(iced::alignment::Vertical::Center),
             );
         }
-        if markers.is_empty() {
-            list = list.push(text("Ingen markeringer ud over »Husk at checke«.").size(13));
-        }
         let draft = self.marker_draft.trim();
         column![
             text("Markeringer").size(20),
-            text("TeamUp-begivenheder med disse titler vises i ugen som markeringer, fx et ønske om fri. De overføres aldrig til MitHF eller DUOS. En titel gælder også, når der står mere efter den, fx »Ønsker fri - hele dagen«.")
-                .size(13),
-            text("»Husk at checke« er altid en markering.").size(13),
+            text("Vises i ugen, men overføres ikke.").size(13),
             list,
             row![
-                text_input("Ny markering, fx Ferie", &self.marker_draft)
+                text_input("Fx Ferie", &self.marker_draft)
                     .id(iced::widget::Id::new(MARKER_DRAFT_ID))
                     .on_input(Message::MarkerDraft)
                     .on_submit_maybe((!draft.is_empty()).then_some(Message::AddMarker))
