@@ -159,9 +159,7 @@ and spacing: `Ønsker fri - tandlæge` matches, `Ønsker fridag` does not.
 `Husk at checke` reminders are always markers. The week shows each marker, on a
 confirmed helper calendar, above the day it falls on. Markers are never
 planned or transferred, and their text is never read for hours. A marker
-never fails the week. When a marker overlaps a shift being transferred on the
-same helper calendar, the week lists it under **Bemærk**. That note does not
-block approval. Changing the list revokes approval of the shown week.
+never fails the week or blocks approval, even over a shift. Changing the list revokes approval of the shown week.
 Sheets has no markers.
 
 An exact `P-MØDE` title (ignoring case and surrounding whitespace) maps to

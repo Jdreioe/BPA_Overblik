@@ -288,7 +288,6 @@ impl SetupUi {
         let draft = self.marker_draft.trim();
         column![
             text("Markeringer").size(20),
-            text("Vises i ugen, men overføres ikke.").size(13),
             list,
             row![
                 text_input("Fx Ferie", &self.marker_draft)

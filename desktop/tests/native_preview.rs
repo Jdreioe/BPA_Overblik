@@ -208,10 +208,10 @@ fn day_sps_edit_on_overnight_shift_shows_old_and_new_values_in_danish() {
     assert_ne!(plan_digest(&changed).unwrap(), plan_digest(&plan).unwrap());
 }
 
-/// A day-off wish over a shift is worth a look, but it is never transferred
-/// and does not hold back the week's approval.
+/// A day-off wish over a shift is shown on its day, but it is never
+/// transferred and does not hold back the week's approval.
 #[test]
-fn a_marker_over_a_shift_is_shown_and_noted_without_blocking_approval() {
+fn a_marker_over_a_shift_is_shown_without_blocking_approval() {
     let cases: Vec<Case> = serde_json::from_str(include_str!("goldens/preview.json")).unwrap();
     let case = cases
         .into_iter()
@@ -241,8 +241,6 @@ fn a_marker_over_a_shift_is_shown_and_noted_without_blocking_approval() {
 
     let marked = week(&[wish(&shift.helper_key)]);
     assert!(marked.can_apply);
-    assert_eq!(marked.notes.len(), 1);
-    assert!(marked.notes[0].explanation.contains("Ønsker fri"));
     assert!(marked.attention.is_empty());
     let day = marked
         .days
@@ -250,8 +248,4 @@ fn a_marker_over_a_shift_is_shown_and_noted_without_blocking_approval() {
         .find(|day| !day.markers.is_empty())
         .expect("a marked day");
     assert_eq!(day.markers[0].time_label, "hele dagen");
-    // Another helper's wish on the same day is shown but not noted.
-    let other = week(&[wish("someone-else")]);
-    assert!(other.notes.is_empty());
-    assert!(other.days.iter().any(|day| !day.markers.is_empty()));
 }

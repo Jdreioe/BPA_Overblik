@@ -127,10 +127,6 @@ pub struct Week {
     pub days: Vec<Day>,
     #[serde(default)]
     pub attention: Vec<Attention>,
-    /// Worth checking, but the week can still be approved: a marker that
-    /// overlaps a shift being transferred. These have no action.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub notes: Vec<Attention>,
     /// The week's one status, shown as a notice above the grid.
     #[serde(default)]
     pub status: Notice,

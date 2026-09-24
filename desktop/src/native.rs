@@ -2449,19 +2449,6 @@ impl NativeApp {
                 }
                 body = body.push(entry);
             }
-            // Worth a look, but these never hold back the week.
-            if !week.notes.is_empty() {
-                body = body.push(text("Bemærk").size(18));
-            }
-            for item in &week.notes {
-                body = body.push(
-                    column![
-                        text(format!("{} · {}", item.when, item.who)),
-                        text(&item.explanation),
-                    ]
-                    .spacing(4),
-                );
-            }
             if week
                 .days
                 .iter()

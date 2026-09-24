@@ -240,7 +240,7 @@ pub fn build_week(
     ordered.sort_by_key(|s| s.starts_at);
     let mut attention = Vec::new();
     let mut seen = BTreeSet::new();
-    let mut planned = Vec::new();
+    let mut planned = 0;
     let helper_name = |key: &str| {
         config
             .helpers
@@ -257,7 +257,7 @@ pub fn build_week(
         if items.iter().all(|i| i.outcome == Outcome::Excluded) {
             continue;
         }
-        planned.push(shift);
+        planned += 1;
         let helper = helper_name(&shift.helper_key);
         let shift_blocked = items.iter().any(|i| {
             matches!(i.system, PlanSystem::Source | PlanSystem::Mapping) && blocker(i.outcome)
@@ -411,7 +411,6 @@ pub fn build_week(
             .ok_or(INVALID)
     };
     let mut marked: BTreeMap<NaiveDate, Vec<Marker>> = BTreeMap::new();
-    let mut notes = Vec::new();
     let mut ordered: Vec<_> = markers.iter().collect();
     ordered.sort_by_key(|m| m.starts_at);
     for marker in ordered {
@@ -435,32 +434,7 @@ pub fn build_week(
                 marked.entry(*day).or_default().push(chip.clone());
             }
         }
-        let overlaps = planned.iter().any(|shift| {
-            shift.helper_key == marker.helper_key
-                && shift.starts_at < marker.ends_at
-                && marker.starts_at < shift.ends_at
-        });
-        if overlaps {
-            let when = if marker.all_day {
-                date_label(starts_at.date_naive())
-            } else {
-                format!(
-                    "{} {}",
-                    date_label(starts_at.date_naive()),
-                    starts_at.format("%H:%M")
-                )
-            };
-            notes.push(Attention {
-                when,
-                who: helper.into(),
-                explanation: format!("»{}« ligger oven i en vagt.", marker.title),
-                action: String::new(),
-                source_key: String::new(),
-                can_allow_retransfer: false,
-            });
-        }
     }
-    let planned = planned.len();
     let counts = counts(plan)?;
     let has_writes = plan.items.iter().any(|i| writes(i.outcome));
     let has_blockers = plan.items.iter().any(|i| blocker(i.outcome));
@@ -533,7 +507,6 @@ pub fn build_week(
             })
             .collect(),
         attention,
-        notes,
         status,
         summary,
         apply_summary,
