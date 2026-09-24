@@ -1,12 +1,13 @@
 //! Danish presentation of a finished Rust plan. No network, state writes, or
 //! approval authority lives here; the core revalidates every actual transfer.
-use crate::protocol::{Attention, Block, Day, Notice, Tone, Week};
+use crate::protocol::{Attention, Block, Day, Marker, Notice, Tone, Week};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Timelike};
 use chrono_tz::Tz;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use teamup_shift_sync_core::{
-    DestinationSnapshot, Outcome, PlanItem, PlanSystem, PlanningConfig, SourceShift, SyncPlan,
+    DestinationSnapshot, Outcome, PlanItem, PlanSystem, PlanningConfig, SourceMarker, SourceShift,
+    SyncPlan,
 };
 #[path = "preview_explanations.rs"]
 mod explanations;
@@ -198,11 +199,14 @@ fn detail(item: &PlanItem, destination: &DestinationSnapshot, zone: Tz) -> Resul
 
 /// Build the existing desktop view types directly from core models.
 /// Invalid display payloads fail closed rather than omitting an approved write.
+/// Markers only add to the view: they never change what can be approved.
+#[allow(clippy::too_many_arguments)]
 pub fn build_week(
     config: &PlanningConfig,
     names: &BTreeMap<String, String>,
     colors: &BTreeMap<String, String>,
     shifts: &[SourceShift],
+    markers: &[SourceMarker],
     plan: &SyncPlan,
     destination: &DestinationSnapshot,
     destination_read: bool,
@@ -237,6 +241,14 @@ pub fn build_week(
     let mut attention = Vec::new();
     let mut seen = BTreeSet::new();
     let mut planned = 0;
+    let helper_name = |key: &str| {
+        config
+            .helpers
+            .get(key)
+            .map(|h| h.mithf_name.as_str())
+            .or_else(|| names.get(key).map(String::as_str))
+            .unwrap_or("Ukendt hjælper")
+    };
     for shift in ordered {
         let key = shift.key();
         let Some(items) = by_source.get(key.as_str()) else {
@@ -246,12 +258,7 @@ pub fn build_week(
             continue;
         }
         planned += 1;
-        let helper = config
-            .helpers
-            .get(&shift.helper_key)
-            .map(|h| h.mithf_name.as_str())
-            .or_else(|| names.get(&shift.helper_key).map(String::as_str))
-            .unwrap_or("Ukendt hjælper");
+        let helper = helper_name(&shift.helper_key);
         let shift_blocked = items.iter().any(|i| {
             matches!(i.system, PlanSystem::Source | PlanSystem::Mapping) && blocker(i.outcome)
         });
@@ -398,6 +405,36 @@ pub fn build_week(
             }
         }
     }
+    let midnight = |date: NaiveDate| {
+        zone.from_local_datetime(&date.and_hms_opt(0, 0, 0).ok_or(INVALID)?)
+            .single()
+            .ok_or(INVALID)
+    };
+    let mut marked: BTreeMap<NaiveDate, Vec<Marker>> = BTreeMap::new();
+    let mut ordered: Vec<_> = markers.iter().collect();
+    ordered.sort_by_key(|m| m.starts_at);
+    for marker in ordered {
+        let starts_at = marker.starts_at.with_timezone(&zone);
+        let ends_at = marker.ends_at.with_timezone(&zone);
+        let helper = helper_name(&marker.helper_key);
+        let chip = Marker {
+            helper: helper.into(),
+            helper_color: colors.get(&marker.helper_key).cloned().unwrap_or_default(),
+            title: marker.title.clone(),
+            time_label: if marker.all_day {
+                "hele dagen".into()
+            } else {
+                span(starts_at, ends_at)
+            },
+        };
+        for day in days.keys() {
+            let left = midnight(*day)?;
+            let right = midnight(day.succ_opt().ok_or(INVALID)?)?;
+            if starts_at < right && ends_at > left {
+                marked.entry(*day).or_default().push(chip.clone());
+            }
+        }
+    }
     let counts = counts(plan)?;
     let has_writes = plan.items.iter().any(|i| writes(i.outcome));
     let has_blockers = plan.items.iter().any(|i| blocker(i.outcome));
@@ -465,6 +502,7 @@ pub fn build_week(
                     date: day.to_string(),
                     label: date_label(day),
                     blocks,
+                    markers: marked.remove(&day).unwrap_or_default(),
                 }
             })
             .collect(),

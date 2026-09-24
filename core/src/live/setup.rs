@@ -82,6 +82,7 @@ fn defaults() -> Value {
         "version": 1, "stage": "source", "source": "teamup", "credential": "", "calendars": [], "colors": {},
         "duos_enabled": true,
         "standard_times": {"everyday": "", "weekdays": {}},
+        "markers": super::config::DEFAULT_MARKERS,
         "arrangements": [], "types": [], "mithf": [], "duos": [], "mappings": [],
         "arrangement": "", "registration_type": "", "account": "",
     })
@@ -109,6 +110,11 @@ impl Setup {
     pub fn set_standard_times(&mut self, standard: StandardTimes) -> Result<(), LiveError> {
         standard.validate().map_err(LiveError)?;
         self.data["standard_times"] = serde_json::to_value(standard).map_err(|_| INVALID)?;
+        self.save()
+    }
+    /// Replace the titles that count as calendar markers.
+    pub fn set_markers(&mut self, titles: &[String]) -> Result<(), LiveError> {
+        self.data["markers"] = json!(crate::marker_titles(titles).map_err(LiveError)?);
         self.save()
     }
     pub fn duos_enabled(&self) -> bool {
@@ -267,6 +273,7 @@ impl Setup {
         let resume = object.remove("resume_stage");
         let mut left = self.data.clone();
         let standard_times = left["standard_times"].clone();
+        let markers = left.get("markers").cloned();
         if let Some(stage) = resume {
             left["stage"] = stage;
         }
@@ -282,6 +289,9 @@ impl Setup {
             }
         }
         self.data["standard_times"] = standard_times;
+        if let Some(markers) = markers {
+            self.data["markers"] = markers;
+        }
         if left["credential"].as_str().is_some_and(|c| !c.is_empty()) {
             self.data["other_source"] = left;
         }
@@ -650,6 +660,7 @@ mod tests {
                 object.remove("duos_enabled");
                 object.remove("sheet_layout");
                 object.remove("standard_times");
+                object.remove("markers");
                 // Check results are returned, no longer saved; see refresh_source.
                 let mut expected = expected.clone();
                 if let Some(object) = expected.as_object_mut() {
