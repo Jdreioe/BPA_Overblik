@@ -2,7 +2,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use teamup_shift_sync_core::{
-    plan_digest, DestinationSnapshot, PlanningConfig, SourceShift, SyncPlan,
+    plan_digest, DestinationSnapshot, PlanningConfig, SourceMarker, SourceShift, SyncPlan,
 };
 use teamup_shift_sync_gui::preview::build_week;
 
@@ -29,6 +29,7 @@ fn native_week_matches_recorded_presentation_scenarios() {
             &case.names,
             &case.colors,
             &case.shifts,
+            &[],
             &case.plan,
             &case.destination,
             case.destination_read,
@@ -56,6 +57,7 @@ fn native_week_matches_recorded_presentation_scenarios() {
                 &case.names,
                 &case.colors,
                 &case.shifts,
+                &[],
                 &broken,
                 &case.destination,
                 true
@@ -85,6 +87,7 @@ fn only_a_missing_destination_entry_offers_allowing_a_transfer_again() {
             &case.names,
             &case.colors,
             &case.shifts,
+            &[],
             &case.plan,
             &case.destination,
             case.destination_read,
@@ -124,6 +127,7 @@ fn standard_shift_is_marked_in_the_week() {
         &case.names,
         &case.colors,
         &case.shifts,
+        &[],
         &case.plan,
         &case.destination,
         case.destination_read,
@@ -182,6 +186,7 @@ fn day_sps_edit_on_overnight_shift_shows_old_and_new_values_in_danish() {
         &BTreeMap::new(),
         &BTreeMap::new(),
         &[shift],
+        &[],
         &plan,
         &destination,
         true,
@@ -201,4 +206,52 @@ fn day_sps_edit_on_overnight_shift_shows_old_and_new_values_in_danish() {
     let mut changed = plan.clone();
     changed.items[2].payload["intervals"][0]["ends_at"] = json!("2026-09-14T13:00:00+02:00");
     assert_ne!(plan_digest(&changed).unwrap(), plan_digest(&plan).unwrap());
+}
+
+/// A day-off wish over a shift is worth a look, but it is never transferred
+/// and does not hold back the week's approval.
+#[test]
+fn a_marker_over_a_shift_is_shown_and_noted_without_blocking_approval() {
+    let cases: Vec<Case> = serde_json::from_str(include_str!("goldens/preview.json")).unwrap();
+    let case = cases
+        .into_iter()
+        .find(|case| case.shifts.len() == 1 && case.expected["can_apply"] == json!(true))
+        .expect("an approvable week with one shift");
+    let shift = &case.shifts[0];
+    let wish = |helper_key: &str| SourceMarker {
+        helper_key: helper_key.into(),
+        title: "Ønsker fri".into(),
+        starts_at: shift.starts_at,
+        ends_at: shift.ends_at,
+        all_day: true,
+    };
+    let week = |markers: &[SourceMarker]| {
+        build_week(
+            &case.config,
+            &case.names,
+            &case.colors,
+            &case.shifts,
+            markers,
+            &case.plan,
+            &case.destination,
+            case.destination_read,
+        )
+        .unwrap()
+    };
+
+    let marked = week(&[wish(&shift.helper_key)]);
+    assert!(marked.can_apply);
+    assert_eq!(marked.notes.len(), 1);
+    assert!(marked.notes[0].explanation.contains("Ønsker fri"));
+    assert!(marked.attention.is_empty());
+    let day = marked
+        .days
+        .iter()
+        .find(|day| !day.markers.is_empty())
+        .expect("a marked day");
+    assert_eq!(day.markers[0].time_label, "hele dagen");
+    // Another helper's wish on the same day is shown but not noted.
+    let other = week(&[wish("someone-else")]);
+    assert!(other.notes.is_empty());
+    assert!(other.days.iter().any(|day| !day.markers.is_empty()));
 }

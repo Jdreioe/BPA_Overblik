@@ -570,6 +570,11 @@ impl Engine {
             "source" => document.edit_source(),
             "choose_source" => document.choose_source(params["source"].as_str().unwrap_or("")),
             "duos_enabled" => document.choose_duos(params["enabled"].as_bool().unwrap_or(true)),
+            "markers" => serde_json::from_value::<Vec<String>>(params)
+                .map_err(|_| {
+                    teamup_shift_sync_core::live::LiveError("Markeringerne kunne ikke læses.")
+                })
+                .and_then(|titles| document.set_markers(&titles)),
             "standard_times" => serde_json::from_value(params)
                 .map_err(|_| {
                     teamup_shift_sync_core::live::LiveError("Standardtiderne kunne ikke læses.")
@@ -742,7 +747,7 @@ impl Engine {
         let (to, start, end) = range(&account, from)?;
         mark(&stage, FetchStage::Reading);
         let now = Utc::now().fixed_offset();
-        let (shifts, destination) = read_week(browser, &account, from, to, start, end, now)
+        let (source, destination) = read_week(browser, &account, from, to, start, end, now)
             .await
             .map_err(|e| e.to_string())?;
         mark(&stage, FetchStage::Planning);
@@ -752,7 +757,7 @@ impl Engine {
             let plan = build_plan(
                 &PlanRequest {
                     config: &account.planning,
-                    shifts: &shifts,
+                    shifts: &source.shifts,
                     destination: &destination,
                     range_start: start,
                     range_end: end,
@@ -766,7 +771,8 @@ impl Engine {
                 &account.planning,
                 &account.helper_names,
                 &account.helper_colors,
-                &shifts,
+                &source.shifts,
+                &source.markers,
                 &plan,
                 &destination,
                 true,
@@ -781,6 +787,7 @@ impl Engine {
                 from,
                 state_path: account.state_path.clone(),
                 standard_times: account.standard_times.clone(),
+                markers: account.markers.clone(),
                 items: plan.items.clone(),
             })
         })
@@ -838,6 +845,7 @@ impl Engine {
             .map_err(|message| apply_failure(message, &progress))?;
         if account.state_path != approved.state_path
             || account.standard_times != approved.standard_times
+            || account.markers != approved.markers
         {
             return Err(apply_failure(
                 "Opsætningen er ændret. Genstart appen, og gennemgå ugen igen.".into(),
@@ -855,7 +863,8 @@ impl Engine {
             range(&account, approved.from).map_err(|message| apply_failure(message, &progress))?;
         let shifts = read_source(&account, approved.from, to)
             .await
-            .map_err(|error| apply_failure(error.to_string(), &progress))?;
+            .map_err(|error| apply_failure(error.to_string(), &progress))?
+            .shifts;
         let now = Utc::now().fixed_offset();
         let mut destination = LiveDestinations::connect(browser, &account, now)
             .await
@@ -1041,6 +1050,9 @@ struct Preview {
     from: NaiveDate,
     state_path: PathBuf,
     standard_times: teamup_shift_sync_core::standard_time::StandardTimes,
+    /// The marker titles this preview was built with. Changing them can turn
+    /// an event into a shift or back, so it revokes approval like standard times.
+    markers: Vec<String>,
     items: Vec<PlanItem>,
 }
 
@@ -1125,6 +1137,7 @@ enum Screen {
 enum SettingsSection {
     Helpers,
     StandardTimes,
+    Markers,
     Integrations,
 }
 
@@ -1420,6 +1433,26 @@ impl NativeApp {
                 }
             }
             Message::Setup(setup::Message::Link(link)) => self.setup.link = link,
+            Message::Setup(setup::Message::MarkerDraft(value)) => self.setup.marker_draft = value,
+            Message::Setup(setup::Message::AddMarker | setup::Message::RemoveMarker(_)) => {
+                let Some(state) = &self.setup.state else {
+                    return Task::none();
+                };
+                let mut titles = state.markers.clone();
+                match message {
+                    Message::Setup(setup::Message::RemoveMarker(index)) if index < titles.len() => {
+                        titles.remove(index);
+                    }
+                    Message::Setup(setup::Message::AddMarker) => {
+                        titles.push(std::mem::take(&mut self.setup.marker_draft));
+                    }
+                    _ => return Task::none(),
+                }
+                return self.update(Message::Setup(setup::Message::Action(
+                    "markers",
+                    serde_json::json!(titles),
+                )));
+            }
             Message::Setup(setup::Message::Key(key)) => self.setup.key = key,
             Message::Setup(setup::Message::StandardDefault(value)) => {
                 self.setup.standard_default = value;
@@ -1553,7 +1586,10 @@ impl NativeApp {
                 }
                 // Settings has no preview to revoke, and a local edit should
                 // leave the rest of the screen alone.
-                if matches!(action, "edit" | "duos_enabled" | "standard_times") {
+                if matches!(
+                    action,
+                    "edit" | "duos_enabled" | "standard_times" | "markers"
+                ) {
                     self.activity = Activity::Save;
                 } else {
                     self.invalidate();
@@ -2413,7 +2449,25 @@ impl NativeApp {
                 }
                 body = body.push(entry);
             }
-            if week.days.iter().any(|d| !d.blocks.is_empty()) {
+            // Worth a look, but these never hold back the week.
+            if !week.notes.is_empty() {
+                body = body.push(text("Bemærk").size(18));
+            }
+            for item in &week.notes {
+                body = body.push(
+                    column![
+                        text(format!("{} · {}", item.when, item.who)),
+                        text(&item.explanation),
+                        text(format!("Gør sådan: {}", item.action))
+                    ]
+                    .spacing(4),
+                );
+            }
+            if week
+                .days
+                .iter()
+                .any(|d| !d.blocks.is_empty() || !d.markers.is_empty())
+            {
                 body = body.push(super::widgets::week_grid(week));
             }
         }
@@ -2465,6 +2519,7 @@ impl NativeApp {
         for (section, icon, label) in [
             (SettingsSection::Helpers, "👥", "Hjælpere"),
             (SettingsSection::StandardTimes, "◷", "Standardtider"),
+            (SettingsSection::Markers, "⚑", "Markeringer"),
             (SettingsSection::Integrations, "⇄", "Udbydere"),
         ] {
             let selected = self.settings_section == section;
@@ -2559,6 +2614,9 @@ impl NativeApp {
             .spacing(12),
             SettingsSection::StandardTimes => {
                 column![self.setup.standard_view().map(Message::Setup)].spacing(12)
+            }
+            SettingsSection::Markers => {
+                column![self.setup.markers_view().map(Message::Setup)].spacing(12)
             }
             SettingsSection::Integrations => self.providers(),
         };
@@ -2833,6 +2891,7 @@ mod tests {
             from: app.monday,
             state_path: "synthetic-account.sqlite3".into(),
             standard_times: Default::default(),
+            markers: Vec::new(),
             status_dismissed: false,
             items: vec![
                 write_item("s", "mithf.create_shift"),
@@ -3433,6 +3492,7 @@ mod tests {
             from: app.monday,
             state_path: "synthetic-account.sqlite3".into(),
             standard_times: Default::default(),
+            markers: Vec::new(),
             status_dismissed: false,
             items: vec![],
         });

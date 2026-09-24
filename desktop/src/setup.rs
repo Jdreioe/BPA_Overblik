@@ -41,6 +41,9 @@ pub struct SetupState {
     pub sheet_layout: Option<SheetLayout>,
     #[serde(default)]
     pub standard_times: StandardTimes,
+    /// Titles shown as markers instead of planned as shifts.
+    #[serde(default = "default_markers")]
+    pub markers: Vec<String>,
     pub calendars: Vec<Choice>,
     pub arrangements: Vec<Choice>,
     pub types: Vec<Choice>,
@@ -64,6 +67,11 @@ pub struct SetupState {
     pub other_source_has_credentials: bool,
 }
 
+fn default_markers() -> Vec<String> {
+    teamup_shift_sync_core::live::DEFAULT_MARKERS
+        .map(String::from)
+        .to_vec()
+}
 fn teamup_source() -> String {
     "teamup".into()
 }
@@ -79,6 +87,9 @@ pub enum Message {
     Template(template::Message),
     StandardDefault(String),
     StandardDay(usize, String),
+    MarkerDraft(String),
+    AddMarker,
+    RemoveMarker(usize),
     Connect,
     ConnectSheets,
     OpenTeamupKeys,
@@ -130,6 +141,7 @@ const STANDARD_DAY_IDS: [&str; 7] = [
     "standard-sondag",
 ];
 const SOURCE_LINK_ID: &str = "source-link";
+const MARKER_DRAFT_ID: &str = "marker-draft";
 const TEAMUP_KEY_ID: &str = "teamup-key";
 
 #[derive(Default)]
@@ -143,6 +155,8 @@ pub struct SetupUi {
     pub error: Option<String>,
     pub standard_default: String,
     pub standard_days: [String; 7],
+    /// A marker title being typed, not saved until added.
+    pub marker_draft: String,
     /// Calendars the person reopened for editing. A row shows dropdowns
     /// while it is ambiguous (no match yet) or reopened here; a unique
     /// suggestion otherwise renders as plain text. Nothing is confirmed
@@ -251,6 +265,51 @@ impl SetupUi {
             .push(text(self.error.as_deref().unwrap_or("")).size(13))
             .push(text("Gyldige tider gemmes automatisk.").size(12))
             .into()
+    }
+
+    /// The marker titles with a way to add and remove them. Saving happens
+    /// per click; there is nothing half-typed to autosave.
+    pub fn markers_view(&self) -> Element<'_, Message> {
+        let markers = self
+            .state
+            .as_ref()
+            .map_or(&[][..], |state| state.markers.as_slice());
+        let mut list = column![].spacing(6);
+        for (index, title) in markers.iter().enumerate() {
+            list = list.push(
+                row![
+                    text(title).width(Length::Fill),
+                    quiet_button("Fjern", Message::RemoveMarker(index)),
+                ]
+                .spacing(10)
+                .align_y(iced::alignment::Vertical::Center),
+            );
+        }
+        if markers.is_empty() {
+            list = list.push(text("Ingen markeringer ud over »Husk at checke«.").size(13));
+        }
+        let draft = self.marker_draft.trim();
+        column![
+            text("Markeringer").size(20),
+            text("TeamUp-begivenheder med disse titler vises i ugen som markeringer, fx et ønske om fri. De overføres aldrig til MitHF eller DUOS. En titel gælder også, når der står mere efter den, fx »Ønsker fri - hele dagen«.")
+                .size(13),
+            text("»Husk at checke« er altid en markering.").size(13),
+            list,
+            row![
+                text_input("Ny markering, fx Ferie", &self.marker_draft)
+                    .id(iced::widget::Id::new(MARKER_DRAFT_ID))
+                    .on_input(Message::MarkerDraft)
+                    .on_submit_maybe((!draft.is_empty()).then_some(Message::AddMarker))
+                    .padding(10)
+                    .width(Length::Fixed(300.0)),
+                quiet_button("Tilføj", Message::AddMarker)
+                    .on_press_maybe((!draft.is_empty()).then_some(Message::AddMarker)),
+            ]
+            .spacing(10)
+            .align_y(iced::alignment::Vertical::Center),
+        ]
+        .spacing(10)
+        .into()
     }
 
     pub fn view(&self, section: Section) -> Element<'_, Message> {
@@ -714,6 +773,7 @@ mod tests {
             source: "teamup".into(),
             sheet_layout: None,
             standard_times: Default::default(),
+            markers: vec![],
             duos_enabled: true,
             stage: "mappings".into(),
             calendars: vec![
