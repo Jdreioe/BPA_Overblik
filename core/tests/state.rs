@@ -260,3 +260,65 @@ fn failed_snapshot_rolls_back_occurrence_and_comment_updates() {
     assert!(state.record_source_snapshot(&shift, now()).is_err());
     assert_eq!(snapshot_rows(&path), before);
 }
+
+#[test]
+fn adopting_history_keeps_the_newest_record_of_one_source() {
+    let directory = tempdir().unwrap();
+    let step = |source: &str, id: &str| StepRecord {
+        source_key: source.into(),
+        step_key: "mithf.create_shift".into(),
+        status: "verified".into(),
+        destination_id: Some(id.into()),
+        ..record()
+    };
+    // An upgraded file, whose added columns sit after the original ones.
+    let older = directory.path().join("sync-older.sqlite3");
+    let schema = include_str!("../src/state_schema.sql")
+        .replace("\r\n", "\n")
+        .replace("    recurrence_start TEXT,\n", "")
+        .replace("    source_version TEXT,\n", "");
+    let connection = Connection::open(&older).unwrap();
+    connection.execute_batch(&schema).unwrap();
+    connection.execute("INSERT INTO source_occurrences VALUES ('cal:event:1', 'cal', 'event', '1', 'hash', 'seen')", []).unwrap();
+    drop(connection);
+    let state = SyncState::open(&older).unwrap();
+    state
+        .record_step(&step("cal:event:1", "old-id"), now())
+        .unwrap();
+    state
+        .record_step(&step("cal:event:2", "kept-id"), now())
+        .unwrap();
+    state
+        .record_step(&step("other:event:1", "foreign-id"), now())
+        .unwrap();
+    drop(state);
+    let newer = directory.path().join("sync-newer.sqlite3");
+    let later = now() + chrono::Duration::hours(1);
+    SyncState::open(&newer)
+        .unwrap()
+        .record_step(&step("cal:event:1", "new-id"), later)
+        .unwrap();
+
+    let mut adopted = SyncState::open(directory.path().join("sync-new.sqlite3")).unwrap();
+    for path in [&newer, &older] {
+        adopted.adopt_history(path, "cal").unwrap();
+    }
+    assert_eq!(
+        adopted.steps_for_source("cal:event:1").unwrap(),
+        [step("cal:event:1", "new-id")]
+    );
+    assert_eq!(
+        adopted.steps_for_source("cal:event:2").unwrap(),
+        [step("cal:event:2", "kept-id")]
+    );
+    assert!(adopted
+        .steps_for_source("other:event:1")
+        .unwrap()
+        .is_empty());
+    drop(adopted);
+    let rows = snapshot_rows(&directory.path().join("sync-new.sqlite3"));
+    assert_eq!(
+        rows[0],
+        [r#"["cal:event:1","cal","event","1",null,null,"hash","seen"]"#]
+    );
+}

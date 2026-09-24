@@ -1,4 +1,6 @@
 //! Destination identity and conflict rules shared by each planned segment.
+use std::collections::BTreeSet;
+
 use chrono::{DateTime, FixedOffset};
 use serde_json::{json, Map, Value};
 
@@ -46,12 +48,17 @@ pub(crate) fn duos_payload(item: &DuosRegistration) -> Map<String, Value> {
     .clone()
 }
 
+/// `owned` holds destinations recorded by the same source shift's other steps.
+/// A step without its own record never mistakes them for a duplicate or an
+/// overlap: their own steps move, match or block them first, as when a new SPS
+/// interval splits a transferred shift into more parts.
 pub(crate) fn reconcile_mithf<'a>(
     starts_at: DateTime<FixedOffset>,
     ends_at: DateTime<FixedOffset>,
     helper_count: i64,
     record: Option<&StepRecord>,
     candidates: &'a [MitHfShift],
+    owned: &BTreeSet<String>,
 ) -> Reconciled<'a, MitHfShift> {
     use Outcome::*;
     let expected = shift_payload(starts_at, ends_at, helper_count);
@@ -88,8 +95,8 @@ pub(crate) fn reconcile_mithf<'a>(
             "manually_changed",
         );
     }
-    let exact: Vec<_> = candidates
-        .iter()
+    let foreign = || candidates.iter().filter(|c| !owned.contains(&c.id));
+    let exact: Vec<_> = foreign()
         .filter(|c| shift_payload(c.starts_at, c.ends_at, c.helper_count) == expected)
         .collect();
     if exact.len() == 1 {
@@ -119,8 +126,7 @@ pub(crate) fn reconcile_mithf<'a>(
             "uncertain_write",
         );
     }
-    let overlapping: Vec<_> = candidates
-        .iter()
+    let overlapping: Vec<_> = foreign()
         .filter(|c| c.starts_at < ends_at && c.ends_at > starts_at)
         .collect();
     if !overlapping.is_empty() {
@@ -152,10 +158,12 @@ fn describe_shifts(mut shifts: Vec<&MitHfShift>) -> String {
         .join("; ")
 }
 
+/// `owned` works as for `reconcile_mithf`, for the shift's other SPS intervals.
 pub(crate) fn reconcile_duos<'a>(
     expected: &DuosRegistration,
     record: Option<&StepRecord>,
     candidates: &'a [DuosRegistration],
+    owned: &BTreeSet<String>,
 ) -> Reconciled<'a, DuosRegistration> {
     use Outcome::*;
     let payload = duos_payload(expected);
@@ -208,10 +216,8 @@ pub(crate) fn reconcile_duos<'a>(
             "manually_changed",
         );
     }
-    let exact: Vec<_> = candidates
-        .iter()
-        .filter(|c| duos_payload(c) == payload)
-        .collect();
+    let foreign = || candidates.iter().filter(|c| !owned.contains(&c.id));
+    let exact: Vec<_> = foreign().filter(|c| duos_payload(c) == payload).collect();
     if exact.len() == 1 {
         if matches!(exact[0].status_id, 2 | 5 | 6) {
             return result(
@@ -244,7 +250,7 @@ pub(crate) fn reconcile_duos<'a>(
             "uncertain_write",
         );
     }
-    if candidates.iter().any(|c| {
+    if foreign().any(|c| {
         c.employee_number == expected.employee_number
             && c.arrangement_id == expected.arrangement_id
             && c.starts_at < expected.ends_at

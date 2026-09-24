@@ -5,7 +5,7 @@ use std::{
 
 use super::{id, rows, sheets::SheetAccess, text, LiveError, INVALID};
 use crate::standard_time::StandardTimes;
-use crate::{HelperMapping, PlanningConfig};
+use crate::{HelperMapping, PlanningConfig, StateError, SyncState};
 use serde_json::{json, Value};
 
 // No Debug/Serialize: credentials must never enter diagnostics or UI messages.
@@ -51,7 +51,54 @@ pub fn load_saved_setup(data_dir: &Path) -> Result<LiveConfig, LiveError> {
         ));
     }
     let secret = read_credential(text(&setup["credential"])?)?;
-    config_from_setup(setup, &secret, data_dir)
+    let config = config_from_setup(setup, &secret, data_dir)?;
+    if !config.state_path.exists() {
+        adopt_scattered_history(data_dir, &config).map_err(|_| {
+            LiveError("Den tidligere synkroniseringshistorik kunne ikke overføres. Prøv igen.")
+        })?;
+    }
+    Ok(config)
+}
+
+/// Gather this source's records from every other history file into a new one.
+///
+/// Older versions named the history after the helper mappings too, so each
+/// mapping change left the records of transferred shifts behind, and those
+/// shifts could no longer be updated. The new file is built aside and linked
+/// into place only if nothing created it meanwhile. Other files are kept.
+fn adopt_scattered_history(data_dir: &Path, config: &LiveConfig) -> Result<(), StateError> {
+    let calendar_id = match &config.sheet {
+        Some(sheet) => sheet.source_id(),
+        None => super::teamup::calendar_id(&config.calendar),
+    };
+    let mut others = Vec::new();
+    for entry in std::fs::read_dir(data_dir)? {
+        let name = entry?.file_name().to_string_lossy().into_owned();
+        if name.starts_with("sync-") && name.ends_with(".sqlite3") {
+            others.push(data_dir.join(name));
+        }
+    }
+    if others.is_empty() {
+        return Ok(());
+    }
+    let mut draft = config.state_path.clone().into_os_string();
+    draft.push(format!(".{}", uuid::Uuid::new_v4()));
+    let draft = PathBuf::from(draft);
+    let built = (|| {
+        let mut state = SyncState::open(&draft)?;
+        for other in &others {
+            // Opening brings an older file's schema up to date first.
+            drop(SyncState::open(other)?);
+            state.adopt_history(other, &calendar_id)?;
+        }
+        drop(state);
+        match std::fs::hard_link(&draft, &config.state_path) {
+            Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => Err(error.into()),
+            _ => Ok(()),
+        }
+    })();
+    let _ = std::fs::remove_file(&draft);
+    built
 }
 
 /// Read TeamUp credentials from the OS keyring. The setup document itself
@@ -91,14 +138,11 @@ pub(crate) fn selected<'a>(choices: &'a Value, identifier: &Value) -> Result<&'a
 
 /// The account scope that names the synchronization database.
 ///
-/// A complete, confirmed account/mapping combination gets its own history, so
-/// this must keep matching Python exactly: a different scope would orphan the
-/// existing `sync-<scope>.sqlite3` and re-submit work already transferred.
+/// One MitHF account and one shift source share a history. Nothing else may
+/// enter it: a changed scope starts an empty history, and without its records
+/// a transferred shift can no longer be updated.
 pub(crate) fn account_scope(setup: &Value, calendar: &str) -> Result<String, LiveError> {
-    let identity = json!({
-        "account_ids": setup["account_ids"], "arrangement": setup["arrangement"],
-        "registration_type": setup["registration_type"], "mappings": setup["mappings"], "calendar": calendar,
-    });
+    let identity = json!({"account_ids": setup["account_ids"], "calendar": calendar});
     let hash = crate::approval::json_digest(&identity).map_err(|_| INVALID)?;
     Ok(hash[..24].to_owned())
 }

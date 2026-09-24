@@ -752,15 +752,19 @@ mod tests {
             let recorded = oracle();
             let expected = &recorded["account_scope"];
             let identity = &expected["identity"];
-            let setup = json!({
+            let mut setup = json!({
                 "account_ids": identity["account_ids"], "arrangement": identity["arrangement"],
                 "registration_type": identity["registration_type"], "mappings": identity["mappings"],
             });
-            let scope =
-                crate::live::config::account_scope(&setup, identity["calendar"].as_str().unwrap())
-                    .expect("scope");
+            let calendar = identity["calendar"].as_str().unwrap();
+            let scope = crate::live::config::account_scope(&setup, calendar).expect("scope");
             // A different scope would orphan an existing sync-<scope>.sqlite3.
             assert_eq!(json!(scope), expected["scope"]);
+            // Confirming helpers again must keep the history of transferred shifts.
+            setup["mappings"][0]["mithf"] = json!("m9");
+            setup["arrangement"] = json!("a2");
+            let remapped = crate::live::config::account_scope(&setup, calendar).expect("scope");
+            assert_eq!(remapped, scope);
         }
     }
 
