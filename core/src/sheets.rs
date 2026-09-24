@@ -12,7 +12,9 @@
 
 use std::collections::BTreeSet;
 
-use chrono::{DateTime, Datelike, Duration, FixedOffset, NaiveDate, NaiveTime, TimeZone, Utc};
+use chrono::{
+    DateTime, Datelike, Duration, FixedOffset, NaiveDate, NaiveTime, TimeZone, Utc, Weekday,
+};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
@@ -46,7 +48,9 @@ pub struct SheetLayout {
     /// cell holds only the intervals.
     pub sps_label: String,
     pub helper: CellOffset,
-    pub time: TimeCells,
+    /// `None` when the sheet holds only the helper, so every shift takes
+    /// the standard time.
+    pub time: Option<TimeCells>,
     pub sps: Option<CellOffset>,
     pub title: Option<CellOffset>,
 }
@@ -57,6 +61,116 @@ pub struct SheetLayout {
 const DATE_FORMATS: [&str; 8] = [
     "%d/%m/%y", "%d.%m.%y", "%d-%m-%y", "%d/%m/%Y", "%d.%m.%Y", "%d-%m-%Y", "%Y-%m-%d", "%d/%m",
 ];
+
+/// The ugenr.dk calendar's date format: a day cell such as `F  2`, the
+/// weekday's initial and the day of the month, below a heading such as
+/// `Januar 2026`. Only a layout learned from such a cell reads them, so a
+/// stray `M 5` in another sheet is never a date.
+const DAY_UNDER_MONTH: &str = "ugedag og dag under måned";
+
+const MONTHS: [&str; 12] = [
+    "januar",
+    "februar",
+    "marts",
+    "april",
+    "maj",
+    "juni",
+    "juli",
+    "august",
+    "september",
+    "oktober",
+    "november",
+    "december",
+];
+
+/// `Januar 2026` as its year and month.
+fn month_heading(value: &str) -> Option<(i32, u32)> {
+    let (month, year) = value.trim().split_once(' ')?;
+    let month = MONTHS.iter().position(|m| m.eq_ignore_ascii_case(month))? as u32 + 1;
+    let year = year.trim();
+    (year.len() == 4 && year.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| Some((year.parse().ok()?, month)))?
+}
+
+/// `F  2` as the weekday's initial and the day of the month.
+fn day_cell(value: &str) -> Option<(char, u32)> {
+    let (initial, day) = value.trim().split_once(char::is_whitespace)?;
+    let initial = match initial {
+        "M" | "T" | "O" | "F" | "L" | "S" => initial.chars().next()?,
+        _ => return None,
+    };
+    let day = day.trim();
+    (!day.is_empty() && day.len() <= 2 && day.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| Some((initial, day.parse().ok()?)))?
+}
+
+/// The holidays ugenr.dk writes in the cell next to a day, longest first so
+/// `2. pinsedag/grundlovsdag` is not read as `2. pinsedag`.
+const HOLIDAYS: [&str; 15] = [
+    "2. pinsedag/grundlovsdag",
+    "Kristi himmelfartsdag",
+    "Grundlovsdag",
+    "Nytårsaften",
+    "Skærtorsdag",
+    "2. påskedag",
+    "2. pinsedag",
+    "Første maj",
+    "Langfredag",
+    "2. juledag",
+    "Nytårsdag",
+    "Juleaften",
+    "Påskedag",
+    "Pinsedag",
+    "Juledag",
+];
+
+/// The helper written after a holiday, such as `Alex` in `Juleaften Alex`.
+/// A holiday alone leaves nothing, so that day has no shift.
+fn without_holiday(value: &str) -> &str {
+    HOLIDAYS
+        .iter()
+        .find_map(|holiday| {
+            let start = value.get(..holiday.len())?;
+            let rest = &value[holiday.len()..];
+            (start.to_lowercase() == holiday.to_lowercase()
+                && rest.chars().next().is_none_or(char::is_whitespace))
+            .then(|| rest.trim())
+        })
+        .unwrap_or(value)
+}
+
+/// The Danish weekday initial ugenr.dk shows: `T` is both tirsdag and torsdag.
+fn initial(date: NaiveDate) -> char {
+    match date.weekday() {
+        Weekday::Mon => 'M',
+        Weekday::Tue | Weekday::Thu => 'T',
+        Weekday::Wed => 'O',
+        Weekday::Fri => 'F',
+        Weekday::Sat => 'L',
+        Weekday::Sun => 'S',
+    }
+}
+
+/// Read a day cell below `heading`. Without a heading, as in a pasted
+/// template, it is the nearest day to `reference` with that day of the month
+/// and weekday. A day that does not exist or has another weekday is `None`.
+fn parse_day(value: &str, heading: Option<(i32, u32)>, reference: NaiveDate) -> Option<NaiveDate> {
+    let (letter, day) = day_cell(value)?;
+    let months = match heading {
+        Some(month) => vec![month],
+        None => (-6..=6)
+            .map(|offset| {
+                let month0 = reference.year() * 12 + reference.month0() as i32 + offset;
+                (month0.div_euclid(12), month0.rem_euclid(12) as u32 + 1)
+            })
+            .collect(),
+    };
+    months
+        .into_iter()
+        .filter_map(|(year, month)| NaiveDate::from_ymd_opt(year, month, day))
+        .filter(|date| initial(*date) == letter)
+        .min_by_key(|date| (*date - reference).num_days().abs())
+}
 
 /// Read a date in `format`. A date without a year, such as `23/9`, takes the
 /// year that puts it nearest `reference`, so a week read for preview and
@@ -78,7 +192,8 @@ fn parse_date(value: &str, format: &str, reference: NaiveDate) -> Option<NaiveDa
 pub struct TemplateCells {
     pub date: (usize, usize),
     pub helper: (usize, usize),
-    pub time: (usize, usize),
+    /// `None` when the example has no time and takes the standard time.
+    pub time: Option<(usize, usize)>,
     pub end: Option<(usize, usize)>,
     pub sps: Option<(usize, usize)>,
     pub title: Option<(usize, usize)>,
@@ -103,6 +218,7 @@ impl SheetLayout {
         let date_format = DATE_FORMATS
             .into_iter()
             .find(|format| parse_date(date, format, today).is_some())
+            .or(day_cell(date).map(|_| DAY_UNDER_MONTH))
             .ok_or("Datoen kan ikke læses. Skriv den som 23/9, 23/09/26 eller 2026-09-23.")?;
         let offset = |(row, col): (usize, usize)| CellOffset {
             row: row as i32 - picked.date.0 as i32,
@@ -120,30 +236,37 @@ impl SheetLayout {
             date_format: date_format.into(),
             sps_label,
             helper: offset(picked.helper),
-            time: match picked.end {
+            time: picked.time.map(|time| match picked.end {
                 Some(end) => TimeCells::Separate {
-                    start: offset(picked.time),
+                    start: offset(time),
                     end: offset(end),
                 },
-                None => TimeCells::Range {
-                    cell: offset(picked.time),
-                },
-            },
+                None => TimeCells::Range { cell: offset(time) },
+            }),
             sps: picked.sps.map(offset),
             title: picked.title.map(offset),
         };
         let parsed = parse_cells(cells, &layout, "template", zone, today)?;
-        if let Some(issue) = parsed.issues.first() {
+        // Standard times are set in another step, so a missing one says
+        // nothing about the picks: that shift still counts as the example.
+        let (standard, issues): (Vec<_>, Vec<_>) = parsed.issues.iter().partition(|issue| {
+            matches!(
+                issue.kind,
+                IssueKind::NoStandardTime | IssueKind::InvalidStandardTime
+            )
+        });
+        if let Some(issue) = issues.first() {
             return Err(issue.kind.reason());
         }
-        if parsed.shifts.len() != 1 {
+        if parsed.shifts.len() + standard.len() != 1 {
             return Err("Kopiér kun cellerne for én vagt.");
         }
         Ok(layout)
     }
 
     pub fn validate(&self) -> Result<(), &'static str> {
-        if !DATE_FORMATS.contains(&self.date_format.as_str()) {
+        if !DATE_FORMATS.contains(&self.date_format.as_str()) && self.date_format != DAY_UNDER_MONTH
+        {
             return Err("Regnearkets datoformat er ugyldigt.");
         }
         Ok(())
@@ -341,14 +464,30 @@ pub fn parse_cells_with_standard(
     standard.validate()?;
     let mut parsed = ParsedSheet::default();
     let mut readings = Vec::new();
+    let by_day = layout.date_format == DAY_UNDER_MONTH;
+    // The month heading last seen in each column, for day cells below it.
+    let mut headings = Vec::new();
     for (row_index, row) in cells.iter().enumerate() {
         for (col_index, value) in row.iter().enumerate() {
             let (row, col) = (row_index + 1, col_index + 1);
+            if by_day {
+                if headings.len() <= col_index {
+                    headings.resize(col_index + 1, None);
+                }
+                if let Some(month) = month_heading(value) {
+                    headings[col_index] = Some(month);
+                    continue;
+                }
+            }
             // The template's format first; a sheet may show other dates
             // differently, such as `21/9` next to `22/09/2026`.
-            let date = std::iter::once(layout.date_format.as_str())
-                .chain(DATE_FORMATS)
-                .find_map(|format| parse_date(value, format, reference));
+            let date = if by_day && day_cell(value).is_some() {
+                parse_day(value, headings[col_index], reference)
+            } else {
+                std::iter::once(layout.date_format.as_str())
+                    .chain(DATE_FORMATS)
+                    .find_map(|format| parse_date(value, format, reference))
+            };
             match date {
                 Some(date) => readings.extend(read_shift(
                     cells,
@@ -359,12 +498,14 @@ pub fn parse_cells_with_standard(
                     (row, col),
                     standard,
                 )),
-                None if looks_like_date(value) => parsed.issues.push(SheetIssue {
-                    cell: a1(row, col),
-                    kind: IssueKind::ImpossibleDate,
-                    date: None,
-                    helper: None,
-                }),
+                None if looks_like_date(value) || (by_day && day_cell(value).is_some()) => {
+                    parsed.issues.push(SheetIssue {
+                        cell: a1(row, col),
+                        kind: IssueKind::ImpossibleDate,
+                        date: None,
+                        helper: None,
+                    })
+                }
                 None => {}
             }
         }
@@ -427,13 +568,13 @@ fn read_shift(
     let (date_row, date_col) = position;
     let offsets = [
         Some(layout.helper),
-        Some(match layout.time {
+        layout.time.map(|time| match time {
             TimeCells::Range { cell } => cell,
             TimeCells::Separate { start, .. } => start,
         }),
         match layout.time {
-            TimeCells::Range { .. } => None,
-            TimeCells::Separate { end, .. } => Some(end),
+            Some(TimeCells::Separate { end, .. }) => Some(end),
+            _ => None,
         },
         layout.sps,
         layout.title,
@@ -444,12 +585,17 @@ fn read_shift(
         })
     };
     let [helper, time, end, sps, title] = offsets.map(value);
+    let helper = if layout.date_format == DAY_UNDER_MONTH {
+        without_holiday(helper)
+    } else {
+        helper
+    };
     if [helper, time, end, sps, title].iter().all(|v| v.is_empty()) {
         return None;
     }
     let (start_text, end_text) = match layout.time {
-        TimeCells::Range { .. } => split_range(time),
-        TimeCells::Separate { .. } => (time, end),
+        Some(TimeCells::Separate { .. }) => (time, end),
+        _ => split_range(time),
     };
     let issue = |offset: Option<CellOffset>, kind| SheetIssue {
         cell: offset.map_or_else(String::new, |o| position_of(date_row, date_col, o)),
@@ -655,7 +801,7 @@ mod tests {
             TemplateCells {
                 date: (0, 0),
                 helper: (2, 0),
-                time: (3, 0),
+                time: Some((3, 0)),
                 sps: Some((4, 0)),
                 ..Default::default()
             },
@@ -752,7 +898,7 @@ mod tests {
             TemplateCells {
                 date: (0, 0),
                 helper: (2, 0),
-                time: (3, 0),
+                time: Some((3, 0)),
                 ..Default::default()
             },
             TZ,
@@ -802,7 +948,7 @@ mod tests {
             TemplateCells {
                 date: (0, 0),
                 helper: (0, 1),
-                time: (0, 2),
+                time: Some((0, 2)),
                 end: Some((0, 3)),
                 ..Default::default()
             },
@@ -827,7 +973,7 @@ mod tests {
         let wrong = TemplateCells {
             date: (0, 0),
             helper: (2, 0),
-            time: (1, 0),
+            time: Some((1, 0)),
             ..Default::default()
         };
         assert!(SheetLayout::from_example(&cells, wrong, TZ).is_err());
@@ -883,6 +1029,45 @@ mod tests {
         assert!(looks_like_date("30/2"));
         // Times are not date attempts.
         assert!(!looks_like_date("8-12") && !looks_like_date("8.30"));
+    }
+
+    /// ugenr.dk's calendar: a month per column group, `F  2` below the month
+    /// heading and only the helper's name next to it.
+    #[test]
+    fn a_day_cell_takes_its_month_from_the_heading_above_it() {
+        let pasted = tsv_cells("F  2\tAlex\t".as_bytes()).unwrap();
+        let picked = TemplateCells {
+            date: (0, 0),
+            helper: (0, 1),
+            ..Default::default()
+        };
+        let layout = SheetLayout::from_example(&pasted, picked, TZ).unwrap();
+        assert_eq!(layout.time, None);
+        let sheet = csv_cells(
+            "Januar 2026,,,Februar 2026,,\n\
+             T  1,Nytårsdag,,S  1,Joe,\n\
+             F  2,Alex,,M  2,2. pinsedag Zain,6\u{a0}\n\
+             S  4,,,M  3,Ninke,\n"
+                .as_bytes(),
+        )
+        .unwrap();
+        let standard = StandardTimes {
+            everyday: "8-16".into(),
+            ..Default::default()
+        };
+        let parsed =
+            parse_cells_with_standard(&sheet, &layout, "sheet", TZ, day(2026, 1, 1), &standard)
+                .unwrap();
+        let ids: Vec<_> = parsed.shifts.iter().map(|s| s.event_id.as_str()).collect();
+        assert_eq!(ids, ["20260201", "20260102", "20260202"]);
+        assert!(parsed.shifts.iter().all(|shift| shift.standard_time));
+        // A holiday alone is no shift; before a name, it is not the helper.
+        assert_eq!(parsed.shifts[2].helper_key, "Zain");
+        assert!(!parsed.helpers.contains("Nytårsdag"));
+        // 3 February 2026 is a Tuesday, so `M  3` is reported, not guessed.
+        assert_eq!(parsed.issues.len(), 1);
+        assert_eq!(parsed.issues[0].kind, IssueKind::ImpossibleDate);
+        assert_eq!(parsed.issues[0].cell, "D4");
     }
 
     #[test]
