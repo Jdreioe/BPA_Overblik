@@ -398,61 +398,58 @@ impl SetupUi {
     fn source_connection<'a>(&'a self, state: &'a SetupState) -> Element<'a, Message> {
         let mut content = column![].spacing(8);
         if state.source == "sheets" {
+            // One step at a time: where the sheet is, what a shift looks
+            // like, then connect. A step shows once the one before is done.
+            let step = |title: &'static str| text(title).size(16);
+            content = content.push(step("1. Hvor ligger dit regneark?"));
             content = match &self.sheet_file {
                 Some(path) => content.push(
                     row![
-                        text(format!("Fil: {}", file_name(path))).width(Length::Fill),
+                        text(file_name(path)).width(Length::Fill),
                         quiet_button("Vælg en anden fil", Message::ChooseFile),
                         quiet_button("Brug et link", Message::ClearFile),
                     ]
                     .spacing(8)
                     .align_y(iced::alignment::Vertical::Center),
                 ),
-                None => content
-                    .push(
-                        row![
-                            text_input("Link til regnearket", &self.link)
-                                .id(iced::widget::Id::new(SOURCE_LINK_ID))
-                                .on_input(Message::Link)
-                                .secure(true)
-                                .padding(12),
-                            quiet_button("Vælg fil …", Message::ChooseFile),
-                        ]
-                        .spacing(8)
-                        .align_y(iced::alignment::Vertical::Center),
-                    )
-                    .push(
-                        text("Google Sheets, OneDrive, SharePoint, Nextcloud, Dropbox eller et direkte link til en .xlsx-, .ods- eller .csv-fil. Del regnearket, så alle med linket kan se det.")
-                            .size(12),
-                    ),
-            };
-            if state.sheet_tabs.len() > 1 {
-                content = content.push(
+                None => content.push(
                     row![
-                        text("Fane").width(Length::Fixed(60.0)),
-                        pick_list(
-                            state.sheet_tabs.as_slice(),
-                            self.sheet_tab.as_ref(),
-                            Message::SheetTab,
-                        )
-                        .placeholder("Vælg fanen med vagtplanen"),
+                        text_input("Indsæt link", &self.link)
+                            .id(iced::widget::Id::new(SOURCE_LINK_ID))
+                            .on_input(Message::Link)
+                            .secure(true)
+                            .padding(12),
+                        quiet_button("Vælg fil …", Message::ChooseFile),
                     ]
                     .spacing(8)
                     .align_y(iced::alignment::Vertical::Center),
+                ),
+            };
+            if self.sheet_file.is_none() && self.link.trim().is_empty() {
+                return content.into();
+            }
+            content = content
+                .push(step("2. Hvordan ser en vagt ud for dig?"))
+                .push(
+                    self.template
+                        .view(state.sheet_layout.is_some())
+                        .map(Message::Template),
+                );
+            if self.sheet_layout().is_err() {
+                return content.into();
+            }
+            content = content.push(step("3. Tilslut"));
+            if state.sheet_tabs.len() > 1 {
+                content = content.push(
+                    pick_list(
+                        state.sheet_tabs.as_slice(),
+                        self.sheet_tab.as_ref(),
+                        Message::SheetTab,
+                    )
+                    .placeholder("Vælg fanen med vagtplanen"),
                 );
             }
-            content = content.push(
-                self.template
-                    .view(state.sheet_layout.is_some())
-                    .map(Message::Template),
-            );
-            content = content.push(
-                primary_button("Tilslut regneark", Message::ConnectSheets).on_press_maybe(
-                    (self.sheet_layout().is_ok()
-                        && (self.sheet_file.is_some() || !self.link.trim().is_empty()))
-                    .then_some(Message::ConnectSheets),
-                ),
-            );
+            content = content.push(primary_button("Tilslut regneark", Message::ConnectSheets));
         } else {
             content = content
                 .push(text("På PC: TeamUp → ☰ → Settings → Shared").size(12))

@@ -79,11 +79,16 @@ tab, so a Google Sheets setup keeps its history. Moving the same plan to
 another provider, file or tab starts a new history. Its earlier transfers are
 then not recognised, so check the first week carefully.
 
-Then show the app one shift. In the spreadsheet, select the cells of one filled
-shift (for a weekly grid, one day's column: date, weekday, helper, time, SPS),
-copy them, and choose **Indsæt vagt**. Click the date, the helper and the time
-in turn, then the SPS hours and a title such as `P-MØDE`, or skip those two.
-If the time cell holds only a start time, the app also asks for the end time.
+Setup is three steps: **1. Hvor ligger dit regneark?** (a link or a file),
+**2. Hvordan ser en vagt ud for dig?**, and **3. Tilslut**. Each step appears
+once the one before is done. In step 2, copy the cells of one filled shift
+(for a weekly grid, one day's column: date, weekday, helper, time, SPS) and
+choose **Indsæt vagt**. The app then asks one question at a time, such as
+"Hvor står datoen?", answered by clicking the cell. SPS hours and a title such
+as `P-MØDE` can be answered with **Ingen SPS** or **Ingen titel**. If the time
+cell holds only a start time, the app also asks for the end time. **Start
+forfra** goes back to pasting. A workbook with several tabs asks for one in
+step 3.
 The app learns the date format and the word before SPS hours (such as `Sps`)
 from the example, and checks that the example reads as one shift. Only the
 cells' positions relative to the date are saved, never their contents.

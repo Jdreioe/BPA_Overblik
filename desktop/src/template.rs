@@ -44,16 +44,23 @@ impl Field {
         }
     }
 
+    /// The question for this field. Each is answered by clicking a cell.
     fn prompt(self) -> &'static str {
         match self {
-            Field::Date => "Klik på datoen.",
-            Field::Helper => "Klik på hjælperen.",
-            Field::Time => {
-                "Klik på tiden. Står start og slut i hver sin celle, så klik på starten."
-            }
-            Field::End => "Klik på sluttiden.",
-            Field::Sps => "Klik på SPS-timerne, eller spring over.",
-            Field::Title => "Klik på titlen (fx P-MØDE), eller spring over.",
+            Field::Date => "Hvor står datoen?",
+            Field::Helper => "Hvor står hjælperen?",
+            Field::Time => "Hvor står tiden?",
+            Field::End => "Hvor står sluttiden?",
+            Field::Sps => "Hvor står SPS-timerne?",
+            Field::Title => "Hvor står titlen, fx P-MØDE?",
+        }
+    }
+
+    /// The button for an optional field the shift does not have.
+    fn skip(self) -> &'static str {
+        match self {
+            Field::Sps => "Ingen SPS",
+            _ => "Ingen titel",
         }
     }
 
@@ -96,7 +103,12 @@ impl Template {
                     self.picks.insert(field, None);
                 }
             }
-            Message::Reset => self.picks.clear(),
+            // Back to pasting: a new copy is the easiest way to fix a wrong one.
+            Message::Reset => {
+                self.picks.clear();
+                self.cells.clear();
+                self.error = None;
+            }
         }
     }
 
@@ -173,45 +185,51 @@ impl Template {
     }
 
     /// `saved` says a layout from an earlier connection exists, so the empty
-    /// prompt offers to replace it rather than asking for a first example.
+    /// step offers to replace it rather than asking for a first example.
     pub fn view(&self, saved: bool) -> Element<'_, Message> {
-        let paste = button(text("Indsæt vagt").size(14))
-            .style(crate::widgets::outlined)
-            .padding([7, 12])
-            .on_press(Message::Paste);
+        let quiet = |label| {
+            button(text(label).size(14))
+                .style(crate::widgets::outlined)
+                .padding([7, 12])
+        };
         let mut content = column![].spacing(8);
         if self.cells.is_empty() {
             content = content
                 .push(
                     text(if saved {
-                        "Vagtens opbygning er gemt. Indsæt en ny vagt for at ændre den."
+                        "Din vagt er gemt."
                     } else {
-                        "Kopiér cellerne for én vagt i regnearket, og indsæt dem her."
+                        "Kopiér én vagt fra regnearket."
                     })
                     .size(13),
                 )
-                .push(paste);
+                .push(
+                    quiet(if saved {
+                        "Indsæt en ny vagt"
+                    } else {
+                        "Indsæt vagt"
+                    })
+                    .on_press(Message::Paste),
+                );
             if let Some(error) = self.error {
                 content = content.push(text(error).size(13));
             }
             return content.into();
         }
-        let status: Element<'_, Message> = match (self.current(), self.layout()) {
-            (Some(field), _) if field.optional() => row![
-                text(field.prompt()).size(13),
-                button(text("Spring over").size(14))
-                    .style(crate::widgets::outlined)
-                    .padding([7, 12])
-                    .on_press(Message::Skip),
-            ]
-            .spacing(8)
-            .align_y(iced::alignment::Vertical::Center)
-            .into(),
-            (Some(field), _) => text(field.prompt()).size(13).into(),
-            (None, Some(Err(error))) => text(error).size(13).into(),
-            (None, _) => text("Vagten er forstået.").size(13).into(),
+        let question: Element<'_, Message> = match (self.current(), self.layout()) {
+            (Some(field), _) => {
+                let mut line = row![text(field.prompt()).size(15)]
+                    .spacing(8)
+                    .align_y(iced::alignment::Vertical::Center);
+                if field.optional() {
+                    line = line.push(quiet(field.skip()).on_press(Message::Skip));
+                }
+                line.into()
+            }
+            (None, Some(Err(error))) => text(error).size(15).into(),
+            (None, _) => text("✓ Vagten er forstået.").size(15).into(),
         };
-        content = content.push(status);
+        content = content.push(question);
         for (r, cells) in self.cells.iter().enumerate() {
             let mut line = row![].spacing(4);
             for (c, value) in cells.iter().enumerate() {
@@ -234,16 +252,7 @@ impl Template {
             content = content.push(line);
         }
         content
-            .push(
-                row![
-                    paste,
-                    button(text("Start forfra").size(14))
-                        .style(crate::widgets::outlined)
-                        .padding([7, 12])
-                        .on_press(Message::Reset),
-                ]
-                .spacing(8),
-            )
+            .push(quiet("Start forfra").on_press(Message::Reset))
             .into()
     }
 }
