@@ -8,7 +8,7 @@ use iced::widget::{
 use iced::{Element, Length, Subscription, Task};
 use serde_json::Value;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -97,6 +97,8 @@ struct ProgressUnit {
 #[derive(Clone, Debug)]
 struct StepLabels {
     unit: ProgressUnit,
+    /// Helper and date, e.g. "Anna 3. sep", naming the shift if it stays unresolved.
+    shift: String,
     started: String,
     verified: String,
 }
@@ -107,7 +109,8 @@ struct StepLabels {
 struct TransferProgress {
     expected: BTreeMap<ProgressUnit, usize>,
     current: String,
-    uncertain: BTreeSet<ProgressUnit>,
+    /// Submitted units without a verified outcome, with their shift label.
+    uncertain: BTreeMap<ProgressUnit, String>,
     verified: Vec<VerifiedStep>,
 }
 
@@ -201,7 +204,8 @@ struct ApplyFailure {
     /// than that the transfer did not finish.
     message: String,
     verified: usize,
-    uncertain: usize,
+    /// Shifts whose write may or may not have been saved, and where.
+    uncertain: Vec<(Destination, String)>,
     remaining: usize,
 }
 
@@ -237,19 +241,45 @@ fn format_verified_da(moment: DateTime<FixedOffset>, zone: chrono_tz::Tz) -> Str
     )
 }
 
+/// A short notice after a failed run. Unresolved shifts come first, since the
+/// user must check them in the service before anything else.
 fn failure_notice(failure: &ApplyFailure) -> Notice {
-    let mut detail = failure.message.clone();
-    if !detail.is_empty() {
-        detail.push(' ');
+    let rest = if failure.remaining == 0 {
+        "Resten er overført.".to_owned()
+    } else {
+        format!(
+            "{} af {} ændringer er overført. Vælg Kontrollér igen for at overføre resten.",
+            failure.verified,
+            failure.verified + failure.uncertain.len() + failure.remaining
+        )
+    };
+    if failure.uncertain.is_empty() {
+        let detail = if failure.message.is_empty() {
+            rest
+        } else {
+            format!("{} {rest}", failure.message)
+        };
+        return Notice::new(Tone::Error, "Overførslen blev ikke færdig", detail);
     }
-    detail.push_str(&format!(
-        "{} verificeret, {} uafklaret og {} ikke startet.",
-        failure.verified, failure.uncertain, failure.remaining
-    ));
-    if failure.uncertain > 0 {
-        detail.push_str(" En uafklaret ændring kan allerede være gemt.");
+    // Units sort by destination first, so each service's shifts are adjacent.
+    let mut checks: Vec<(Destination, Vec<&str>)> = Vec::new();
+    for (destination, shift) in &failure.uncertain {
+        match checks.last_mut() {
+            Some((last, shifts)) if last == destination => shifts.push(shift),
+            _ => checks.push((*destination, vec![shift])),
+        }
     }
-    Notice::new(Tone::Error, "Overførslen blev ikke færdig", detail)
+    let checks: Vec<String> = checks
+        .iter()
+        .map(|(destination, shifts)| {
+            format!("{} er inde på {}", shifts.join(" og "), destination.name())
+        })
+        .collect();
+    Notice::new(
+        Tone::Warning,
+        format!("Dobbelttjek at {}", checks.join(", og at ")),
+        rest,
+    )
 }
 
 fn progress_line(verified: usize, total: usize) -> String {
@@ -900,6 +930,7 @@ impl Engine {
                     (item.source_key.clone(), item.step_key.clone()),
                     StepLabels {
                         unit,
+                        shift: format!("{helper} {date}"),
                         started: format!("{} {helper} {date} i {service}", verb_of(item.outcome)),
                         verified: format!("Verificeret: {helper} {date} i {service}"),
                     },
@@ -985,7 +1016,7 @@ fn update_transfer_progress(
         match phase {
             Phase::Started => state.current = labels.started.clone(),
             Phase::Uncertain => {
-                state.uncertain.insert(unit);
+                state.uncertain.insert(unit, labels.shift.clone());
             }
             Phase::Verified => {
                 state.uncertain.remove(&unit);
@@ -1004,7 +1035,11 @@ fn apply_failure(message: String, progress: &Arc<StdMutex<TransferProgress>>) ->
         .map(|state| {
             (
                 state.verified_units(),
-                state.uncertain.len(),
+                state
+                    .uncertain
+                    .iter()
+                    .map(|(unit, shift)| (unit.destination, shift.clone()))
+                    .collect::<Vec<_>>(),
                 state.expected.len(),
             )
         })
@@ -1012,8 +1047,8 @@ fn apply_failure(message: String, progress: &Arc<StdMutex<TransferProgress>>) ->
     ApplyFailure {
         message,
         verified,
+        remaining: total.saturating_sub(verified + uncertain.len()),
         uncertain,
-        remaining: total.saturating_sub(verified + uncertain),
     }
 }
 
@@ -1983,7 +2018,7 @@ impl NativeApp {
                 let progress = Arc::new(StdMutex::new(TransferProgress {
                     expected,
                     current: String::new(),
-                    uncertain: BTreeSet::new(),
+                    uncertain: BTreeMap::new(),
                     verified: Vec::new(),
                 }));
                 let stop = Arc::new(AtomicBool::new(false));
@@ -2917,16 +2952,15 @@ mod tests {
         let _ = app.update(Message::Applied(Err(ApplyFailure {
             message: "Uafklaret ændring".into(),
             verified: 0,
-            uncertain: 1,
+            uncertain: vec![(Destination::Mithf, "Anna 3. sep".into())],
             remaining: 0,
         })));
         assert_eq!(app.activity, Activity::Idle);
         assert!(app.preview.is_none());
         let status = app.status.as_ref().expect("failure notice");
-        assert_eq!(status.tone, Tone::Error);
-        assert_eq!(status.title, "Overførslen blev ikke færdig");
-        assert!(status.detail.starts_with("Uafklaret ændring "));
-        assert!(status.detail.contains("1 uafklaret"));
+        assert_eq!(status.tone, Tone::Warning);
+        assert_eq!(status.title, "Dobbelttjek at Anna 3. sep er inde på MitHF");
+        assert_eq!(status.detail, "Resten er overført.");
         assert!(app.needs_recheck);
         let _ = app.update(Message::Apply);
         assert_eq!(app.activity, Activity::Idle);
