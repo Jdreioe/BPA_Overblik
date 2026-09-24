@@ -12,9 +12,9 @@ use chrono_tz::Tz;
 use serde_json::{json, Map, Value};
 
 use super::{
-    config::{read_credential, store_credential},
+    config::{ical_access, read_credential, store_credential},
     destinations::build_catalog,
-    rows, sheets, teamup, text, BrowserSessions, LiveError, INVALID,
+    ical, rows, sheets, teamup, text, BrowserSessions, LiveError, INVALID,
 };
 use crate::standard_time::StandardTimes;
 
@@ -75,6 +75,22 @@ fn selected<'a>(choices: &'a Value, identifier: &Value) -> Result<&'a Value, Liv
         ));
     }
     Ok(matching[0])
+}
+
+/// A shared calendar's helpers are read from a moving window, so a helper
+/// whose last shift has passed would drop out and reset every mapping. Keep
+/// helpers already listed, under the name they were listed with, and add the
+/// new ones. Reconnecting the calendar starts the list afresh.
+fn keep_known_helpers(known: &Value, found: Value) -> Value {
+    let mut helpers = std::collections::BTreeMap::new();
+    // Known rows go in last, so their names win.
+    let found = found.as_array().into_iter().flatten();
+    for row in found.chain(known.as_array().into_iter().flatten()) {
+        if let Some(id) = row["id"].as_str() {
+            helpers.insert(id.to_owned(), row.clone());
+        }
+    }
+    Value::Array(helpers.into_values().collect())
 }
 
 fn defaults() -> Value {
@@ -153,10 +169,19 @@ impl Setup {
                 return Err(UNREADABLE);
             }
             for (key, value) in saved.as_object().ok_or(UNREADABLE)? {
-                // Setups saved while a source was being tried call the other
-                // source's setup `trial`.
-                let key = if key == "trial" { "other_source" } else { key };
-                data[key] = value.clone();
+                // Setups saved with only two sources kept the one left behind
+                // under `other_source`, or `trial` while it was being tried.
+                if matches!(key.as_str(), "other_source" | "trial") {
+                    if let Some(source) = value["source"].as_str() {
+                        let source = source.to_owned();
+                        if !data["other_sources"].is_object() {
+                            data["other_sources"] = json!({});
+                        }
+                        data["other_sources"][source] = value.clone();
+                    }
+                    continue;
+                }
+                data[key.as_str()] = value.clone();
             }
         }
         Ok(Self { path, data })
@@ -189,7 +214,7 @@ impl Setup {
         for (key, value) in self.data.as_object().into_iter().flatten() {
             if matches!(
                 key.as_str(),
-                "credential" | "catalog" | "imported" | "account_ids" | "other_source" | "notice"
+                "credential" | "catalog" | "imported" | "account_ids" | "other_sources" | "notice"
             ) {
                 continue;
             }
@@ -199,12 +224,18 @@ impl Setup {
         // Importing a legacy TOML configuration is not part of the native flow.
         view.insert("can_import".into(), json!(false));
         view.insert("has_credentials".into(), json!(self.credential().is_ok()));
-        view.insert(
-            "other_source_has_credentials".into(),
-            json!(self.data["other_source"]["credential"]
-                .as_str()
-                .is_some_and(|credential| !credential.is_empty())),
-        );
+        let mut connected: Vec<&str> = self.data["other_sources"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter(|(_, kept)| kept["credential"].as_str().is_some_and(|c| !c.is_empty()))
+            .map(|(source, _)| source.as_str())
+            .collect();
+        if self.credential().is_ok() {
+            connected.extend(self.data["source"].as_str());
+        }
+        connected.sort_unstable();
+        view.insert("connected_sources".into(), json!(connected));
         Value::Object(view)
     }
 
@@ -262,20 +293,24 @@ impl Setup {
     }
 
     /// Switch sources. Each source keeps its own setup: the one left behind
-    /// is kept under `other_source` and comes back exactly as it was when that
-    /// source is chosen again. A source chosen for the first time starts from
-    /// the connection step, without the old source's mappings or approval.
+    /// is kept under `other_sources` and comes back exactly as it was when
+    /// that source is chosen again. A source chosen for the first time starts
+    /// from the connection step, without the old source's mappings or approval.
     pub fn choose_source(&mut self, source: &str) -> Result<(), LiveError> {
-        if !matches!(source, "teamup" | "sheets") {
-            return Err(LiveError("Vælg TeamUp eller Regneark."));
+        if !matches!(source, "teamup" | "sheets" | "ical") {
+            return Err(LiveError("Vælg TeamUp, Regneark eller en iCal-kalender."));
         }
         if self.data["source"] == source {
             self.data["stage"] = json!("source");
             return self.save();
         }
         let object = self.data.as_object_mut().ok_or(INVALID)?;
-        let other = object
-            .remove("other_source")
+        let mut kept = match object.remove("other_sources") {
+            Some(Value::Object(kept)) => kept,
+            _ => Map::new(),
+        };
+        let other = kept
+            .remove(source)
             .filter(|other| other["source"] == source);
         let resume = object.remove("resume_stage");
         let mut left = self.data.clone();
@@ -300,7 +335,12 @@ impl Setup {
             self.data["markers"] = markers;
         }
         if left["credential"].as_str().is_some_and(|c| !c.is_empty()) {
-            self.data["other_source"] = left;
+            if let Some(name) = left["source"].as_str() {
+                kept.insert(name.to_owned(), left);
+            }
+        }
+        if !kept.is_empty() {
+            self.data["other_sources"] = Value::Object(kept);
         }
         self.save()
     }
@@ -381,30 +421,80 @@ impl Setup {
         Ok(notice)
     }
 
-    /// Re-read the TeamUp calendars for the saved credentials. Confirmed
-    /// mappings survive unless the calendars themselves changed.
+    /// Connect one or more iCal feeds. The links stay in the OS keyring; only
+    /// how helpers are found is stored in setup.json.
+    pub async fn connect_ical(
+        &mut self,
+        links: &[String],
+        rule: crate::ical::HelperRule,
+    ) -> Result<String, LiveError> {
+        if self.data["source"] != "ical" {
+            return Err(LiveError("Vælg iCal-kalender som kilde først."));
+        }
+        let access = ical::access(links, rule.clone(), Default::default())?;
+        let (calendars, colors, notice) = ical::source_catalog(
+            &access,
+            self.timezone(),
+            self.today(),
+            &self.standard_times()?,
+        )
+        .await?;
+        let feeds: Vec<&str> = access.feeds.iter().map(|feed| feed.url.as_str()).collect();
+        let credential = uuid::Uuid::new_v4().simple().to_string();
+        store_credential(&credential, &json!({ "feeds": feeds }))?;
+        self.data["credential"] = json!(credential);
+        self.data["ical_rule"] = serde_json::to_value(rule).map_err(|_| INVALID)?;
+        self.apply_source(calendars, colors)?;
+        Ok(notice)
+    }
+
+    /// Read the saved source's helper choices, colours and a Danish notice
+    /// about what was checked.
+    async fn read_source_catalog(&self) -> Result<(Value, Value, String), LiveError> {
+        let secret = read_credential(self.credential()?)?;
+        match self.data["source"].as_str() {
+            Some("sheets") => {
+                let layout: crate::sheets::SheetLayout =
+                    serde_json::from_value(self.data["sheet_layout"].clone())
+                        .map_err(|_| LiveError("Regnearkets gemte opsætning er ugyldig."))?;
+                let access = sheets::access(&secret, layout)?;
+                sheets::source_catalog(&access, self.timezone(), &self.standard_times()?).await
+            }
+            Some("ical") => {
+                let access = ical_access(&self.data, &secret)?;
+                let (found, colors, notice) = ical::source_catalog(
+                    &access,
+                    self.timezone(),
+                    self.today(),
+                    &self.standard_times()?,
+                )
+                .await?;
+                let calendars = match access.rule {
+                    crate::ical::HelperRule::Feed => found,
+                    crate::ical::HelperRule::Title { .. } => {
+                        keep_known_helpers(&self.data["calendars"], found)
+                    }
+                };
+                Ok((calendars, colors, notice))
+            }
+            _ => {
+                let access = teamup::Access {
+                    calendar: text(&secret["calendar"])?,
+                    api_key: text(&secret["api_key"])?,
+                    bearer: secret["bearer"].as_str().unwrap_or(""),
+                };
+                teamup::source_catalog(&access, self.timezone(), self.today()).await
+            }
+        }
+    }
+
+    /// Re-read the source for the saved credentials. Confirmed mappings
+    /// survive unless the calendars or helpers themselves changed.
     ///
     /// Returns what the check found, in Danish, for the caller to show once.
     /// It is a result, not setup, so it is never saved in the document.
     pub async fn refresh_source(&mut self) -> Result<String, LiveError> {
-        let secret = read_credential(self.credential()?)?;
-        if self.data["source"] == "sheets" {
-            let layout: crate::sheets::SheetLayout =
-                serde_json::from_value(self.data["sheet_layout"].clone())
-                    .map_err(|_| LiveError("Regnearkets gemte opsætning er ugyldig."))?;
-            let access = sheets::access(&secret, layout)?;
-            let (calendars, colors, notice) =
-                sheets::source_catalog(&access, self.timezone(), &self.standard_times()?).await?;
-            self.apply_source(calendars, colors)?;
-            return Ok(notice);
-        }
-        let access = teamup::Access {
-            calendar: text(&secret["calendar"])?,
-            api_key: text(&secret["api_key"])?,
-            bearer: secret["bearer"].as_str().unwrap_or(""),
-        };
-        let (calendars, colors, notice) =
-            teamup::source_catalog(&access, self.timezone(), self.today()).await?;
+        let (calendars, colors, notice) = self.read_source_catalog().await?;
         self.apply_source(calendars, colors)?;
         Ok(notice)
     }
@@ -668,21 +758,7 @@ impl Setup {
     /// resolves to the same identity. A recolour is adopted silently; anything
     /// else sends the setup back for review.
     pub async fn revalidate(&mut self, browser: &BrowserSessions) -> Result<(), LiveError> {
-        let secret = read_credential(self.credential()?)?;
-        let (calendars, colors, _) = if self.data["source"] == "sheets" {
-            let layout: crate::sheets::SheetLayout =
-                serde_json::from_value(self.data["sheet_layout"].clone())
-                    .map_err(|_| LiveError("Regnearkets gemte opsætning er ugyldig."))?;
-            let access = sheets::access(&secret, layout)?;
-            sheets::source_catalog(&access, self.timezone(), &self.standard_times()?).await?
-        } else {
-            let access = teamup::Access {
-                calendar: text(&secret["calendar"])?,
-                api_key: text(&secret["api_key"])?,
-                bearer: secret["bearer"].as_str().unwrap_or(""),
-            };
-            teamup::source_catalog(&access, self.timezone(), self.today()).await?
-        };
+        let (calendars, colors, _) = self.read_source_catalog().await?;
         if colors != self.data["colors"] {
             // Colour is appearance, not identity: adopt it without asking.
             self.data["colors"] = colors;
@@ -1023,28 +1099,93 @@ mod tests {
         assert_eq!(setup.data["mappings"], json!([]));
         assert_eq!(setup.data["stage"], "source");
         // The kept setup holds a credential handle; it never reaches the view.
-        assert!(setup.view().get("other_source").is_none());
+        assert!(setup.view().get("other_sources").is_none());
         assert_eq!(setup.view()["has_credentials"], false);
-        assert_eq!(setup.view()["other_source_has_credentials"], true);
+        assert_eq!(setup.view()["connected_sources"], json!(["teamup"]));
         setup.data["credential"] = json!("sheet-handle");
         setup.data["stage"] = json!("ready");
         let mut sheets = setup.data.clone();
 
+        // A third source keeps both of the others.
+        setup.edit_source().unwrap();
+        setup.choose_source("ical").unwrap();
+        assert_eq!(setup.data["mappings"], json!([]));
+        assert_eq!(
+            setup.view()["connected_sources"],
+            json!(["sheets", "teamup"])
+        );
+        setup.data["credential"] = json!("ical-handle");
+        setup.data["stage"] = json!("ready");
+        assert_eq!(
+            setup.view()["connected_sources"],
+            json!(["ical", "sheets", "teamup"])
+        );
+
         setup.edit_source().unwrap();
         setup.choose_source("teamup").unwrap();
         assert_eq!(setup.view()["has_credentials"], true);
-        assert_eq!(setup.view()["other_source_has_credentials"], true);
         let mut restored = setup.data.clone();
-        restored.as_object_mut().unwrap().remove("other_source");
+        restored.as_object_mut().unwrap().remove("other_sources");
         assert_eq!(restored, teamup);
-        assert_eq!(setup.data["other_source"]["credential"], "sheet-handle");
+        assert_eq!(
+            setup.data["other_sources"]["sheets"]["credential"],
+            "sheet-handle"
+        );
+        assert_eq!(
+            setup.data["other_sources"]["ical"]["credential"],
+            "ical-handle"
+        );
 
         setup.edit_source().unwrap();
         setup.choose_source("sheets").unwrap();
-        sheets.as_object_mut().unwrap().remove("other_source");
+        sheets.as_object_mut().unwrap().remove("other_sources");
         let mut now = Setup::load(dir.path()).unwrap().data;
-        now.as_object_mut().unwrap().remove("other_source");
+        now.as_object_mut().unwrap().remove("other_sources");
         assert_eq!(now, sheets);
+        assert!(setup.choose_source("outlook").is_err());
+    }
+
+    #[test]
+    fn a_shared_calendar_keeps_helpers_whose_shifts_have_passed() {
+        let known = json!([{"id": "anna", "name": "Anna"}, {"id": "carl", "name": "Carl"}]);
+        let found = json!([{"id": "anna", "name": "anna"}, {"id": "bo", "name": "Bo"}]);
+        assert_eq!(
+            keep_known_helpers(&known, found.clone()),
+            json!([
+                {"id": "anna", "name": "Anna"},
+                {"id": "bo", "name": "Bo"},
+                {"id": "carl", "name": "Carl"},
+            ])
+        );
+        // Nothing known yet: what was found, in order.
+        assert_eq!(
+            keep_known_helpers(&json!([]), found),
+            json!([{"id": "anna", "name": "anna"}, {"id": "bo", "name": "Bo"}])
+        );
+    }
+
+    #[test]
+    fn a_setup_saved_with_two_sources_keeps_the_other_one() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("setup.json"),
+            json!({
+                "version": 1, "stage": "ready", "source": "teamup", "credential": "teamup-handle",
+                "other_source": {"version": 1, "stage": "ready", "source": "sheets", "credential": "sheet-handle"},
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut setup = Setup::load(dir.path()).unwrap();
+        assert!(setup.data.get("other_source").is_none());
+        assert_eq!(
+            setup.view()["connected_sources"],
+            json!(["sheets", "teamup"])
+        );
+        setup.edit_source().unwrap();
+        setup.choose_source("sheets").unwrap();
+        assert_eq!(setup.data["credential"], "sheet-handle");
+        assert_eq!(setup.data["stage"], "ready");
     }
 
     #[test]

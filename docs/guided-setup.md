@@ -5,7 +5,7 @@ Fixture previews are CLI-only; the desktop app never opens example data.
 
 ## First run
 
-1. Choose TeamUp or **Regneark** (a spreadsheet). For TeamUp, paste a shared `https://teamup.com/ks…` calendar link and the one-time API
+1. Choose TeamUp, **Regneark** (a spreadsheet), or an iCal calendar. For TeamUp, paste a shared `https://teamup.com/ks…` calendar link and the one-time API
    key. The app reads calendar configuration and the current week's events,
    including each event's comments. Account-only, password-protected and
    restricted links need a shared link with suitable access from the calendar
@@ -122,6 +122,66 @@ still work, and setup skips it. The message names the helper and date, such as
 "Zains vagt d. 27/9 mangler tid.", and only an impossible date points at its
 cell. These messages are shown on screen only and never go into a report.
 
+## iCal calendar source
+
+Any calendar service that publishes a read-only ICS feed works: Google
+Calendar, Outlook/Microsoft 365, iCloud, Nextcloud and other CalDAV servers.
+The app reads the feed anonymously and never edits the calendar. Provider
+APIs that need a login (Google Calendar API, Microsoft Graph, CalDAV with a
+password) are not supported.
+
+Where to find the link:
+
+- **Google Calendar:** Settings → the calendar under *Settings for my
+  calendars* → *Integrate calendar* → *Secret address in iCal format*. The
+  public address only works for a public calendar.
+- **Outlook / Microsoft 365 (web):** Settings → Calendar → Shared calendars →
+  *Publish a calendar*, choose *Can view all details*, and copy the ICS link.
+- **iCloud:** Share the calendar, turn on *Public Calendar*, and copy the
+  `webcal://` link.
+- **Nextcloud:** the calendar's menu → *Share* → *Share link* → *Copy
+  subscription link*.
+
+Links must start with `https://` or `webcal://`; `webcal://` is read over
+HTTPS and plain `http://` is refused. The link usually contains a secret
+token, so it is stored in the OS credential store and never in `setup.json`,
+logs or the diagnostics report. Resetting the secret address in the calendar
+service disconnects the app until a new link is entered.
+
+Choose how the calendar names its helpers:
+
+- **One calendar per helper.** Add one link per helper, like TeamUp
+  sub-calendars. Each feed appears under **Hjælpere** by its calendar name and
+  is mapped to a MitHF (and, when enabled, DUOS) helper.
+- **One shared calendar.** Every event's title names its helper. The name
+  comes before a character, `-` by default (`Anna - Vagt`). Without the
+  character in a title, the whole title is the name (`Anna`). Names are matched ignoring case and
+  spacing, and every name found from four weeks back to half a year ahead is
+  listed under **Hjælpere**, so the chosen rule can be checked there. A name
+  stays listed after its shifts have passed, so it does not reset the other
+  mappings; connect the calendar again to start the list afresh. What is
+  left of the title becomes the shift's title, so `Anna - P-møde` is Anna's
+  meeting. Reminder titles (`Husk at checke …`) are skipped before a name is
+  looked for. An event whose title names no helper blocks its week, and a name
+  that is not mapped is flagged in the preview. An excluded helper's events
+  are skipped.
+
+Repeating events are expanded within the week, including `EXDATE`
+exceptions, extra `RDATE`s and edited or cancelled single occurrences
+(`RECURRENCE-ID`). Times are read in the event's time zone, including
+Outlook's Windows zone names, and shown in Copenhagen time; floating times and
+all-day events use Copenhagen time. Cancelled events are skipped. A shift's
+identity is its event UID plus, for a repeating event, the start of the
+occurrence it replaces, so editing or moving an occurrence updates the same
+shift. The event description is read as the shift's notes, including SPS
+instructions.
+
+An all-day event on one date uses that date's standard time, like in TeamUp.
+A multi-day all-day event, an event that ends when it starts, a time that
+does not exist or exists twice at a daylight-saving change, or an event that
+cannot be read blocks every week it touches, with a message naming the helper
+and date. Other weeks still work.
+
 ## Standard shift time
 
 Under **Indstillinger → Standardtider**, enter a common time such as `6-22` for days where a
@@ -132,7 +192,7 @@ Ranges accept `8-24`, `08:30-16:00`, and overnight hours such as `22-8`.
 The app uses Copenhagen local time and refuses ambiguous or nonexistent times
 at daylight-saving changes.
 
-A TeamUp all-day event on exactly one date and a confirmed helper calendar uses
+A TeamUp or iCal all-day event on exactly one date and a confirmed helper calendar uses
 that date's standard. A multi-day all-day event needs its own times before the
 week can be transferred. A Sheets shift with a helper and no time uses the
 standard; when start and end are separate cells, both must be empty. A weekday
@@ -152,9 +212,10 @@ the preview flags them for review before transfer.
 
 ## Switching source
 
-Each source keeps its own setup. Choosing the other source under **Skift
+Each source keeps its own setup. Choosing another source under **Skift
 vagtplan** keeps the current setup, including its link or key and helper
-mappings, and choosing it again later restores it exactly. A source chosen for
+mappings, and choosing it again later restores it exactly. This holds for all
+three sources at once. A source chosen for
 the first time starts from the connection step. Each source keeps its own sync
 history, because the history file is named after the source and its mappings.
 

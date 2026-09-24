@@ -4,6 +4,7 @@ mod capture;
 mod config;
 mod destinations;
 mod diagnostics;
+mod ical;
 mod setup;
 mod sheets;
 mod teamup;
@@ -48,7 +49,21 @@ pub async fn read_source(
     from: NaiveDate,
     to: NaiveDate,
 ) -> Result<SourceWeek, SourceReadError> {
-    if let Some(sheet) = &config.sheet {
+    if let Some(ical) = &config.ical {
+        let shifts = ical::read(
+            ical,
+            config.planning.timezone,
+            from,
+            to,
+            &config.standard_times,
+            &config.planning.helpers,
+        )
+        .await?;
+        Ok(SourceWeek {
+            shifts,
+            markers: Vec::new(),
+        })
+    } else if let Some(sheet) = &config.sheet {
         let shifts = sheets::read(
             sheet,
             config.planning.timezone,

@@ -3,7 +3,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use super::{id, rows, sheets::SheetAccess, text, LiveError, INVALID};
+use super::{
+    ical::{self, IcalAccess},
+    id, rows,
+    sheets::{self, SheetAccess},
+    text, LiveError, INVALID,
+};
 use crate::standard_time::StandardTimes;
 use crate::{HelperMapping, PlanningConfig, StateError, SyncState};
 use serde_json::{json, Value};
@@ -16,6 +21,7 @@ pub struct LiveConfig {
     pub(crate) api_key: String,
     pub(crate) bearer: String,
     pub(crate) sheet: Option<SheetAccess>,
+    pub(crate) ical: Option<IcalAccess>,
     pub(crate) setup: Value,
     pub(crate) lookback_days: i64,
     pub state_path: PathBuf,
@@ -101,26 +107,28 @@ fn adopt_scattered_history(data_dir: &Path, config: &LiveConfig) -> Result<(), S
     built
 }
 
-/// Read TeamUp credentials from the OS keyring. The setup document itself
+/// Read a source's credentials from the OS keyring. The setup document itself
 /// never holds a secret, only the handle they are stored under.
 pub(crate) fn read_credential(credential: &str) -> Result<Value, LiveError> {
     let entry = keyring::Entry::new("teamup-shift-sync", credential).map_err(|_| {
         LiveError("Computerens nøglering kunne ikke åbnes. Lås den op, og prøv igen.")
     })?;
     let secret = entry.get_password().map_err(|_| {
-        LiveError("De gemte TeamUp-oplysninger kunne ikke læses. Tilslut kalenderen igen.")
+        LiveError("De gemte forbindelsesoplysninger kunne ikke læses. Tilslut vagtplanen igen under Indstillinger → Udbydere.")
     })?;
     serde_json::from_str(&secret).map_err(|_| INVALID)
 }
 
-/// Store TeamUp credentials under a fresh handle. Run on a blocking thread.
+/// Store a source's credentials under a fresh handle. Run on a blocking thread.
 pub(crate) fn store_credential(credential: &str, secret: &Value) -> Result<(), LiveError> {
     let entry = keyring::Entry::new("teamup-shift-sync", credential).map_err(|_| {
         LiveError("Computerens nøglering kunne ikke åbnes. Lås den op, og prøv igen.")
     })?;
-    entry
-        .set_password(&secret.to_string())
-        .map_err(|_| LiveError("TeamUp-oplysningerne kunne ikke gemmes i computerens nøglering."))
+    entry.set_password(&secret.to_string()).map_err(|_| {
+        LiveError(
+            "Forbindelsen kunne ikke gemmes i computerens nøglering. Lås den op, og prøv igen.",
+        )
+    })
 }
 
 pub(crate) fn selected<'a>(choices: &'a Value, identifier: &Value) -> Result<&'a Value, LiveError> {
@@ -145,6 +153,23 @@ pub(crate) fn account_scope(setup: &Value, calendar: &str) -> Result<String, Liv
     let identity = json!({"account_ids": setup["account_ids"], "calendar": calendar});
     let hash = crate::approval::json_digest(&identity).map_err(|_| INVALID)?;
     Ok(hash[..24].to_owned())
+}
+
+/// The saved iCal feeds and helper rule. Shared with setup, which reads the
+/// same feeds before a configuration is confirmed.
+pub(crate) fn ical_access(setup: &Value, secret: &Value) -> Result<IcalAccess, LiveError> {
+    let rule = serde_json::from_value(setup["ical_rule"].clone())
+        .map_err(|_| LiveError("Kalenderens gemte opsætning er ugyldig."))?;
+    let links: Vec<String> =
+        serde_json::from_value(secret["feeds"].clone()).map_err(|_| INVALID)?;
+    let excluded = setup["mappings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|row| row["excluded"] == json!(true))
+        .filter_map(|row| row["source"].as_str().map(str::to_owned))
+        .collect();
+    ical::access(&links, rule, excluded)
 }
 
 fn config_from_setup(
@@ -185,14 +210,15 @@ fn config_from_setup(
     if helpers.is_empty() {
         return Err(LiveError("Opsætningen mangler bekræftede hjælpere."));
     }
-    let sheet = match setup["source"].as_str().unwrap_or("teamup") {
-        "teamup" => None,
+    let (sheet, ical) = match setup["source"].as_str().unwrap_or("teamup") {
+        "teamup" => (None, None),
         "sheets" => {
             let layout: crate::sheets::SheetLayout =
                 serde_json::from_value(setup["sheet_layout"].clone())
                     .map_err(|_| LiveError("Regnearkets gemte opsætning er ugyldig."))?;
-            Some(super::sheets::access(secret, layout)?)
+            (Some(sheets::access(secret, layout)?), None)
         }
+        "ical" => (None, Some(ical_access(&setup, secret)?)),
         _ => return Err(LiveError("Ukendt kilde i opsætningen.")),
     };
     let (calendar, api_key, bearer, scope_source) = if let Some(sheet) = &sheet {
@@ -201,6 +227,13 @@ fn config_from_setup(
             String::new(),
             String::new(),
             sheet.source_id(),
+        )
+    } else if let Some(ical) = &ical {
+        (
+            String::new(),
+            String::new(),
+            String::new(),
+            ical.source_id(),
         )
     } else {
         let calendar = text(&secret["calendar"])?.to_owned();
@@ -276,6 +309,7 @@ fn config_from_setup(
         api_key,
         bearer,
         sheet,
+        ical,
         lookback_days,
         setup,
         helper_names: names,

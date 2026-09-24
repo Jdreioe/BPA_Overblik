@@ -56,6 +56,25 @@ og bliver ikke slettet med programmet.
 Der er ikke noget at afinstallere: du sletter filen. Dine data ligger i
 `~/.local/share/teamup-shift-sync`.
 
+## Vagtplan fra en kalender (iCal)
+
+Under **Indstillinger → Udbydere → Vagtplan** kan du vælge **iCal-kalender** og
+indsætte kalenderens iCal-link. Linket er hemmeligt, så appen gemmer det i
+nøgleringen. Sådan finder du det:
+
+- **Google Kalender:** Indstillinger → vælg kalenderen under *Indstillinger for
+  mine kalendere* → *Integrer kalender* → kopiér *Hemmelig adresse i
+  iCal-format*.
+- **Outlook:** Indstillinger → Kalender → Delte kalendere → *Udgiv en
+  kalender*. Vælg at alle detaljer kan ses, og kopiér ICS-linket.
+- **iCloud:** Del kalenderen, slå *Offentlig kalender* til, og kopiér
+  linket, der starter med `webcal://`.
+
+Har hver hjælper sin egen kalender, så tilføj ét link pr. hjælper. Står alle
+vagter i én fælles kalender, så vælg det. Hjælperens navn skal stå først i
+titlen, før et tegn, for eksempel »Anna - Vagt«, eller udgøre hele titlen. Navnene, appen finder,
+vises under **Hjælpere**.
+
 ## Hvad systemet spørger om
 
 BPA Overblik gemmer adgangskoder i systemets egen nøglering, og det er den
