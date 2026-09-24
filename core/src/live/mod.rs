@@ -14,7 +14,7 @@ pub use capture::read_shapes;
 pub use config::{load_saved_setup, LiveConfig, DEFAULT_MARKERS};
 pub use destinations::LiveDestinations;
 pub use diagnostics::{app_version, redacted_report};
-pub use setup::Setup;
+pub use setup::{Setup, SheetSource};
 pub use teamup::read_teamup;
 
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, TimeZone};
