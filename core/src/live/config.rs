@@ -6,7 +6,7 @@ use std::{
 use super::{
     ical::{self, IcalAccess},
     id, rows,
-    sheets::{parse_link, SheetAccess},
+    sheets::{self, SheetAccess},
     text, LiveError, INVALID,
 };
 use crate::standard_time::StandardTimes;
@@ -216,8 +216,7 @@ fn config_from_setup(
             let layout: crate::sheets::SheetLayout =
                 serde_json::from_value(setup["sheet_layout"].clone())
                     .map_err(|_| LiveError("Regnearkets gemte opsætning er ugyldig."))?;
-            let link = text(&secret["link"])?;
-            (Some(parse_link(link, layout)?), None)
+            (Some(sheets::access(secret, layout)?), None)
         }
         "ical" => (None, Some(ical_access(&setup, secret)?)),
         _ => return Err(LiveError("Ukendt kilde i opsætningen.")),

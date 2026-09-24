@@ -1,7 +1,7 @@
 # TeamUp shift sync
 
 A local, manually triggered weekly importer for planning helper shifts from
-TeamUp, a shared Google Sheet or any calendar's iCal feed in MitHF. SPS
+TeamUp, a spreadsheet or any calendar's iCal feed in MitHF. SPS
 registration in DUOS is optional.
 
 One pure Rust core owns parsing, planning, approval, transfers and sync state.
@@ -39,7 +39,9 @@ First-time setup happens in the desktop app, not in a config file:
 cargo run -p teamup-shift-sync-gui
 ```
 
-Connect TeamUp, Google Sheets or an iCal calendar, log in to MitHF, optionally enable DUOS,
+Connect TeamUp, a spreadsheet (Google Sheets, OneDrive, SharePoint, Nextcloud,
+Dropbox, a direct link, or a local `.xlsx`, `.ods` or `.csv`), or an iCal calendar;
+log in to MitHF, optionally enable DUOS,
 map helpers, and review the week. Credentials live in the OS credential store;
 setup and sync history live in the per-user application data directory
 (`TEAMUP_SHIFT_SYNC_DATA_DIR` overrides it). Do not commit API keys, `setup.json`

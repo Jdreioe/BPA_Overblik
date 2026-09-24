@@ -1,5 +1,12 @@
-//! Anonymous, read-only CSV export from a link-shared Google Sheets tab.
-//! The link acts as a capability, so its ID is kept in the OS keyring.
+//! Read-only spreadsheet sources: a Google Sheets tab, a shared link to a
+//! workbook or CSV file, or a file on this computer. Every one becomes the
+//! same grid of displayed text; see [`crate::workbook`].
+//!
+//! A share link acts as a capability, so it is kept in the OS keyring. So is
+//! a local path, which can contain the user's name. Neither ever reaches
+//! diagnostics.
+
+use std::path::PathBuf;
 
 use chrono::{NaiveDate, TimeZone};
 use chrono_tz::Tz;
@@ -9,58 +16,148 @@ use sha2::{Digest, Sha256};
 
 use super::LiveError;
 use crate::{
-    sheets::{csv_cells, parse_cells_with_standard, SheetIssue, SheetLayout},
+    sheets::{parse_cells_with_standard, SheetIssue, SheetLayout},
     standard_time::StandardTimes,
-    SourceShift,
+    workbook, SourceShift,
 };
+
+/// Larger files are refused rather than read.
+const MAX_BYTES: usize = 10_000_000;
 
 #[derive(Clone)]
 pub(crate) struct SheetAccess {
-    pub id: String,
-    pub gid: String,
+    pub location: Location,
+    /// The workbook tab, by name. A Google tab is its `gid`; a CSV has none.
+    pub tab: Option<String>,
     pub layout: SheetLayout,
 }
 
+/// Where the spreadsheet is read from.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Location {
+    /// A Google Sheets tab, read through its CSV export.
+    Google { id: String, gid: String },
+    /// A direct download link, already rewritten from its share link.
+    Link(Url),
+    /// A file on this computer, read again for every preview and transfer.
+    File(PathBuf),
+}
+
 impl SheetAccess {
+    /// The sync history scope. A Google tab keeps the id it always had, so
+    /// existing history survives; moving a plan elsewhere starts a new one.
     pub fn source_id(&self) -> String {
         let mut hasher = Sha256::new();
-        hasher.update(self.id.as_bytes());
-        hasher.update([0]);
-        hasher.update(self.gid.as_bytes());
+        match &self.location {
+            Location::Google { id, gid } => {
+                hasher.update(id.as_bytes());
+                hasher.update([0]);
+                hasher.update(gid.as_bytes());
+            }
+            Location::Link(url) => {
+                hasher.update(b"link\0");
+                hasher.update(url.as_str().as_bytes());
+            }
+            Location::File(path) => {
+                hasher.update(b"file\0");
+                hasher.update(path.to_string_lossy().as_bytes());
+            }
+        }
+        if !matches!(self.location, Location::Google { .. }) {
+            hasher.update([0]);
+            hasher.update(self.tab.as_deref().unwrap_or("").as_bytes());
+        }
         format!("sheet-{:x}", hasher.finalize())[..30].into()
-    }
-
-    fn export_url(&self) -> Result<Url, LiveError> {
-        let mut url = Url::parse("https://docs.google.com/spreadsheets/d/")
-            .expect("constant Google Sheets URL");
-        url.path_segments_mut()
-            .map_err(|_| LiveError("Ugyldigt regnearkslink."))?
-            .pop_if_empty()
-            .push(&self.id)
-            .push("export");
-        url.query_pairs_mut()
-            .append_pair("format", "csv")
-            .append_pair("gid", &self.gid);
-        Ok(url)
     }
 }
 
-/// Accept only a Google Sheets document link. Never fetch a caller-chosen host.
-pub(crate) fn parse_link(link: &str, layout: SheetLayout) -> Result<SheetAccess, LiveError> {
-    let url = Url::parse(link.trim()).map_err(|_| LiveError("Indsæt et Google Sheets-link."))?;
-    if url.scheme() != "https" || url.host_str() != Some("docs.google.com") {
+/// The saved access for a connected sheet: `{"link": …}` or `{"file": …}`,
+/// with the workbook tab if there is one.
+pub(crate) fn access(secret: &Value, layout: SheetLayout) -> Result<SheetAccess, LiveError> {
+    layout.validate().map_err(LiveError)?;
+    let location = match (secret["link"].as_str(), secret["file"].as_str()) {
+        (Some(link), None) => parse_link(link)?,
+        (None, Some(path)) => parse_file(path)?,
+        _ => return Err(LiveError("Regnearkets gemte forbindelse er ugyldig.")),
+    };
+    Ok(SheetAccess {
+        location,
+        tab: secret["tab"].as_str().map(str::to_owned),
+        layout,
+    })
+}
+
+pub(crate) fn parse_file(path: &str) -> Result<Location, LiveError> {
+    let path = PathBuf::from(path.trim());
+    if !path.is_absolute() {
+        return Err(LiveError("Vælg regnearksfilen igen."));
+    }
+    Ok(Location::File(path))
+}
+
+/// Turn a share link into the link that downloads the file. Only `https://`
+/// is fetched, and the known providers' share pages are rewritten to their
+/// download address:
+///
+/// - Google Sheets: the tab's CSV export, or a "Publish to web" file.
+/// - OneDrive: the anonymous shares download.
+/// - SharePoint: `download=1`.
+/// - Dropbox: `dl=1`.
+/// - Nextcloud and ownCloud: the share's `/download`.
+///
+/// Any other link must already download the file itself.
+pub(crate) fn parse_link(link: &str) -> Result<Location, LiveError> {
+    let url = Url::parse(link.trim()).map_err(|_| LiveError("Indsæt et link til regnearket."))?;
+    if url.scheme() != "https" {
         return Err(LiveError(
-            "Indsæt et Google Sheets-link fra docs.google.com.",
+            "Linket er ikke krypteret. Brug regnearkets https://-link.",
         ));
     }
-    let path: Vec<_> = url
+    let host = url.host_str().unwrap_or("").to_ascii_lowercase();
+    let path: Vec<String> = url
         .path_segments()
-        .ok_or(LiveError("Ugyldigt regnearkslink."))?
-        .collect();
-    if path.len() < 4 || path[0] != "spreadsheets" || path[1] != "d" || path[3] != "edit" {
+        .map(|segments| segments.map(str::to_owned).collect())
+        .unwrap_or_default();
+    if host == "docs.google.com" && path.first().map(String::as_str) == Some("spreadsheets") {
+        return google(&url, &path);
+    }
+    let mut url = url;
+    if host == "1drv.ms" || host == "onedrive.live.com" {
+        return onedrive(&url);
+    }
+    if host.ends_with(".sharepoint.com") {
+        set_query(&mut url, "download", "1");
+    } else if host == "dropbox.com" || host.ends_with(".dropbox.com") {
+        set_query(&mut url, "dl", "1");
+    } else if let Some(at) = path.iter().position(|segment| segment == "s") {
+        // Nextcloud and ownCloud: /s/<token> or /index.php/s/<token>.
+        if path.len() == at + 2 && !path[at + 1].is_empty() {
+            url.path_segments_mut()
+                .map_err(|_| LiveError("Ugyldigt regnearkslink."))?
+                .push("download");
+        }
+    }
+    Ok(Location::Link(url))
+}
+
+fn google(url: &Url, path: &[String]) -> Result<Location, LiveError> {
+    // Published to the web: /spreadsheets/d/e/<id>/pub or /pubhtml.
+    if path.get(1).map(String::as_str) == Some("d") && path.get(2).map(String::as_str) == Some("e")
+    {
+        let mut url = url.clone();
+        if path.get(4).map(String::as_str) == Some("pubhtml") {
+            let id = path[3].clone();
+            url.set_path(&format!("/spreadsheets/d/e/{id}/pub"));
+        }
+        if !url.query_pairs().any(|(key, _)| key == "output") {
+            set_query(&mut url, "output", "xlsx");
+        }
+        return Ok(Location::Link(url));
+    }
+    if path.len() < 4 || path[1] != "d" || path[3] != "edit" {
         return Err(LiveError("Indsæt linket fra regnearkets adressefelt."));
     }
-    let id = path[2];
+    let id = &path[2];
     if id.is_empty()
         || !id
             .bytes()
@@ -83,57 +180,163 @@ pub(crate) fn parse_link(link: &str, layout: SheetLayout) -> Result<SheetAccess,
             "Vælg en fane i regnearket, og kopiér dens link igen.",
         ));
     }
-    layout.validate().map_err(LiveError)?;
-    Ok(SheetAccess {
-        id: id.into(),
+    Ok(Location::Google {
+        id: id.clone(),
         gid,
-        layout,
     })
 }
 
+/// OneDrive share links download through the shares API, addressed by the
+/// share link itself in unpadded base64url.
+fn onedrive(url: &Url) -> Result<Location, LiveError> {
+    let encoded = base64url(url.as_str().as_bytes());
+    Url::parse(&format!(
+        "https://api.onedrive.com/v1.0/shares/u!{encoded}/root/content"
+    ))
+    .map(Location::Link)
+    .map_err(|_| LiveError("Ugyldigt regnearkslink."))
+}
+
+fn base64url(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, b)| n | (*b as u32) << (16 - 8 * i));
+        for i in 0..=chunk.len() {
+            out.push(ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char);
+        }
+    }
+    out
+}
+
+fn set_query(url: &mut Url, key: &str, value: &str) {
+    let kept: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(k, _)| k != key)
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    url.query_pairs_mut()
+        .clear()
+        .extend_pairs(kept)
+        .append_pair(key, value);
+}
+
+impl Location {
+    fn download_url(&self) -> Option<Url> {
+        match self {
+            Location::Google { id, gid } => {
+                let mut url = Url::parse("https://docs.google.com/spreadsheets/d/")
+                    .expect("constant Google Sheets URL");
+                url.path_segments_mut()
+                    .ok()?
+                    .pop_if_empty()
+                    .push(id)
+                    .push("export");
+                url.query_pairs_mut()
+                    .append_pair("format", "csv")
+                    .append_pair("gid", gid);
+                Some(url)
+            }
+            Location::Link(url) => Some(url.clone()),
+            Location::File(_) => None,
+        }
+    }
+}
+
 fn client() -> Result<Client, LiveError> {
+    // Share links redirect through their provider's download service, but
+    // never away from https.
+    let policy = reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= 10 || attempt.url().scheme() != "https" {
+            attempt.stop()
+        } else {
+            attempt.follow()
+        }
+    });
     Client::builder()
         .timeout(std::time::Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::limited(5))
+        .redirect(policy)
         .user_agent("teamup-shift-sync/0.1")
         .build()
         .map_err(|_| LiveError("Regnearket kunne ikke åbnes."))
 }
 
-async fn fetch(access: &SheetAccess) -> Result<Vec<Vec<String>>, LiveError> {
-    let response = client()?
-        .get(access.export_url()?)
-        .send()
-        .await
-        .map_err(|_| {
-            LiveError("Regnearket kunne ikke hentes. Kontrollér forbindelsen og delingsadgangen.")
-        })?;
-    if !response.status().is_success() {
-        return Err(LiveError(
-            "Google afviste regnearket. Kontrollér, at alle med linket må se det.",
-        ));
+/// The file's bytes, from the link or from disk, at most [`MAX_BYTES`].
+pub(crate) async fn fetch(location: &Location) -> Result<Vec<u8>, LiveError> {
+    let too_large = LiveError("Regnearket er for stort til at blive læst sikkert.");
+    let url = match location {
+        Location::File(path) => {
+            let missing = LiveError(
+                "Regnearksfilen findes ikke længere. Vælg filen igen under Indstillinger → Udbydere.",
+            );
+            let size = tokio::fs::metadata(path)
+                .await
+                .map_err(|_| missing.clone())?
+                .len();
+            if size > MAX_BYTES as u64 {
+                return Err(too_large);
+            }
+            return tokio::fs::read(path).await.map_err(|_| missing);
+        }
+        _ => location
+            .download_url()
+            .ok_or(LiveError("Ugyldigt regnearkslink."))?,
+    };
+    let google = matches!(location, Location::Google { .. });
+    let mut response = client()?.get(url).send().await.map_err(|_| {
+        LiveError("Regnearket kunne ikke hentes. Kontrollér forbindelsen og delingsadgangen.")
+    })?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(LiveError(match status.as_u16() {
+            _ if google => "Google afviste regnearket. Kontrollér, at alle med linket må se det.",
+            401 | 403 => "Linket kræver login. Del regnearket, så alle med linket kan se det.",
+            404 | 410 => {
+                "Regnearket findes ikke på linket længere. Del det igen, og indsæt det nye link."
+            }
+            _ => "Regnearket kunne ikke hentes. Prøv igen om lidt.",
+        }));
     }
     if response
         .content_length()
-        .is_some_and(|length| length > 10_000_000)
+        .is_some_and(|length| length > MAX_BYTES as u64)
     {
-        return Err(LiveError(
-            "Regnearket er for stort til at blive læst sikkert.",
-        ));
+        return Err(too_large);
     }
-    let bytes = response
-        .bytes()
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|_| LiveError("Regnearket kunne ikke læses."))?;
-    if bytes.len() > 10_000_000
-        || bytes.starts_with(b"<!DOCTYPE html")
-        || bytes.starts_with(b"<html")
+        .map_err(|_| LiveError("Regnearket kunne ikke læses."))?
     {
-        return Err(LiveError(
-            "Google gav ikke et læsbart CSV-ark. Kontrollér delingsadgangen.",
-        ));
+        if bytes.len() + chunk.len() > MAX_BYTES {
+            return Err(too_large);
+        }
+        bytes.extend_from_slice(&chunk);
     }
-    csv_cells(&bytes).map_err(LiveError)
+    Ok(bytes)
+}
+
+/// The tab names of what `location` holds. A CSV or a Google tab has none.
+pub(crate) fn tabs(bytes: &[u8]) -> Result<Vec<String>, LiveError> {
+    workbook::tabs(bytes).map_err(LiveError)
+}
+
+/// The displayed text of the chosen tab.
+pub(crate) fn grid(access: &SheetAccess, bytes: &[u8]) -> Result<Vec<Vec<String>>, LiveError> {
+    let tab = match access.location {
+        Location::Google { .. } => None,
+        _ => access.tab.as_deref(),
+    };
+    workbook::cells(bytes, tab).map_err(LiveError)
+}
+
+async fn read_grid(access: &SheetAccess) -> Result<Vec<Vec<String>>, LiveError> {
+    let bytes = fetch(&access.location).await?;
+    grid(access, &bytes)
 }
 
 pub(crate) async fn source_catalog(
@@ -141,10 +344,20 @@ pub(crate) async fn source_catalog(
     zone: Tz,
     standard: &StandardTimes,
 ) -> Result<(Value, Value, String), LiveError> {
-    let grid = fetch(access).await?;
+    let grid = read_grid(access).await?;
+    catalog(&grid, access, zone, standard)
+}
+
+/// Helpers and a counts-only notice from an already read grid.
+pub(crate) fn catalog(
+    grid: &[Vec<String>],
+    access: &SheetAccess,
+    zone: Tz,
+    standard: &StandardTimes,
+) -> Result<(Value, Value, String), LiveError> {
     let today = chrono::Utc::now().with_timezone(&zone).date_naive();
     let parsed = parse_cells_with_standard(
-        &grid,
+        grid,
         &access.layout,
         &access.source_id(),
         zone,
@@ -189,7 +402,7 @@ pub(crate) async fn read(
     to: NaiveDate,
     standard: &StandardTimes,
 ) -> Result<Vec<SourceShift>, String> {
-    let grid = fetch(access).await.map_err(|error| error.to_string())?;
+    let grid = read_grid(access).await.map_err(|error| error.to_string())?;
     let parsed = parse_cells_with_standard(
         &grid,
         &access.layout,
@@ -244,7 +457,7 @@ fn week_shifts(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sheets::{parse_cells, CellOffset, IssueKind, TimeCells};
+    use crate::sheets::{csv_cells, parse_cells, CellOffset, IssueKind, TimeCells};
 
     /// Date, helper two rows below it, time three rows below it.
     fn layout() -> SheetLayout {
@@ -261,25 +474,59 @@ mod tests {
     }
 
     #[test]
-    fn only_a_google_sheet_link_with_a_numeric_tab_is_accepted() {
-        let layout = layout();
-        let access = parse_link(
-            "https://docs.google.com/spreadsheets/d/abc-123/edit#gid=42",
-            layout.clone(),
-        )
-        .unwrap();
-        assert_eq!(access.gid, "42");
+    fn a_google_sheet_link_keeps_its_tab_and_its_history() {
+        let location =
+            parse_link("https://docs.google.com/spreadsheets/d/abc-123/edit#gid=42").unwrap();
         assert_eq!(
-            access.export_url().unwrap().as_str(),
+            location.download_url().unwrap().as_str(),
             "https://docs.google.com/spreadsheets/d/abc-123/export?format=csv&gid=42"
         );
+        let access = SheetAccess {
+            location,
+            tab: None,
+            layout: layout(),
+        };
+        // The id every existing Google Sheets setup already records history under.
+        assert_eq!(access.source_id(), "sheet-b579fff245cb8254968be5df");
         for link in [
             "http://docs.google.com/spreadsheets/d/x/edit",
-            "https://evil.example/spreadsheets/d/x/edit",
             "https://docs.google.com/spreadsheets/d/x/edit#gid=oops",
         ] {
-            assert!(parse_link(link, layout.clone()).is_err());
+            assert!(parse_link(link).is_err());
         }
+    }
+
+    #[test]
+    fn share_links_become_download_links() {
+        let download = |link: &str| match parse_link(link).unwrap() {
+            Location::Link(url) => url.to_string(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            download("https://www.dropbox.com/scl/fi/abc/plan.xlsx?rlkey=k&dl=0"),
+            "https://www.dropbox.com/scl/fi/abc/plan.xlsx?rlkey=k&dl=1"
+        );
+        assert_eq!(
+            download("https://sky.example.dk/index.php/s/Tok3n"),
+            "https://sky.example.dk/index.php/s/Tok3n/download"
+        );
+        assert_eq!(
+            download("https://firma.sharepoint.com/:x:/s/team/EAbc?e=x1"),
+            "https://firma.sharepoint.com/:x:/s/team/EAbc?e=x1&download=1"
+        );
+        assert_eq!(
+            download("https://docs.google.com/spreadsheets/d/e/2PACX-1/pubhtml"),
+            "https://docs.google.com/spreadsheets/d/e/2PACX-1/pub?output=xlsx"
+        );
+        // The shares API addresses a link by its unpadded base64url form.
+        assert_eq!(
+            download("https://1drv.ms/x/s!AbC"),
+            "https://api.onedrive.com/v1.0/shares/u!aHR0cHM6Ly8xZHJ2Lm1zL3gvcyFBYkM/root/content"
+        );
+        assert_eq!(
+            download("https://example.com/plan.csv"),
+            "https://example.com/plan.csv"
+        );
     }
 
     #[test]

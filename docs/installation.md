@@ -101,6 +101,35 @@ følger som første gang. Dine logins,
 dine kobler og din synkroniseringshistorik følger med over. Appen henter aldrig
 vagter af sig selv.
 
+## Vagtplan i et regneark
+
+Under **Indstillinger → Udbydere → Vagtplan** vælger du **Regneark**. Indsæt
+et link, eller klik **Vælg fil …** og vælg filen på computeren. Programmet
+læser kun regnearket og ændrer aldrig noget i det.
+
+Linket skal give alle med linket lov til at *se* regnearket:
+
+- **Google Sheets:** Åbn fanen med vagtplanen. Klik **Del**, og vælg **Alle med
+  linket** med rollen **Læser**. Kopiér derefter adressen fra browserens
+  adressefelt.
+- **Excel på OneDrive eller SharePoint:** Klik **Del**, og vælg **Alle med
+  linket** og **Kan få vist**. Kopiér linket.
+- **Nextcloud:** Klik på delingsikonet ved filen, og opret et **delingslink**.
+  Lad det være skrivebeskyttet, og kopiér det.
+- **Dropbox:** Klik **Del**, vælg **Alle med dette link kan se**, og kopiér
+  linket.
+
+Ligger filen i en mappe, der synkroniseres med OneDrive, Dropbox eller iCloud
+Drive, kan du også bare vælge den med **Vælg fil …**. Programmet læser den
+igen, hver gang du henter en uge.
+
+Programmet læser `.xlsx`, `.ods` og `.csv`. Har du en ældre `.xls`-fil eller et
+Numbers-regneark, så gem det som `.xlsx` først. Har regnearket flere faner,
+spørger programmet, hvilken fane vagtplanen står i.
+
+Skifter du til et andet link eller en anden fil, starter programmet en ny
+historik. Kontrollér derfor den første uge ekstra grundigt.
+
 ## Hvis noget går galt
 
 - **Programmet åbner ikke.** Prøv at åbne det igen. Windows og macOS spørger
