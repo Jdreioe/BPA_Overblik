@@ -28,7 +28,7 @@ Completed slices:
 `SyncState::open` accepts the existing SQLite path, including an account-scoped
 `sync-<scope>.sqlite3` path. It preserves keys, statuses, destination IDs, source
 hashes, errors, and recovery payloads. Account paths come from the shared
-`account_scope`, so history written by the old engine keeps working.
+`account_scope`.
 The schema is unchanged and SQLite is bundled into the Rust build.
 
 Keep the `ApplyGuard` returned by `exclusive_apply` alive across the entire
@@ -243,9 +243,13 @@ exposes shift details and comments. Colour is kept out of `calendars`, so
 recolouring a calendar never discards a confirmed mapping or an approval.
 
 `account_scope` derives the `sync-<scope>.sqlite3` name and is shared by setup
-and `load_saved_setup`. It matches the previous engine exactly, as checked by
-the frozen scope golden: a different
-scope would orphan an existing history and re-submit completed work.
+and `load_saved_setup`. It covers only the MitHF account and the shift source,
+as checked by the frozen scope golden. Helper mappings and the DUOS
+arrangement once entered it too, so confirming helpers again started an empty
+history, and shifts transferred before could no longer be updated. When the
+scope's file does not exist yet, `load_saved_setup` builds it from the records
+for the same source in every other `sync-*.sqlite3`, keeping the newest row
+per step, and leaves those files in place.
 
 Importing a legacy TOML configuration is deliberately not ported.
 

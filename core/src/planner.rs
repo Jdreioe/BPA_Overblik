@@ -176,6 +176,7 @@ pub fn build_plan(request: &PlanRequest<'_>, state: &SyncState) -> Result<SyncPl
                     &expected,
                     record(&records, &key),
                     &request.destination.duos_registrations,
+                    &owned_by_others(&records, "duos.interval:", &key),
                 );
                 let mut planned = item(
                     shift,
@@ -268,6 +269,7 @@ fn plan_segment(
         request.config.default_helper_count,
         record(records, &shift_key),
         &request.destination.mithf_shifts,
+        &owned_by_others(records, "mithf.create_shift", &shift_key),
     );
     let matched = reconciled.matched;
     let destination_id = matched.map(|m| m.id.clone());
@@ -463,6 +465,15 @@ fn plan_segment(
         meeting.destination_id = destination_id;
         items.push(meeting);
     }
+}
+
+/// Destination IDs recorded by this shift's other steps of the same kind.
+fn owned_by_others(records: &[StepRecord], kind: &str, key: &str) -> BTreeSet<String> {
+    records
+        .iter()
+        .filter(|r| r.step_key.starts_with(kind) && r.step_key != key)
+        .filter_map(|r| r.destination_id.clone())
+        .collect()
 }
 
 fn record<'a>(records: &'a [StepRecord], key: &str) -> Option<&'a StepRecord> {
