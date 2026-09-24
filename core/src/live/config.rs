@@ -3,11 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use super::{
-    id, rows,
-    sheets::{parse_link, SheetAccess},
-    text, LiveError, INVALID,
-};
+use super::{id, rows, sheets::SheetAccess, text, LiveError, INVALID};
 use crate::standard_time::StandardTimes;
 use crate::{HelperMapping, PlanningConfig};
 use serde_json::{json, Value};
@@ -145,8 +141,7 @@ fn config_from_setup(
             let layout: crate::sheets::SheetLayout =
                 serde_json::from_value(setup["sheet_layout"].clone())
                     .map_err(|_| LiveError("Regnearkets gemte opsætning er ugyldig."))?;
-            let link = text(&secret["link"])?;
-            Some(parse_link(link, layout)?)
+            Some(super::sheets::access(secret, layout)?)
         }
         _ => return Err(LiveError("Ukendt kilde i opsætningen.")),
     };

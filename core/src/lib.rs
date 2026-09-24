@@ -16,6 +16,7 @@ mod source_rules;
 pub mod standard_time;
 mod state;
 mod transfer;
+pub mod workbook;
 
 pub use models::{
     ParseIssue, ParseIssueCode, SourceComment, SourceShift, SpsInterval, SpsParseResult,

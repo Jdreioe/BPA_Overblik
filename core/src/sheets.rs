@@ -246,8 +246,23 @@ pub fn tsv_cells(data: &[u8]) -> Result<Vec<Vec<String>>, &'static str> {
     grid(data, b'\t')
 }
 
+/// A CSV export. Danish Excel separates with `;`, so the separator is the
+/// one the first line uses most outside quotes. A UTF-8 byte order mark is
+/// dropped.
 pub fn csv_cells(data: &[u8]) -> Result<Vec<Vec<String>>, &'static str> {
-    grid(data, b',')
+    let data = data.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(data);
+    let mut quoted = false;
+    let (mut commas, mut semicolons) = (0, 0);
+    for byte in data {
+        match byte {
+            b'"' => quoted = !quoted,
+            b'\n' | b'\r' if !quoted => break,
+            b',' if !quoted => commas += 1,
+            b';' if !quoted => semicolons += 1,
+            _ => {}
+        }
+    }
+    grid(data, if semicolons > commas { b';' } else { b',' })
 }
 
 fn grid(data: &[u8], delimiter: u8) -> Result<Vec<Vec<String>>, &'static str> {

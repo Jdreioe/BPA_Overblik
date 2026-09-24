@@ -87,6 +87,13 @@ fn defaults() -> Value {
     })
 }
 
+/// A spreadsheet as the person gave it: a share link, or a file they chose.
+#[derive(Clone, Debug)]
+pub enum SheetSource {
+    Link(String),
+    File(String),
+}
+
 /// The setup document and the operations that advance it.
 ///
 /// Every mutating operation saves before returning, so an interrupted setup
@@ -254,7 +261,7 @@ impl Setup {
     /// the connection step, without the old source's mappings or approval.
     pub fn choose_source(&mut self, source: &str) -> Result<(), LiveError> {
         if !matches!(source, "teamup" | "sheets") {
-            return Err(LiveError("Vælg TeamUp eller Google Sheets."));
+            return Err(LiveError("Vælg TeamUp eller Regneark."));
         }
         if self.data["source"] == source {
             self.data["stage"] = json!("source");
@@ -311,21 +318,53 @@ impl Setup {
         self.refresh_source().await
     }
 
-    /// Connect a link-shared sheet. The link stays in the OS keyring; only its
-    /// cell mapping is stored in setup.json.
+    /// Connect a spreadsheet. The link or path and the tab stay in the OS
+    /// keyring; only the cell mapping and the workbook's tab names are stored
+    /// in setup.json.
+    ///
+    /// A workbook with several tabs needs `tab`. Without one this records the
+    /// tab names, returns a notice asking for the choice, and connects nothing.
     pub async fn connect_sheets(
         &mut self,
-        link: &str,
+        source: &SheetSource,
+        tab: Option<&str>,
         layout: crate::sheets::SheetLayout,
     ) -> Result<String, LiveError> {
         if self.data["source"] != "sheets" {
-            return Err(LiveError("Vælg Google Sheets som kilde først."));
+            return Err(LiveError("Vælg Regneark som kilde først."));
         }
-        let access = sheets::parse_link(link, layout.clone())?;
+        let (location, mut secret) = match source {
+            SheetSource::Link(link) => (sheets::parse_link(link)?, json!({"link": link.trim()})),
+            SheetSource::File(path) => (sheets::parse_file(path)?, json!({"file": path.trim()})),
+        };
+        let bytes = sheets::fetch(&location).await?;
+        let tabs = match location {
+            sheets::Location::Google { .. } => Vec::new(),
+            _ => sheets::tabs(&bytes)?,
+        };
+        self.data["sheet_tabs"] = json!(tabs);
+        let tab = match (tab, tabs.as_slice()) {
+            (_, []) => None,
+            (Some(tab), _) if tabs.iter().any(|name| name == tab) => Some(tab.to_owned()),
+            (None, [only]) => Some(only.clone()),
+            _ => {
+                self.save()?;
+                return Ok("Vælg fanen med vagtplanen, og tilslut igen.".into());
+            }
+        };
+        if let Some(tab) = &tab {
+            secret["tab"] = json!(tab);
+        }
+        let access = sheets::SheetAccess {
+            location,
+            tab,
+            layout: layout.clone(),
+        };
+        let grid = sheets::grid(&access, &bytes)?;
         let (calendars, colors, notice) =
-            sheets::source_catalog(&access, self.timezone(), &self.standard_times()?).await?;
+            sheets::catalog(&grid, &access, self.timezone(), &self.standard_times()?)?;
         let credential = uuid::Uuid::new_v4().simple().to_string();
-        store_credential(&credential, &json!({"link": link.trim()}))?;
+        store_credential(&credential, &secret)?;
         self.data["credential"] = json!(credential);
         self.data["sheet_layout"] = serde_json::to_value(layout).map_err(|_| INVALID)?;
         self.apply_source(calendars, colors)?;
@@ -343,7 +382,7 @@ impl Setup {
             let layout: crate::sheets::SheetLayout =
                 serde_json::from_value(self.data["sheet_layout"].clone())
                     .map_err(|_| LiveError("Regnearkets gemte opsætning er ugyldig."))?;
-            let access = sheets::parse_link(text(&secret["link"])?, layout)?;
+            let access = sheets::access(&secret, layout)?;
             let (calendars, colors, notice) =
                 sheets::source_catalog(&access, self.timezone(), &self.standard_times()?).await?;
             self.apply_source(calendars, colors)?;
@@ -577,7 +616,7 @@ impl Setup {
             let layout: crate::sheets::SheetLayout =
                 serde_json::from_value(self.data["sheet_layout"].clone())
                     .map_err(|_| LiveError("Regnearkets gemte opsætning er ugyldig."))?;
-            let access = sheets::parse_link(text(&secret["link"])?, layout)?;
+            let access = sheets::access(&secret, layout)?;
             sheets::source_catalog(&access, self.timezone(), &self.standard_times()?).await?
         } else {
             let access = teamup::Access {
@@ -789,6 +828,36 @@ mod tests {
         assert_eq!(setup.view()["standard_times"]["everyday"], "6-22");
         let restored = Setup::load(dir.path()).unwrap();
         assert_eq!(restored.view()["standard_times"]["everyday"], "6-22");
+    }
+
+    /// A workbook with several tabs is not read until one is chosen, and the
+    /// choice is offered by name. Nothing is stored in the keyring yet.
+    #[test]
+    fn a_workbook_with_several_tabs_asks_for_one_before_connecting() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut setup = Setup::load(dir.path()).unwrap();
+        setup.choose_source("sheets").unwrap();
+        let file = format!(
+            "{}/tests/sheets/libreoffice.xlsx",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let layout: crate::sheets::SheetLayout = serde_json::from_value(json!({
+            "date_format": "%d-%m-%y", "sps_label": "",
+            "helper": {"row": 2, "column": 0},
+            "time": {"kind": "range", "cell": {"row": 3, "column": 0}},
+        }))
+        .unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let found = runtime
+            .block_on(setup.connect_sheets(&SheetSource::File(file), None, layout))
+            .unwrap();
+        assert_eq!(found, "Vælg fanen med vagtplanen, og tilslut igen.");
+        assert_eq!(setup.view()["sheet_tabs"], json!(["Uge", "Tider"]));
+        assert_eq!(setup.data["credential"], "");
+        assert_eq!(setup.data["stage"], "source");
     }
 
     #[test]

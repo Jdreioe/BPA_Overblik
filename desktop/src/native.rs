@@ -512,13 +512,14 @@ impl Engine {
     }
     async fn connect_sheets(
         &self,
-        link: String,
+        source: teamup_shift_sync_core::live::SheetSource,
+        tab: Option<String>,
         layout: teamup_shift_sync_core::sheets::SheetLayout,
     ) -> Result<setup::SetupState> {
         let mut guard = self.setup.lock().await;
         let document = guard.as_mut().ok_or("Opsætningen er ikke indlæst.")?;
         let found = document
-            .connect_sheets(&link, layout)
+            .connect_sheets(&source, tab.as_deref(), layout)
             .await
             .map_err(|e| e.to_string())?;
         checked(document, &found)
@@ -1541,12 +1542,44 @@ impl NativeApp {
                 self.invalidate();
                 self.activity = Activity::Setup;
                 let engine = self.engine.clone();
-                let link = self.setup.link.clone();
+                let source = match &self.setup.sheet_file {
+                    Some(path) => teamup_shift_sync_core::live::SheetSource::File(path.clone()),
+                    None => {
+                        teamup_shift_sync_core::live::SheetSource::Link(self.setup.link.clone())
+                    }
+                };
+                let tab = self.setup.sheet_tab.clone();
                 return Task::perform(
-                    async move { engine.connect_sheets(link, layout).await },
+                    async move { engine.connect_sheets(source, tab, layout).await },
                     Message::SetupUpdated,
                 );
             }
+            Message::Setup(setup::Message::ChooseFile) => {
+                return Task::perform(
+                    async {
+                        rfd::AsyncFileDialog::new()
+                            .set_title("Vælg regnearket med vagtplanen")
+                            .add_filter("Regneark", &["xlsx", "xlsm", "ods", "csv"])
+                            .pick_file()
+                            .await
+                            .map(|file| file.path().to_string_lossy().into_owned())
+                    },
+                    |path| Message::Setup(setup::Message::FileChosen(path)),
+                );
+            }
+            Message::Setup(setup::Message::FileChosen(path)) => {
+                // Cancelling the dialog keeps what was there.
+                if path.is_some() {
+                    self.setup.sheet_file = path;
+                    self.setup.sheet_tab = None;
+                    self.setup.link.clear();
+                }
+            }
+            Message::Setup(setup::Message::ClearFile) => {
+                self.setup.sheet_file = None;
+                self.setup.sheet_tab = None;
+            }
+            Message::Setup(setup::Message::SheetTab(tab)) => self.setup.sheet_tab = Some(tab),
             Message::Setup(setup::Message::Action(action, params)) => {
                 if matches!(action, "source" | "choose_source") {
                     self.helpers_auto_fetch_attempted = false;
@@ -1578,9 +1611,14 @@ impl NativeApp {
                         if found.is_some() {
                             self.status = found.clone();
                         }
-                        // The link and key are only needed until they are stored.
-                        self.setup.link.clear();
-                        self.setup.key.clear();
+                        // The link and key are only needed until they are
+                        // stored. A sheet waiting for its tab still needs them.
+                        if state.stage != "source" {
+                            self.setup.link.clear();
+                            self.setup.key.clear();
+                            self.setup.sheet_file = None;
+                            self.setup.sheet_tab = None;
+                        }
                         let confirmed = state.stage == "ready";
                         if !confirmed {
                             self.account = None;
