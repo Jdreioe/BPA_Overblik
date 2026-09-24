@@ -23,6 +23,9 @@ directories = "6"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
 tempfile = "3"
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
+# The OS file dialog for a local spreadsheet. On Linux it asks the desktop portal,
+# so no GTK is needed.
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"

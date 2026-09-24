@@ -39,6 +39,9 @@ pub struct SetupState {
     pub source: String,
     #[serde(default)]
     pub sheet_layout: Option<SheetLayout>,
+    /// The tabs of the last workbook read, when it has any.
+    #[serde(default)]
+    pub sheet_tabs: Vec<String>,
     #[serde(default)]
     pub standard_times: StandardTimes,
     /// Titles shown as markers instead of planned as shifts.
@@ -92,6 +95,12 @@ pub enum Message {
     RemoveMarker(usize),
     Connect,
     ConnectSheets,
+    /// Open the OS file dialog for a local spreadsheet.
+    ChooseFile,
+    FileChosen(Option<String>),
+    /// Go back from a chosen file to pasting a link.
+    ClearFile,
+    SheetTab(String),
     OpenTeamupKeys,
     CopyOrganization,
     CopyPurpose,
@@ -150,6 +159,11 @@ pub struct SetupUi {
     pub link: String,
     pub key: String,
     pub template: Template,
+    /// A local spreadsheet chosen instead of a link. Its path is shown only
+    /// as a file name and stored only in the OS keyring.
+    pub sheet_file: Option<String>,
+    /// The workbook tab picked from [`SetupState::sheet_tabs`].
+    pub sheet_tab: Option<String>,
     /// Why the typed standard times cannot be saved. Shown beside the fields;
     /// action results and errors go to the app's status notice instead.
     pub error: Option<String>,
@@ -378,7 +392,7 @@ impl SetupUi {
     fn source_section<'a>(&'a self, state: &'a SetupState) -> Element<'a, Message> {
         let mut content = column![
             self.source_row(state, "teamup", "TeamUp"),
-            self.source_row(state, "sheets", "Google Sheets"),
+            self.source_row(state, "sheets", "Regneark"),
         ]
         .spacing(8);
         if state.stage == "source" {
@@ -440,27 +454,58 @@ impl SetupUi {
     fn source_connection<'a>(&'a self, state: &'a SetupState) -> Element<'a, Message> {
         let mut content = column![].spacing(8);
         if state.source == "sheets" {
-            content = content
-                .push(
-                    text_input("Google Sheets-link til den valgte fane", &self.link)
-                        .id(iced::widget::Id::new(SOURCE_LINK_ID))
-                        .on_input(Message::Link)
-                        .secure(true)
-                        .padding(12),
-                )
-                .push(text("Del arket som »Alle med linket kan se«.").size(12));
-            content = content.push(
-                self.template
-                    .view(state.sheet_layout.is_some())
-                    .map(Message::Template),
-            );
-            content = content.push(
-                primary_button("Tilslut regneark", Message::ConnectSheets).on_press_maybe(
-                    self.sheet_layout()
-                        .is_ok()
-                        .then_some(Message::ConnectSheets),
+            // One step at a time: where the sheet is, what a shift looks
+            // like, then connect. A step shows once the one before is done.
+            let step = |title: &'static str| text(title).size(16);
+            content = content.push(step("1. Hvor ligger dit regneark?"));
+            content = match &self.sheet_file {
+                Some(path) => content.push(
+                    row![
+                        text(file_name(path)).width(Length::Fill),
+                        quiet_button("Vælg en anden fil", Message::ChooseFile),
+                        quiet_button("Brug et link", Message::ClearFile),
+                    ]
+                    .spacing(8)
+                    .align_y(iced::alignment::Vertical::Center),
                 ),
-            );
+                None => content.push(
+                    row![
+                        text_input("Indsæt link", &self.link)
+                            .id(iced::widget::Id::new(SOURCE_LINK_ID))
+                            .on_input(Message::Link)
+                            .secure(true)
+                            .padding(12),
+                        quiet_button("Vælg fil …", Message::ChooseFile),
+                    ]
+                    .spacing(8)
+                    .align_y(iced::alignment::Vertical::Center),
+                ),
+            };
+            if self.sheet_file.is_none() && self.link.trim().is_empty() {
+                return content.into();
+            }
+            content = content
+                .push(step("2. Hvordan ser en vagt ud for dig?"))
+                .push(
+                    self.template
+                        .view(state.sheet_layout.is_some())
+                        .map(Message::Template),
+                );
+            if self.sheet_layout().is_err() {
+                return content.into();
+            }
+            content = content.push(step("3. Tilslut"));
+            if state.sheet_tabs.len() > 1 {
+                content = content.push(
+                    pick_list(
+                        state.sheet_tabs.as_slice(),
+                        self.sheet_tab.as_ref(),
+                        Message::SheetTab,
+                    )
+                    .placeholder("Vælg fanen med vagtplanen"),
+                );
+            }
+            content = content.push(primary_button("Tilslut regneark", Message::ConnectSheets));
         } else {
             content = content
                 .push(text("På PC: TeamUp → ☰ → Settings → Shared").size(12))
@@ -707,6 +752,14 @@ fn service_icon(service: Service) -> Element<'static, Message> {
         .into()
 }
 
+/// Only the file's own name: the folders around it can name the user.
+fn file_name(path: &str) -> &str {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(path)
+}
+
 fn primary_button<'a>(label: &'a str, message: Message) -> iced::widget::Button<'a, Message> {
     button(text(label))
         .style(iced::widget::button::primary)
@@ -769,6 +822,7 @@ mod tests {
         SetupState {
             source: "teamup".into(),
             sheet_layout: None,
+            sheet_tabs: vec![],
             standard_times: Default::default(),
             markers: vec![],
             duos_enabled: true,
