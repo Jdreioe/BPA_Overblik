@@ -1226,6 +1226,9 @@ struct NativeApp {
     week_status_since: std::time::Instant,
     blocked_since: std::time::Instant,
     last_verified: Option<String>,
+    /// Why the confirmed setup could not be loaded, until a load succeeds.
+    /// Notices hide, so the Home button repeats it on request.
+    week_error: Option<String>,
     apply_progress: Option<Arc<StdMutex<TransferProgress>>>,
     apply_stop: Option<Arc<AtomicBool>>,
     apply_total: usize,
@@ -1273,6 +1276,7 @@ impl NativeApp {
             week_status_since: std::time::Instant::now(),
             blocked_since: std::time::Instant::now(),
             last_verified: None,
+            week_error: None,
             apply_progress: None,
             apply_stop: None,
             apply_total: 0,
@@ -1508,6 +1512,7 @@ impl NativeApp {
                 self.activity = Activity::Idle;
                 match result {
                     Ok(loaded) => {
+                        self.week_error = None;
                         self.account = loaded.account.clone();
                         self.accept_standard(&loaded.state);
                         self.setup.state = Some(loaded.state);
@@ -1524,7 +1529,10 @@ impl NativeApp {
                             );
                         }
                     }
-                    Err(error) => self.status = Some(Notice::from_message(Tone::Error, &error)),
+                    Err(error) => {
+                        self.status = Some(Notice::from_message(Tone::Error, &error));
+                        self.week_error = Some(error);
+                    }
                 }
                 if self.visible_screen() == Screen::Settings
                     && self.settings_section == SettingsSection::Helpers
@@ -1822,6 +1830,7 @@ impl NativeApp {
                 self.activity = Activity::Idle;
                 match result {
                     Ok(account) => {
+                        self.week_error = None;
                         let changed_path = self
                             .account
                             .as_ref()
@@ -1841,10 +1850,19 @@ impl NativeApp {
                     Err(error) => {
                         self.account = None;
                         self.status = Some(Notice::from_message(Tone::Error, &error));
+                        self.week_error = Some(error);
                     }
                 }
             }
             Message::Open(screen) => {
+                // Home stays chosen, so the week appears once the setup loads.
+                if screen == Screen::Home && self.account.is_none() {
+                    self.status = Some(Notice::new(
+                        Tone::Warning,
+                        "Ugen kan ikke vises endnu",
+                        self.week_blocker(),
+                    ));
+                }
                 // Settings may change the account, so no approval survives the
                 // trip. Any message that sent the user here is kept.
                 if screen == Screen::Settings {
@@ -2541,6 +2559,30 @@ impl NativeApp {
 
     /// There is no week to show before an account is confirmed, but help and
     /// its diagnostics stay reachable: that is when they are needed most.
+    /// What stands between the setup and the week, as the next step to take.
+    fn week_blocker(&self) -> String {
+        if let Some(error) = &self.week_error {
+            return error.clone();
+        }
+        let Some(state) = &self.setup.state else {
+            return "Opsætningen er ikke indlæst endnu. Vent et øjeblik.".into();
+        };
+        match state.stage.as_str() {
+            "source" => "Tilslut en vagtplan under Udbydere.".into(),
+            "destinations" => {
+                "Log ind i MitHF og DUOS, og vælg DUOS SPS-ordning under Udbydere.".into()
+            }
+            "helpers" => state
+                .blocked
+                .clone()
+                // Valid choices confirm themselves after a fresh check of
+                // both services, so a login check is what is left.
+                .unwrap_or_else(|| {
+                    "Hjælperne er valgt, men skal bekræftes mod MitHF og DUOS. Vælg Check forbindelse under Udbydere.".into()
+                }),
+            _ => "Opsætningen indlæses. Vent et øjeblik.".into(),
+        }
+    }
     fn visible_screen(&self) -> Screen {
         match self.screen {
             Screen::Home if self.account.is_none() => Screen::Settings,
@@ -2668,17 +2710,11 @@ impl NativeApp {
         let mut header = row![text("Indstillinger").size(20), space::horizontal()]
             .spacing(8)
             .align_y(iced::alignment::Vertical::Center);
-        // Without a confirmed setup there is no week to go back to, so the
-        // button stays in place, greyed out, and its tooltip says why.
-        let has_week = self.account.is_some();
+        // Without a confirmed setup there is no week to go back to. The
+        // button still answers, with a notice saying what is missing.
         header = header.push(tooltip(
-            self.circular_icon("⌂", Message::Open(Screen::Home))
-                .on_press_maybe(has_week.then_some(Message::Open(Screen::Home))),
-            if has_week {
-                "Tilbage til ugen"
-            } else {
-                "Ugen vises, når opsætningen er bekræftet"
-            },
+            self.circular_icon("⌂", Message::Open(Screen::Home)),
+            "Tilbage til ugen",
             tooltip::Position::Bottom,
         ));
         let mut sidebar = column![header].spacing(10);
@@ -2886,6 +2922,27 @@ mod tests {
     }
 
     #[test]
+    fn home_without_a_week_says_what_is_missing() {
+        let mut app = app();
+        app.account = None;
+        app.setup.state = Some(setup_state("helpers"));
+        let _ = app.update(Message::Open(Screen::Home));
+        assert_eq!(app.visible_screen(), Screen::Settings);
+        let status = app.status.clone().expect("reason notice");
+        assert_eq!(status.tone, Tone::Warning);
+        assert!(status.detail.contains("Check forbindelse"));
+
+        // A failed load is the reason, even after its own notice has hidden.
+        app.activity = Activity::Setup;
+        let _ = app.update(Message::Loaded(Err("Nøgleringen er låst.".into())));
+        app.status = None;
+        let _ = app.update(Message::Open(Screen::Home));
+        assert_eq!(
+            app.status.expect("reason notice").detail,
+            "Nøgleringen er låst."
+        );
+    }
+    #[test]
     fn a_stored_connection_clears_the_typed_credentials() {
         let mut app = app();
         app.activity = Activity::Setup;
@@ -3016,6 +3073,7 @@ mod tests {
             week_status_since: std::time::Instant::now(),
             blocked_since: std::time::Instant::now(),
             last_verified: None,
+            week_error: None,
             apply_progress: None,
             apply_stop: None,
             apply_total: 0,
