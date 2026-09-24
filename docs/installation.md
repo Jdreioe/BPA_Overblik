@@ -14,7 +14,9 @@ Udgivelserne hedder efter datoen, for eksempel `2026.09.21`.
 | macOS 11 eller nyere, både Intel og Apple Silicon | `teamup-shift-sync-ÅÅÅÅ.MM.DD-universal.pkg` |
 | Linux, 64-bit | `teamup-shift-sync-ÅÅÅÅ.MM.DD-x86_64.AppImage` |
 
-Google Chrome eller Chromium skal være installeret på maskinen i forvejen.
+Programmet bruger en browser, der allerede er installeret: Microsoft Edge,
+som følger med Windows, Google Chrome, Chromium eller Brave. På en Mac med kun
+Safari skal du først installere Google Chrome eller Microsoft Edge.
 BPA Overblik henter aldrig selv en browser, og den rører aldrig din
 almindelige browser: den åbner sit eget vindue til MitHF og DUOS.
 
@@ -113,8 +115,8 @@ historik. Kontrollér derfor den første uge ekstra grundigt.
 
 - **Programmet åbner ikke.** Prøv at åbne det igen. Windows og macOS spørger
   kun den første gang, men de spørger igen efter en opdatering.
-- **"Chromium blev ikke fundet".** Installer Google Chrome eller Chromium og
-  prøv igen. Har du en browser liggende et usædvanligt sted, kan stien sættes
+- **"Ingen browser fundet".** Installer Google Chrome eller Microsoft Edge og
+  prøv igen. Firefox og Safari kan ikke bruges. Har du en browser liggende et usædvanligt sted, kan stien sættes
   i `TEAMUP_BROWSER_PATH`.
 - **Login virker ikke.** Klik **Log ind** igen. Den valgte uge og din opsætning
   går ikke tabt.

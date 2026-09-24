@@ -2,7 +2,8 @@
 
 One tag produces one release with one file per system (issue #8). macOS and
 Linux wrap the desktop app, the CLI and the fixtures; Windows is the desktop
-`.exe` itself. Nothing else has to be installed except a system Chromium.
+`.exe` itself. Nothing else has to be installed except a Chromium-based browser, and Windows
+already has Edge.
 
 | System | Package | Built on | Installed as |
 | --- | --- | --- | --- |
@@ -109,8 +110,8 @@ packages are unsigned.
 
 ## Browser distribution
 
-The app requires a system Chromium or `TEAMUP_BROWSER_PATH` and never downloads
-one. That stays true in the packages: shipping a browser would multiply the
+The app requires an installed Chromium-based browser (Edge, Chrome, Chromium or
+Brave) or `TEAMUP_BROWSER_PATH` and never downloads one. That stays true in the packages: shipping a browser would multiply the
 download size, and silently downloading one on a care worker's machine is not a
 decision this app should make. The packages therefore carry no browser, and
 the missing-browser message names what to install.

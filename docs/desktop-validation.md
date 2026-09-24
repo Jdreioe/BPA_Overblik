@@ -71,7 +71,7 @@ Fixture mode can never enable a transfer: it reconciles no destination, so
 ## Browser sessions (issue #3)
 
 The home screen now offers separate MitHF and DUOS login buttons. On first use,
-the app looks for a system Chromium or the `TEAMUP_BROWSER_PATH` executable;
+the app looks for an installed Chromium-based browser or the `TEAMUP_BROWSER_PATH` executable;
 it never downloads a browser. The UI opens the real service site in an
 app-owned window with a separate persistent profile. Download and launch
 failures offer another login attempt. Users need no terminal command.
