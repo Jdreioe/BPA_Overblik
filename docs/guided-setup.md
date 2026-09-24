@@ -123,8 +123,8 @@ that date's standard. A multi-day all-day event needs its own times before the
 week can be transferred. A Sheets shift with a helper and no time uses the
 standard; when start and end are separate cells, both must be empty. A weekday
 without a standard is reported with the shift date. The week preview marks
-every such shift `standardtid`. The ordinary reminder, meeting and SPS rules
-still apply. Valid times save automatically, and a changed standard requires a
+every such shift `standardtid`. The ordinary reminder, marker, meeting and SPS
+rules still apply, so an all-day `Ønsker fri` is a marker, not a standard shift. Valid times save automatically, and a changed standard requires a
 fresh week review.
 A shift's identity is its date. Editing cells in place updates the same
 shift. Moving a shift to another date is treated like deleting and

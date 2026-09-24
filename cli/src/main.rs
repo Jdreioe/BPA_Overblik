@@ -231,7 +231,8 @@ async fn run(cli: Cli) -> Result<u8> {
             )
             .await?;
             let now = Utc::now().fixed_offset();
-            let (shifts, destination) = read_week(
+            // Markers are for the desktop's week view; the plan has no place for them.
+            let (source, destination) = read_week(
                 &browser,
                 &config,
                 range.from,
@@ -246,7 +247,7 @@ async fn run(cli: Cli) -> Result<u8> {
                 Ok(build_plan(
                     &PlanRequest {
                         config: &config.planning,
-                        shifts: &shifts,
+                        shifts: &source.shifts,
                         destination: &destination,
                         range_start: range.start,
                         range_end: range.end,
@@ -283,7 +284,7 @@ async fn run(cli: Cli) -> Result<u8> {
             )
             .await?;
             // Never reuse source data from an earlier preview or accept an imported plan.
-            let shifts = read_source(&config, from, to).await?;
+            let shifts = read_source(&config, from, to).await?.shifts;
             let now = Utc::now().fixed_offset();
             let mut destinations = LiveDestinations::connect(&browser, &config, now).await?;
             apply_plan(

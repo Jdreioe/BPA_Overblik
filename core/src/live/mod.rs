@@ -11,7 +11,7 @@ mod timing;
 
 pub use browser::{forget_login, BrowserSessions, Service, Visibility};
 pub use capture::read_shapes;
-pub use config::{load_saved_setup, LiveConfig};
+pub use config::{load_saved_setup, LiveConfig, DEFAULT_MARKERS};
 pub use destinations::LiveDestinations;
 pub use diagnostics::{app_version, redacted_report};
 pub use setup::{Setup, SheetSource};
@@ -21,7 +21,7 @@ use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, TimeZone};
 use chrono_tz::Tz;
 use serde_json::Value;
 
-use crate::{reconciliation_range, DestinationSnapshot, SourceShift};
+use crate::{reconciliation_range, DestinationSnapshot, SourceMarker, SourceShift};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SourceReadError {
@@ -33,15 +33,23 @@ pub enum SourceReadError {
     Review(String),
 }
 
+/// One read of the shift source: the shifts to plan, and the calendar markers
+/// shown beside them, which are never planned or transferred.
+#[derive(Debug, Default)]
+pub struct SourceWeek {
+    pub shifts: Vec<SourceShift>,
+    pub markers: Vec<SourceMarker>,
+}
+
 /// Read the selected source, preserving the same SourceShift contract for
-/// planning and approved transfers.
+/// planning and approved transfers. Only TeamUp has markers.
 pub async fn read_source(
     config: &LiveConfig,
     from: NaiveDate,
     to: NaiveDate,
-) -> Result<Vec<SourceShift>, SourceReadError> {
+) -> Result<SourceWeek, SourceReadError> {
     if let Some(sheet) = &config.sheet {
-        sheets::read(
+        let shifts = sheets::read(
             sheet,
             config.planning.timezone,
             from,
@@ -49,7 +57,11 @@ pub async fn read_source(
             &config.standard_times,
         )
         .await
-        .map_err(SourceReadError::Sheet)
+        .map_err(SourceReadError::Sheet)?;
+        Ok(SourceWeek {
+            shifts,
+            markers: Vec::new(),
+        })
     } else {
         teamup::read_teamup(config, from, to).await
     }
@@ -69,17 +81,17 @@ pub async fn read_week(
     start: DateTime<FixedOffset>,
     end: DateTime<FixedOffset>,
     now: DateTime<FixedOffset>,
-) -> Result<(Vec<SourceShift>, DestinationSnapshot), SourceReadError> {
-    let (shifts, prelude) = futures_util::try_join!(read_source(config, from, to), async {
+) -> Result<(SourceWeek, DestinationSnapshot), SourceReadError> {
+    let (source, prelude) = futures_util::try_join!(read_source(config, from, to), async {
         destinations::read_before_range(browser, config, now)
             .await
             .map_err(SourceReadError::from)
     })?;
-    let (read_start, read_end) = reconciliation_range(&shifts, start, end);
+    let (read_start, read_end) = reconciliation_range(&source.shifts, start, end);
     let destination = prelude
         .finish(browser, config, read_start, read_end)
         .await?;
-    Ok((shifts, destination))
+    Ok((source, destination))
 }
 
 #[derive(Clone, Debug, thiserror::Error)]

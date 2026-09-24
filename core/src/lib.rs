@@ -19,11 +19,13 @@ mod transfer;
 pub mod workbook;
 
 pub use models::{
-    ParseIssue, ParseIssueCode, SourceComment, SourceShift, SpsInterval, SpsParseResult,
-    TimeInterval,
+    ParseIssue, ParseIssueCode, SourceComment, SourceMarker, SourceShift, SpsInterval,
+    SpsParseResult, TimeInterval,
 };
 pub use parser::{parse_sps_instructions, NOTES_SOURCE_ID};
-pub use source_rules::{classify_source_title, MeetingCategory, SourceTitle};
+pub use source_rules::{
+    classify_source_title, is_marker, marker_titles, MeetingCategory, SourceTitle,
+};
 pub use state::{ApplyGuard, StateError, StepRecord, SyncState};
 
 pub use planner::{build_plan, reconciliation_range, PlanRequest, PlanningError};
