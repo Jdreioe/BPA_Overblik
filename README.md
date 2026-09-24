@@ -140,7 +140,11 @@ anything is written.
 
 Forgetting is not a force flag. With no stored step the planner falls back to
 matching by value, so a destination record that still exists is adopted rather
-than created twice, and an overlapping or ambiguous one still conflicts.
+than created twice, and an overlapping or ambiguous one still conflicts. The
+exception is a record the same source shift already owns through another step:
+when a new SPS interval splits a transferred shift, the new part is created
+beside the existing shift that its first part updates, instead of conflicting
+with it.
 
 ## Supported SPS instruction grammar
 
