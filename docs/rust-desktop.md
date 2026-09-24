@@ -85,8 +85,28 @@ the same capture the CLI writes.
 
 The native workflow uses the same separate browser profiles as the Rust CLI.
 Only one native browser owner can run at a time. Browsers belong to that
-window and close when it exits. Use `TEAMUP_BROWSER_PATH` if Chromium cannot
-be found; this mode does not download a browser.
+window and close when it exits. This mode does not download a browser.
+
+Any Chromium-based browser works: they share the DevTools protocol and launch
+flags, and each service gets its own profile, so the person's everyday browser
+profile is never touched. The first executable found wins:
+
+1. `TEAMUP_BROWSER_PATH`, if set. It must point to a file.
+2. A browser in the app's old `browsers/` data folder.
+3. The standard locations for the system:
+   - **Windows:** Edge under `%ProgramFiles(x86)%` and `%ProgramFiles%`, then
+     Chrome under `%ProgramFiles%`, `%ProgramFiles(x86)%` and
+     `%LOCALAPPDATA%`, then Brave under `%ProgramFiles%` and `%LOCALAPPDATA%`.
+   - **macOS:** Google Chrome, Microsoft Edge, Chromium and Brave in
+     `/Applications`, then the same apps in `~/Applications`.
+   - **Linux:** `chromium`, `chromium-browser` and `google-chrome` in
+     `/usr/bin`, `/opt/google/chrome/chrome`, then Edge and Brave in `/usr/bin`
+     and `/opt`.
+
+Flatpak and Snap browsers are not searched: their sandbox cannot write the
+app's private profile, so the browser never reports its DevTools port.
+Firefox and Safari do not speak this protocol. The diagnostics report names
+the browser found, never its path.
 
 On startup the app asks GitHub for the latest dated release, and while the
 window stays open it asks again every six hours. The circular icon in the
