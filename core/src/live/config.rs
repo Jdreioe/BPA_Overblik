@@ -37,13 +37,16 @@ impl LiveConfig {
 /// Read the established desktop setup and OS vault without changing either.
 /// Run on a blocking thread; keyring access may wait for the OS to unlock it.
 pub fn load_saved_setup(data_dir: &Path) -> Result<LiveConfig, LiveError> {
-    let data = std::fs::read_to_string(data_dir.join("setup.json"))
-        .map_err(|_| LiveError("Ingen gemt opsætning. Gennemfør opsætningen i den almindelige app først, og vælg derefter Genindlæs opsætning."))?;
+    let data = std::fs::read_to_string(data_dir.join("setup.json")).map_err(|_| {
+        LiveError("Ingen gemt opsætning. Gør opsætningen færdig under Indstillinger.")
+    })?;
     let setup: Value = serde_json::from_str(&data).map_err(|_| {
         LiveError("Den gemte opsætning kunne ikke læses. Originalfilen er ikke ændret.")
     })?;
     if setup["version"] != 1 || setup["stage"] != "ready" {
-        return Err(LiveError("Bekræft opsætningen i den almindelige app først. Denne Rust-forhåndsvisning bruger din gemte opsætning."));
+        return Err(LiveError(
+            "Opsætningen er ikke bekræftet. Gør den færdig under Indstillinger → Hjælpere.",
+        ));
     }
     let secret = read_credential(text(&setup["credential"])?)?;
     config_from_setup(setup, &secret, data_dir)
@@ -78,7 +81,7 @@ pub(crate) fn selected<'a>(choices: &'a Value, identifier: &Value) -> Result<&'a
         .collect();
     if matches.len() != 1 {
         return Err(LiveError(
-            "Et gemt valg er ikke entydigt. Bekræft opsætningen igen i den almindelige app.",
+            "Et gemt valg er ikke entydigt. Bekræft hjælperne igen under Indstillinger → Hjælpere.",
         ));
     }
     Ok(matches[0])

@@ -278,7 +278,7 @@ async fn validate_catalog(
     .await?;
     stage.done(5);
     if catalog != config.setup["catalog"] {
-        return Err(LiveError("Navne, ansættelser eller kontovalg er ændret. Bekræft opsætningen igen i den almindelige app."));
+        return Err(LiveError("Navne, ansættelser eller kontovalg er ændret. Bekræft hjælperne igen under Indstillinger → Hjælpere."));
     }
     if config.planning.duos_enabled {
         selected(
