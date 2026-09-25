@@ -119,15 +119,36 @@ verifies every submitted step through read-back. If it fails after submission,
 keep the database: the uncertain records support recovery. See the
 [native Rust CLI](docs/rust-cli.md) for login, shape capture and exit codes.
 
-## Re-synchronize a shift deleted by hand
+## The shift plan is the source of truth
 
-If a MitHF shift or DUOS registration that was previously synchronized is
-deleted directly in the destination, the plan reports it as `conflicted` and
-will not recreate it. That guard is deliberate: a deletion is usually a decision
-someone made on purpose, and the tool never silently undoes it.
+The shift plan (TeamUp, the spreadsheet or the calendar) always wins. The app
+never writes to it; it plans the writes that make MitHF and DUOS match it, and
+**Godkend ændringer** approves them with the old and new values shown:
 
-When the deletion was a mistake and TeamUp should win, forget the stored records
-for those shifts. Use the source keys printed in the report:
+- A MitHF shift, SPS interval or Vagtmøde changed by hand is changed back.
+- A transferred MitHF shift or DUOS registration deleted by hand is matched
+  again if an identical one exists, and otherwise created again.
+- A write whose outcome was never confirmed is adopted if MitHF or DUOS shows
+  it after a complete read, and otherwise retried.
+- The one MitHF shift overlapping a source shift is adopted and its time
+  changed when it has the same helper or none. When another helper takes over
+  part of a shift, as when A leaves early and B covers the rest, A's shift is
+  shortened first and B's shift is created afterwards. The preview checks B
+  against A's shortened time.
+- A pending DUOS registration that differs is changed to the source's hours.
+
+The app cannot delete in MitHF or DUOS, replace a booked helper or change a
+helper count. Duplicates, another helper's overlapping shift, extra SPS
+intervals and entries no longer in the shift plan are therefore warnings that
+name what to fix in MitHF. DUOS accepts no other edit from the citizen, so any
+other DUOS problem, including a registration that failed during transfer, asks
+you to check the shift on mit.duos.dk and register it yourself. Problems in the
+shift plan itself, such as an unreadable SPS line, are fixed there; setup
+problems link to the settings page that fixes them.
+
+`forget` clears the stored records for shifts, so the next preview matches them
+by value as if they had never been transferred. Use the source keys printed in
+the report:
 
 ```bash
 cargo run -p teamup-shift-sync-cli -- forget \
@@ -136,27 +157,15 @@ cargo run -p teamup-shift-sync-cli -- forget \
            7e254c8bb3604748507391f8:2145427874:2145427874
 ```
 
-The desktop app offers the same recovery as **Tillad overførsel igen** on the
-affected shift's conflict, for that shift alone.
-
 `forget` only clears local memory of what was synchronized. It never contacts
 MitHF or DUOS, and the next dry-run still has to be reviewed and approved before
 anything is written.
 
-Forgetting is not a force flag. With no stored step the planner falls back to
-matching by value, so a destination record that still exists is adopted rather
-than created twice, and an overlapping or ambiguous one still conflicts. The
-exception is a record the same source shift already owns through another step:
-when a new SPS interval splits a transferred shift, the new part is created
-beside the existing shift that its first part updates, instead of conflicting
-with it.
-
-A MitHF shift entered by hand is adopted and its time changed when it is the
-only shift overlapping the source shift, is already assigned to the same helper,
-and shares the source's start or end. When another helper takes over part of
-it, as when A leaves early and B covers the rest, A's shift is shortened first
-and B's shift is created afterwards. The preview checks B against A's shortened
-time, and shows A's old and new time before approval.
+With no stored step the planner matches by value, so a destination record that
+still exists is adopted rather than created twice. A record the same source
+shift already owns through another step is never mistaken for an overlap: when
+a new SPS interval splits a transferred shift, the new part is created beside
+the existing shift that its first part updates.
 
 ## Supported SPS instruction grammar
 

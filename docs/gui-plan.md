@@ -91,9 +91,9 @@ writes remain and allow work to stop safely between operations.
   so switching accounts cannot reuse another account's approvals or sync history.
 - **Support:** short Danish guidance and explicit export of redacted diagnostics.
   Never include tokens, cookies, calendar capability links, names or shift text.
-- **Recovery:** on a conflict caused by a manually deleted destination entry,
-  offer "Tillad overførsel igen" for that shift. Explain that it forgets local
-  sync history only. Require confirmation, then a fresh preview and approval.
+- **Recovery:** the shift plan is the source of truth, so entries deleted or
+  changed by hand in MitHF or DUOS are planned again. Setup problems link to
+  the settings page that fixes them; DUOS problems point to mit.duos.dk.
 
 ## Implementation boundaries
 

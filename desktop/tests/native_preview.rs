@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use teamup_shift_sync_core::{
     plan_digest, DestinationSnapshot, Outcome, PlanningConfig, SourceMarker, SourceShift, SyncPlan,
 };
-use teamup_shift_sync_gui::preview::build_week;
+use teamup_shift_sync_gui::{preview::build_week, protocol::SettingsLink};
 
 #[derive(Deserialize)]
 struct Case {
@@ -35,14 +35,7 @@ fn native_week_matches_recorded_presentation_scenarios() {
             case.destination_read,
         )
         .unwrap();
-        // The recorded oracle predates targeted recovery, so compare the
-        // presentation it describes. The routing fields have their own test.
-        let mut presented = serde_json::to_value(&week).unwrap();
-        for item in presented["attention"].as_array_mut().into_iter().flatten() {
-            let item = item.as_object_mut().unwrap();
-            item.remove("source_key");
-            item.remove("can_allow_retransfer");
-        }
+        let presented = serde_json::to_value(&week).unwrap();
         assert_eq!(presented, case.expected, "case {index}");
         let mut broken = case.plan.clone();
         if let Some(item) = broken
@@ -67,10 +60,9 @@ fn native_week_matches_recorded_presentation_scenarios() {
     }
 }
 
-/// Recovery must be offered from the one conflict it can resolve, and must
-/// name the exact shift it came from.
+/// Only a problem fixed in setup links to the settings page that fixes it.
 #[test]
-fn only_a_missing_destination_entry_offers_allowing_a_transfer_again() {
+fn only_setup_problems_link_to_settings() {
     let cases: Vec<Case> = serde_json::from_str(include_str!("goldens/preview.json")).unwrap();
     let mut case = cases
         .into_iter()
@@ -96,17 +88,16 @@ fn only_a_missing_destination_entry_offers_allowing_a_transfer_again() {
     };
     let blocked = week(&case);
     assert_eq!(blocked.attention.len(), 1);
-    assert!(!blocked.attention[0].can_allow_retransfer);
+    assert_eq!(blocked.attention[0].settings, None);
 
     for item in &mut case.plan.items {
         if item.reason == "ambiguous_uni_date" {
-            item.reason = "destination_missing".into();
+            item.reason = "no_helper_mapping".into();
         }
     }
-    let missing = week(&case);
-    assert_eq!(missing.attention.len(), 1);
-    assert!(missing.attention[0].can_allow_retransfer);
-    assert_eq!(missing.attention[0].source_key, case.shifts[0].key());
+    let unmapped = week(&case);
+    assert_eq!(unmapped.attention.len(), 1);
+    assert_eq!(unmapped.attention[0].settings, Some(SettingsLink::Helpers));
 }
 
 /// A step blocked by its shift's conflict is not listed again as its own

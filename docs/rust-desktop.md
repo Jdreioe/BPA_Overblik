@@ -53,13 +53,13 @@ service.
 
 ## Recovery and diagnostics
 
-When a previously transferred MitHF shift or DUOS registration has been deleted
-by hand, that shift's warning notice above the week offers **Tillad
-overførsel igen**. Confirming forgets this app's own records for that one shift,
-through the same `forget_steps` path and apply lock as the CLI, and revokes the
-preview. Nothing is deleted in a destination, no other shift is affected, and
-the next preview still runs the full overlap and conflict checks before anything
-can be approved.
+The shift plan is the source of truth (see the README), so a MitHF shift or
+DUOS registration deleted or changed by hand is simply planned again. What the
+app cannot write is shown as a warning notice above the week. A setup problem,
+such as an unmapped helper or a missing DUOS arrangement, has an **Åbn
+indstillingen** button for the settings page that fixes it. A DUOS problem, and
+a DUOS write that failed during transfer, asks the user to check the shift on
+mit.duos.dk and register it themselves.
 
 **Support** holds short Danish guidance and two exports. Neither is called a
 diagnostic on screen: the person asked to produce one is not a developer.
@@ -154,10 +154,9 @@ continuations, old/new values, helper/category-only writes, blocked instructions
 DUOS registrations due later the same day, and empty, unchanged and unread weeks. Invalid display times
 fail the preview. UI state tests check approval consumption, blocked and stale
 previews, setup reload and changes attempted during apply. Further tests cover
-screen navigation, that only a missing destination entry offers allowing a
-transfer again and only from its own conflict, that forgetting local records
-revokes the preview, and that the diagnostics report contains no account
-content.
+screen navigation, that only setup problems link to settings, that a failed
+DUOS write points to mit.duos.dk, and that the diagnostics report contains no
+account content.
 
 On Linux, an Xvfb check rendered the missing-setup screen with a temporary empty
 data directory. This verifies startup and its setup error screen, not

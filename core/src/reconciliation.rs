@@ -57,9 +57,12 @@ pub(crate) fn duos_payload(item: &DuosRegistration) -> Map<String, Value> {
 /// run first. They are checked where they will be, so a helper taking over the
 /// end of another's shift is created after that shift is shortened.
 ///
-/// Without a record, the one overlapping shift is adopted and its time changed
-/// when it is already `helper_name`'s and shares the source's start or end:
-/// the same shift entered by hand, then shortened or extended in the source.
+/// The shift plan is the source of truth. A recorded shift that differs is
+/// changed back to it, whoever changed it, and a recorded shift that is gone is
+/// matched or created again. Without a record, the one overlapping shift is
+/// adopted and its time changed when it is `helper_name`'s or has no helper.
+/// A different helper count cannot be edited, and duplicates or another
+/// helper's shift would have to be deleted, so those still conflict.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn reconcile_mithf<'a>(
     starts_at: DateTime<FixedOffset>,
@@ -73,15 +76,10 @@ pub(crate) fn reconcile_mithf<'a>(
 ) -> Reconciled<'a, MitHfShift> {
     use Outcome::*;
     let expected = shift_payload(starts_at, ends_at, helper_count);
-    if let Some(record) =
-        record.filter(|r| r.destination_id.as_ref().is_some_and(|id| !id.is_empty()))
-    {
-        let Some(known) = candidates
-            .iter()
-            .find(|c| Some(&c.id) == record.destination_id.as_ref())
-        else {
-            return result(None, Conflicted, "Previously synchronized MitHF shift is missing; it will not be recreated automatically", "destination_missing");
-        };
+    let known = record
+        .and_then(|r| r.destination_id.as_ref())
+        .and_then(|id| candidates.iter().find(|c| &c.id == id));
+    if let Some(known) = known {
         let actual = shift_payload(known.starts_at, known.ends_at, known.helper_count);
         if actual == expected {
             return result(
@@ -91,19 +89,23 @@ pub(crate) fn reconcile_mithf<'a>(
                 "",
             );
         }
-        if actual == record.synced_payload {
+        if known.helper_count != helper_count {
             return result(
                 Some(known),
-                WouldUpdate,
-                "Source shift changed; destination still matches the last synchronized values",
-                "",
+                Conflicted,
+                "MitHF shift has a different helper count, which cannot be edited",
+                "helper_count",
             );
         }
         return result(
             Some(known),
-            Conflicted,
-            "MitHF shift was manually changed; automatic update is blocked",
-            "manually_changed",
+            WouldUpdate,
+            if record.is_some_and(|r| actual == r.synced_payload) {
+                "Source shift changed; destination still matches the last synchronized values"
+            } else {
+                "MitHF shift was changed by hand; its time would change back to the source"
+            },
+            "",
         );
     }
     let foreign = || candidates.iter().filter(|c| !owned.contains(&c.id));
@@ -130,14 +132,6 @@ pub(crate) fn reconcile_mithf<'a>(
             "not_unique",
         );
     }
-    if record.is_some_and(|r| r.status == "uncertain") {
-        return result(
-            None,
-            Conflicted,
-            "Previous MitHF request has an uncertain outcome; manual reconciliation required",
-            "uncertain_write",
-        );
-    }
     let overlapping: Vec<_> = foreign()
         .filter(|c| {
             let (from, to) = moved
@@ -148,14 +142,16 @@ pub(crate) fn reconcile_mithf<'a>(
         .collect();
     if let [shift] = overlapping[..] {
         if !moved.contains_key(&shift.id)
-            && shift.helper_name.as_deref() == Some(helper_name)
+            && shift
+                .helper_name
+                .as_deref()
+                .is_none_or(|name| name == helper_name)
             && shift.helper_count == helper_count
-            && (shift.starts_at == starts_at || shift.ends_at == ends_at)
         {
             return result(
                 Some(shift),
                 WouldUpdate,
-                "The helper's MitHF shift was entered by hand; its time would change to match the source",
+                "The helper's MitHF shift has another time; it would change to match the source",
                 "",
             );
         }
@@ -190,6 +186,9 @@ fn describe_shifts(mut shifts: Vec<&MitHfShift>) -> String {
 }
 
 /// `owned` works as for `reconcile_mithf`, for the shift's other SPS intervals.
+/// A pending registration is changed to match the source, and a missing one
+/// is created again. DUOS accepts no other edit from the citizen, so anything
+/// else is left for the user to check on mit.duos.dk.
 pub(crate) fn reconcile_duos<'a>(
     expected: &DuosRegistration,
     record: Option<&StepRecord>,
@@ -198,15 +197,10 @@ pub(crate) fn reconcile_duos<'a>(
 ) -> Reconciled<'a, DuosRegistration> {
     use Outcome::*;
     let payload = duos_payload(expected);
-    if let Some(record) =
-        record.filter(|r| r.destination_id.as_ref().is_some_and(|id| !id.is_empty()))
-    {
-        let Some(known) = candidates
-            .iter()
-            .find(|c| Some(&c.id) == record.destination_id.as_ref())
-        else {
-            return result(None, Conflicted, "Previously synchronized DUOS registration is missing; no replacement will be added", "destination_missing");
-        };
+    let known = record
+        .and_then(|r| r.destination_id.as_ref())
+        .and_then(|id| candidates.iter().find(|c| &c.id == id));
+    if let Some(known) = known {
         let actual = duos_payload(known);
         if actual == payload {
             if matches!(known.status_id, 2 | 5 | 6) {
@@ -224,27 +218,23 @@ pub(crate) fn reconcile_duos<'a>(
                 "",
             );
         }
-        if actual == record.synced_payload {
-            if known.status_id != 0 {
-                return result(
-                    Some(known),
-                    Review,
-                    "DUOS registration is no longer pending; review changes manually",
-                    "not_pending",
-                );
-            }
+        if known.status_id != 0 {
             return result(
                 Some(known),
-                WouldUpdate,
-                "SPS source changed; DUOS still matches the last synchronized values",
-                "",
+                Review,
+                "DUOS registration is no longer pending; review changes manually",
+                "not_pending",
             );
         }
         return result(
             Some(known),
-            Conflicted,
-            "DUOS registration was manually changed; automatic update is blocked",
-            "manually_changed",
+            WouldUpdate,
+            if record.is_some_and(|r| actual == r.synced_payload) {
+                "SPS source changed; DUOS still matches the last synchronized values"
+            } else {
+                "Pending DUOS registration was changed by hand; it would change back to the source"
+            },
+            "",
         );
     }
     let foreign = || candidates.iter().filter(|c| !owned.contains(&c.id));
@@ -271,14 +261,6 @@ pub(crate) fn reconcile_duos<'a>(
             Conflicted,
             "Multiple DUOS registrations match; destination identity is not unique",
             "not_unique",
-        );
-    }
-    if record.is_some_and(|r| r.status == "uncertain") {
-        return result(
-            None,
-            Conflicted,
-            "Previous DUOS request has an uncertain outcome; manual reconciliation required",
-            "uncertain_write",
         );
     }
     if foreign().any(|c| {

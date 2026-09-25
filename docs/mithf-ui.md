@@ -65,10 +65,10 @@ yet confirmed. Overnight SPS intervals are outside the intended use.
 No live shift should be created merely to discover these details. Use an
 already authorized batch or explicit permission for a harmless concrete test.
 
-The weekly flow proposes time or SPS edits only while MitHF still matches the
-last verified transfer, or, for a shift entered by hand, when the shift is
-already the same helper's and shares the source's start or end. It shows the
-old and new values before approval and requires matching read-back after each
-edit. If someone changed the MitHF
-shift or SPS interval separately, the batch stops for review. V1 has no
-force-overwrite action; correcting that conflict remains a manual decision.
+The shift plan is the source of truth. The weekly flow proposes time, SPS and
+Vagtmøde edits whenever MitHF differs from it, including changes made by hand
+in MitHF, and adopts a hand-entered shift with the same helper or none. It
+shows the old and new values before approval and requires matching read-back
+after each edit. Deleting shifts or SPS records, replacing a booked helper and
+changing the helper count are not supported actions, so those differences stay
+warnings for the user to fix in MitHF.
