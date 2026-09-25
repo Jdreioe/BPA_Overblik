@@ -66,7 +66,9 @@ No live shift should be created merely to discover these details. Use an
 already authorized batch or explicit permission for a harmless concrete test.
 
 The weekly flow proposes time or SPS edits only while MitHF still matches the
-last verified transfer. It shows the old and new values before approval and
-requires matching read-back after each edit. If someone changed the MitHF
+last verified transfer, or, for a shift entered by hand, when the shift is
+already the same helper's and shares the source's start or end. It shows the
+old and new values before approval and requires matching read-back after each
+edit. If someone changed the MitHF
 shift or SPS interval separately, the batch stops for review. V1 has no
 force-overwrite action; correcting that conflict remains a manual decision.
