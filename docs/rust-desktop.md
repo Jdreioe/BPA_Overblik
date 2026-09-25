@@ -25,7 +25,7 @@ TOML configuration is the one setup feature not carried over from the old engine
    services.
 2. Choose **Check forbindelse** in each pane, then return to the week and **Se vagtplan**.
 3. Review the split shifts, times, helper assignments, SPS and DUOS values.
-   Resolve any points under **Kræver opmærksomhed** before proceeding.
+   Resolve the warning notices shown above the week before proceeding.
 4. **Godkend ændringer** approves exactly the displayed plan and submits it.
    The app reloads saved setup and the selected source, checks the account database scope,
    and invokes the core's locked destination revalidation and verified transfer.
@@ -54,7 +54,7 @@ service.
 ## Recovery and diagnostics
 
 When a previously transferred MitHF shift or DUOS registration has been deleted
-by hand, that shift's item under **Kræver opmærksomhed** offers **Tillad
+by hand, that shift's warning notice above the week offers **Tillad
 overførsel igen**. Confirming forgets this app's own records for that one shift,
 through the same `forget_steps` path and apply lock as the CLI, and revokes the
 preview. Nothing is deleted in a destination, no other shift is affected, and

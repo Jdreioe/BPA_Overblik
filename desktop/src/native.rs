@@ -1170,7 +1170,7 @@ const SHOW_WEEK: &str = "Se vagtplan";
 const HELP: [&str; 5] = [
     "1. Log ind i MitHF og eventuelt DUOS under Udbydere. Login holder, indtil tjenesten selv logger dig ud.",
     "2. Vælg ugen på forsiden, og vælg Se vagtplan.",
-    "3. Løs først punkterne under Kræver opmærksomhed. Rettelser laves i kilden eller i tjenesten, ikke i appen.",
+    "3. Løs først advarslerne over ugen. Rettelser laves i kilden eller i tjenesten, ikke i appen.",
     "4. Vælg Godkend ændringer. Hver ændring læses tilbage og bekræftes, før den næste begynder.",
     "Appen sletter aldrig noget i MitHF eller DUOS, og den godkender ikke registreringer for hjælperen.",
 ];
@@ -2636,21 +2636,28 @@ impl NativeApp {
             // The week's status floats with the other notices (see `view`).
             // Dismissed, it stays gone for this preview only; what blocks a
             // transfer is still listed here and marked in the grid.
-            if !week.attention.is_empty() {
-                body = body.push(text("Kræver opmærksomhed").size(18));
-            }
+            // Each item is a warning notice: what is wrong, then whose shift
+            // and what to do. Unlike status notices they stay until resolved.
             for item in &week.attention {
-                let mut entry = column![
-                    text(format!("{} · {}", item.when, item.who)),
-                    text(&item.explanation),
-                    text(format!("Gør sådan: {}", item.action))
-                ]
-                .spacing(4);
+                let mut entry = column![super::widgets::notice_card::<Message>(
+                    Notice::new(
+                        Tone::Warning,
+                        item.explanation.trim_end_matches('.'),
+                        format!("{}, {}. {}", item.who, item.when, item.action),
+                    ),
+                    None,
+                )]
+                .spacing(6);
                 if item.can_allow_retransfer {
                     entry = if self.forget_source.as_deref() == Some(item.source_key.as_str()) {
                         entry
-                            .push(text(
-                                "Appen glemmer kun sine egne registreringer for denne vagt. Intet slettes i MitHF eller DUOS. Bagefter skal du hente ugen igen og godkende den på ny.",
+                            .push(super::widgets::notice_card::<Message>(
+                                Notice::new(
+                                    Tone::Info,
+                                    "Appen glemmer kun, at den har overført denne vagt",
+                                    "Intet slettes i MitHF eller DUOS. Hent ugen igen bagefter, og godkend den på ny.",
+                                ),
+                                None,
                             ))
                             .push(
                                 row![

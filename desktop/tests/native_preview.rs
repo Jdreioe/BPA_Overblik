@@ -2,7 +2,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use teamup_shift_sync_core::{
-    plan_digest, DestinationSnapshot, PlanningConfig, SourceMarker, SourceShift, SyncPlan,
+    plan_digest, DestinationSnapshot, Outcome, PlanningConfig, SourceMarker, SourceShift, SyncPlan,
 };
 use teamup_shift_sync_gui::preview::build_week;
 
@@ -107,6 +107,54 @@ fn only_a_missing_destination_entry_offers_allowing_a_transfer_again() {
     assert_eq!(missing.attention.len(), 1);
     assert!(missing.attention[0].can_allow_retransfer);
     assert_eq!(missing.attention[0].source_key, case.shifts[0].key());
+}
+
+/// A step blocked by its shift's conflict is not listed again as its own
+/// warning; the shift's conflict names the service to fix.
+#[test]
+fn a_shift_conflict_is_listed_once_and_names_the_service() {
+    let cases: Vec<Case> = serde_json::from_str(include_str!("goldens/preview.json")).unwrap();
+    let mut case = cases
+        .into_iter()
+        .find(|case| {
+            case.shifts.len() == 1
+                && case.plan.items.iter().any(|item| {
+                    item.step_key == "mithf.create_shift" && item.payload.contains_key("starts_at")
+                })
+                && case
+                    .plan
+                    .items
+                    .iter()
+                    .any(|item| item.step_key == "mithf.assign_helper")
+        })
+        .expect("a shift with an assignment");
+    for item in &mut case.plan.items {
+        match item.step_key.as_str() {
+            "mithf.create_shift" => {
+                item.outcome = Outcome::Conflicted;
+                item.reason = "overlapping".into();
+            }
+            "mithf.assign_helper" => {
+                item.outcome = Outcome::Conflicted;
+                item.reason = "blocked_by_shift".into();
+            }
+            _ => {}
+        }
+    }
+    let week = build_week(
+        &case.config,
+        &case.names,
+        &case.colors,
+        &case.shifts,
+        &[],
+        &case.plan,
+        &case.destination,
+        case.destination_read,
+    )
+    .unwrap();
+    assert_eq!(week.attention.len(), 1);
+    assert!(week.attention[0].explanation.contains("MitHF"));
+    assert!(!week.can_apply);
 }
 
 #[test]

@@ -381,7 +381,14 @@ pub fn build_week(
             }
         }
         for item in items {
-            if !blocker(item.outcome) || item.reason == "offline_preview" {
+            // A step blocked by its shift or by an SPS line only repeats the
+            // problem already listed for that shift.
+            if !blocker(item.outcome)
+                || matches!(
+                    item.reason.as_str(),
+                    "offline_preview" | "blocked_by_shift" | "source_issue"
+                )
+            {
                 continue;
             }
             let (explanation, action) = explanations::explanation(&item.reason, item.system);
