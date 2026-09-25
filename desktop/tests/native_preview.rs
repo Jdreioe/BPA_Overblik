@@ -288,3 +288,72 @@ fn a_marker_over_a_shift_is_shown_without_blocking_approval() {
         .expect("a marked day");
     assert_eq!(day.markers[0].time_label, "hele dagen");
 }
+
+/// The absent helper's part names the reason and who covers it; the
+/// substitute's part is shown under their own name.
+#[test]
+fn an_absence_shows_the_sick_helper_and_the_substitute() {
+    use teamup_shift_sync_core::{build_plan, PlanRequest, SyncState};
+    let config: PlanningConfig = serde_json::from_value(json!({
+        "timezone": "Europe/Copenhagen", "default_helper_count": 1,
+        "duos_arrangement_id": "a", "duos_registration_type": "0",
+        "helpers": {
+            "bo": {"mithf_name": "Bo Hansen", "duos_employee_number": "1", "source_name": "Bo"},
+            "anna": {"mithf_name": "Anna Holm", "duos_employee_number": "2", "source_name": "Anna"}
+        }
+    }))
+    .unwrap();
+    let shift: SourceShift = serde_json::from_value(json!({
+        "calendar_id": "c", "event_id": "e", "occurrence_id": "o", "title": "Vagt",
+        "helper_key": "bo", "notes": "SYG 12-16: Anna",
+        "starts_at": "2026-09-28T08:00:00+02:00", "ends_at": "2026-09-28T16:00:00+02:00"
+    }))
+    .unwrap();
+    let moment = |v: &str| chrono::DateTime::parse_from_rfc3339(v).unwrap();
+    let destination = DestinationSnapshot::default();
+    let plan = build_plan(
+        &PlanRequest {
+            config: &config,
+            shifts: std::slice::from_ref(&shift),
+            destination: &destination,
+            range_start: moment("2026-09-28T00:00:00+02:00"),
+            range_end: moment("2026-10-05T00:00:00+02:00"),
+            now: moment("2026-09-27T12:00:00+02:00"),
+            live: true,
+        },
+        &SyncState::open(":memory:").unwrap(),
+    )
+    .unwrap();
+    let names = BTreeMap::from([("bo".into(), "Bo".into()), ("anna".into(), "Anna".into())]);
+    let colors = BTreeMap::from([("anna".into(), "#4770d8".into())]);
+    let week = build_week(
+        &config,
+        &names,
+        &colors,
+        &[shift],
+        &[],
+        &plan,
+        &destination,
+        true,
+    )
+    .unwrap();
+    let blocks = &week.days[0].blocks;
+    let sick = blocks.iter().find(|b| !b.absence.is_empty()).unwrap();
+    assert_eq!(
+        (sick.helper.as_str(), sick.absence.as_str()),
+        ("Bo Hansen", "Egen sygdom")
+    );
+    assert!(sick
+        .details
+        .contains(&"Bo Hansen meldes fraværende i MitHF: Egen sygdom.".into()));
+    assert!(sick.details.contains(&"Anna Holm tager vagten.".into()));
+    let anna = blocks.iter().find(|b| b.helper == "Anna Holm").unwrap();
+    assert_eq!(anna.helper_color, "#4770d8");
+    assert_eq!(anna.time_label, "12:00–16:00");
+    assert!(week.can_apply);
+    assert!(
+        week.apply_summary.contains("1 fraværsmelding"),
+        "{}",
+        week.apply_summary
+    );
+}

@@ -5,7 +5,7 @@ async ({system, action, payload = {}}) => {
     if (system === 'mithf') {
       if (location.origin !== 'https://mithf.handicapformidlingen.dk') throw 0;
       const allowed = ['plan', 'ekstra', 'hjaelperliste', 'muligheder', 'pulje',
-        'opret', 'rettid', 'book', 'tilfoejreg', 'retreg'];
+        'opret', 'rettid', 'book', 'tilfoejreg', 'retreg', 'sygemeld'];
       if (!allowed.includes(action)) throw 0;
       const scripts = [...document.scripts].filter(s => !s.src).map(s => s.textContent).join('\n');
       const match = scripts.match(/var TOK=("[^"]*"|'[^']*')/);

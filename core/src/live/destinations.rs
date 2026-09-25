@@ -285,6 +285,13 @@ async fn validate_catalog(
             &catalog["types"],
             &json!(config.planning.duos_registration_type),
         )?;
+        for marking in &config.planning.absences {
+            if let crate::DuosAbsence::Type(id) = &marking.duos {
+                selected(&catalog["types"], &json!(id)).map_err(|_| {
+                    LiveError("En DUOS-type for fravær findes ikke længere. Vælg den igen under Indstillinger → Fravær.")
+                })?;
+            }
+        }
     }
     let mut selected_mithf = BTreeSet::new();
     let mut selected_duos = BTreeSet::new();
@@ -458,6 +465,7 @@ fn mithf_shift(
         meeting_intervals: vec![],
         sps_record_ids: vec![],
         meeting_record_ids: vec![],
+        sick: row.get("syge").map(truthy).ok_or(INVALID)?,
     };
     for record in rows(&extra["ekstra"][identifier]["paa"])? {
         let name = record["navn"].as_str().unwrap_or("");
@@ -607,8 +615,26 @@ impl<'a> LiveDestinations<'a> {
                 self.set_category(item, existing, step == "mithf.set_meeting")
                     .await
             }
+            "mithf.report_sick" => self.report_sick(item, existing).await,
             _ => Err(LiveError("Handlingen er ikke en understøttet overførsel.")),
         }
+    }
+
+    async fn report_sick(
+        &self,
+        item: &PlanItem,
+        existing: &MitHfShift,
+    ) -> Result<Option<String>, LiveError> {
+        let request = sick_request(item, existing)?;
+        let response = self
+            .browser
+            .submit(request.service, request.action, request.body)
+            .await?;
+        // The caller re-reads the shift; this only follows it if MitHF gave
+        // the sick shift a new identity in the days it sent back.
+        Ok(Some(
+            sick_id(&response, existing).unwrap_or_else(|| existing.id.clone()),
+        ))
     }
 
     async fn register_duos(&self, item: &PlanItem) -> Result<Option<String>, LiveError> {
@@ -862,6 +888,57 @@ fn category_request(
     })
 }
 
+/// MitHF's own "Sygemeld": the booked helper is reported absent with the
+/// reason, and `vikar` leaves an open shift for the substitute instead of
+/// cancelling the hours.
+fn sick_request(item: &PlanItem, existing: &MitHfShift) -> Result<Request, LiveError> {
+    let reason: crate::AbsenceReason =
+        serde_json::from_value(item.payload["reason"].clone()).map_err(|_| INVALID)?;
+    if existing.helper_name.as_deref() != Some(text(&item.payload["helper_name"])?) {
+        return Err(LiveError(
+            "Den syge hjælper skal være booket på vagten, før fraværet meldes.",
+        ));
+    }
+    Ok(Request {
+        service: Service::Mithf,
+        action: "sygemeld",
+        body: json!({
+            "eid": existing.id, "dato": existing.starts_at.date_naive().to_string(),
+            "start": clock(existing.starts_at), "aarsag": reason.mithf_code(),
+            "metode": "vikar", "hjemkl": "", "hjemdato": "",
+        }),
+    })
+}
+
+/// The sick row starting where the reported shift did, from the days a
+/// `sygemeld` answer carries. MitHF sends the same day as both `dag` and
+/// `dage`, so a row counts once by its id.
+fn sick_id(response: &Value, existing: &MitHfShift) -> Option<String> {
+    let date = existing.starts_at.date_naive().to_string();
+    let start = clock(existing.starts_at);
+    let mut days: Vec<&Value> = response["dage"]
+        .as_object()
+        .map(|days| days.values().collect())
+        .unwrap_or_default();
+    days.extend(response.get("dag"));
+    let found: BTreeSet<String> = days
+        .into_iter()
+        .filter_map(|day| rows(day).ok())
+        .flatten()
+        .filter(|row| {
+            row.get("syge").is_some_and(truthy)
+                && row["startFaktisk"].as_str().or(row["dato"].as_str()) == Some(date.as_str())
+                && row["start"].as_str() == Some(start.as_str())
+                && row["navn"].as_str() == existing.helper_name.as_deref()
+        })
+        .filter_map(|row| id(&row["id"]).ok())
+        .collect();
+    match found.len() {
+        1 => found.into_iter().next(),
+        _ => None,
+    }
+}
+
 impl crate::Destinations for LiveDestinations<'_> {
     type Error = LiveError;
 
@@ -951,6 +1028,7 @@ mod tests {
             "mithf.set_sps" | "mithf.set_meeting" => {
                 category_request(zone, item, existing, step == "mithf.set_meeting")
             }
+            "mithf.report_sick" => sick_request(item, existing),
             _ => Err(LiveError("unsupported")),
         }
     }
@@ -980,6 +1058,7 @@ mod tests {
                 duos_registration_type: "type-1".into(),
                 duos_enabled: true,
                 helpers: BTreeMap::new(),
+                absences: crate::default_absences(),
             },
             calendar: "cal".into(),
             api_key: "key".into(),
@@ -1031,7 +1110,7 @@ mod tests {
         let config = config("ord-1", json!({}));
         let row = |day: &str| {
             json!({"startFaktisk": day, "start": "08:00", "slutdato": day, "slut": "16:00",
-                   "daekket": 1, "navn": "Anna Hansen"})
+                   "daekket": 1, "syge": false, "navn": "Anna Hansen"})
         };
         let record = |id: &str, name: &str, day: &str, from: &str, to: &str| json!({"id": id, "navn": name, "fraDato": day, "fra": from, "tilDato": day, "til": to});
         let extra = json!({"ekstra": {
@@ -1101,6 +1180,7 @@ mod tests {
                 meeting_intervals: vec![],
                 sps_record_ids: records.iter().map(|id| (*id).to_owned()).collect(),
                 meeting_record_ids: vec![],
+                sick: false,
             }],
             duos_registrations: vec![],
         }
@@ -1214,6 +1294,41 @@ mod tests {
     /// The planner gives a meeting the segment's own bounds, not an interval
     /// list, so the meeting request reads them directly. Python reads
     /// ``intervals`` here and raises on the payload its planner produces.
+    #[test]
+    fn sickness_is_reported_on_the_booked_helpers_shift_with_the_mithf_reason() {
+        let mut snapshot = parent(&[]);
+        let payload = json!({"helper_name": "Anna Hansen", "reason": "child_illness"});
+        let sick = item(
+            PlanSystem::Mithf,
+            "mithf.report_sick#1",
+            payload,
+            Some("7001"),
+        );
+        // An open shift has nobody to report sick.
+        assert!(build(&sick, &snapshot).is_err());
+
+        snapshot.mithf_shifts[0].helper_name = Some("Anna Hansen".into());
+        let request = build(&sick, &snapshot).unwrap();
+        assert_eq!(request.action, "sygemeld");
+        assert_eq!(
+            request.body,
+            json!({"eid": "7001", "dato": "2024-03-04", "start": "08:00", "aarsag": "2",
+                   "metode": "vikar", "hjemkl": "", "hjemdato": ""})
+        );
+
+        let row = |id: &str, syge: bool| {
+            json!({"id": id, "dato": "2024-03-04",
+            "startFaktisk": "2024-03-04", "start": "08:00", "navn": "Anna Hansen", "syge": syge})
+        };
+        // As observed live: the day comes twice, the sick row keeps its id
+        // and the open shift beside it is not sick.
+        let day = json!([row("7002", false), row("7001", true)]);
+        let answer = json!({"ok": true, "dag": day, "dage": {"2024-03-04": day}});
+        let existing = &snapshot.mithf_shifts[0];
+        assert_eq!(sick_id(&answer, existing).as_deref(), Some("7001"));
+        assert_eq!(sick_id(&json!({"ok": true}), existing), None);
+    }
+
     #[test]
     fn meeting_uses_the_segment_bounds_from_its_payload() {
         let meeting = item(

@@ -46,6 +46,39 @@ shift detail. List view omitted a carry-in shift visible in week view;
 list-only reconciliation cannot establish complete range coverage. Closed
 dialog contents remain in the DOM: do not treat their presence as open state.
 
+## Sickness (read-only inspection, 2026-09-25)
+
+The calendar page's own script reports absence with `a=sygemeld` on
+`vagt-api.php`, sending `eid`, `dato`, `start`, `aarsag`, `metode`, `hjemkl` and
+`hjemdato`. The reasons (`SYGAARSAG`) are `1` Egen sygdom, `2` Barns sygdom,
+`3` Arbejdsulykke and `5` Andet fravær. `metode=vikar` ("En anden skal dække
+den") leaves an open shift for a substitute; `metode=vagt` cancels the shift.
+`hjemkl`/`hjemdato` set a "went home at" time, where MitHF itself splits the
+shift. The answer carries the changed day or days (`dag`/`dage`). `sygopret`
+creates a shift directly as sick, and `fortrydsyg` undoes a sickness. The app
+uses only `sygemeld` with `vikar` and empty `hjemkl`: the planner splits
+partial absences itself.
+
+A sick-reported shift stays in `plan` with `syge: true`, `gruppe: "syge"`,
+`daekket: true` and the absent helper's `navn`. A real July example had the
+helper's worked part, the sick shift and the substitute's longer shift as
+three rows. Neither `plan` nor `ekstra` exposes the reason.
+
+A live test on 2026-09-25 (approved, test helper Bjarne Hougaard, an empty
+future day) created a 10:00–12:00 shift, booked it and sent `sygemeld` with
+`aarsag=1`, `metode=vikar` and empty `hjemkl`. The booked shift kept its ID
+and became `syge: true` with the helper's name, and an open shift with a new ID
+and the same times appeared beside it (`state: "2"`, `daekket: false`). The
+answer listed that day in both `dag` and `dage`. `fortrydsyg` answered
+`status: "genbooket"`: one booked, non-sick shift with a new ID replaced both
+rows. `afbestil` with `booket=1` then removed it, and the day read back empty.
+
+Typetimer come from `plan.typeTilladt` per date as `noegle` `4:<id>`: here
+`4:1` Vagtmøde, `4:2` MUS/APV, `4:5` SPS timer and `4:3` Oplæring. `ekstra`
+also lists `4:4`–`4:13` (Feriebevilling, Ekstra bevilliget timer, Puljetimer,
+Tubeskift, Kurser, PA Timer, Fast hjælper ved oplæring, Egen betalte timer,
+Borger indlagt). Sickness is not a typetime.
+
 ## Still requires verification
 
 On 2026-09-23, Jonas reported a successful live time edit on a 24-hour shift

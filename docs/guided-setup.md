@@ -210,6 +210,23 @@ Disable DUOS in setup when SPS registration is not used. No DUOS login or
 helper mapping is then required. If a sheet still contains SPS instructions,
 the preview flags them for review before transfer.
 
+## Absences
+
+Under **Indstillinger → Fravær**, each of MitHF's four absence reasons has the
+words that start its lines, separated by commas. Clear a row's words to turn
+it off. The defaults are `syg, sygdom, egen sygdom`, `barn syg, barns sygdom,
+syg barn`, `arbejdsskade, arbejdsulykke` and `fravær, andet fravær`. A word
+can belong to only one reason. Press Enter or **Gem ord** to save.
+
+With DUOS on, each reason also chooses how the absent helper's missed SPS
+hours are registered: a type from the chosen DUOS arrangement, or
+**Registreres ikke**. The list differs per arrangement; the practical-help
+arrangement has no `Barn syg`, for example. Until a type is chosen, a shift
+with SPS hours inside that absence waits for the choice, with a link to this
+page. Choosing another arrangement clears types it does not offer.
+
+See the README for the line format.
+
 ## Switching source
 
 Each source keeps its own setup. Choosing another source under **Skift

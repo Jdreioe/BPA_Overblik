@@ -3,6 +3,7 @@
 //! The core owns synchronization behavior. UI, network, and browser adapters
 //! live outside this crate and exchange typed values with it.
 
+mod absence;
 mod approval;
 pub mod fixture;
 pub mod ical;
@@ -19,6 +20,10 @@ mod state;
 mod transfer;
 pub mod workbook;
 
+pub use absence::{
+    absence_markings, default_absences, parse_absences, AbsenceMarking, AbsenceParseResult,
+    AbsencePart, AbsenceReason, DuosAbsence,
+};
 pub use models::{
     ParseIssue, ParseIssueCode, SourceComment, SourceMarker, SourceShift, SpsInterval,
     SpsParseResult, TimeInterval,

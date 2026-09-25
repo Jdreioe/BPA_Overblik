@@ -6,8 +6,8 @@ use chrono_tz::Tz;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use teamup_shift_sync_core::{
-    DestinationSnapshot, Outcome, PlanItem, PlanSystem, PlanningConfig, SourceMarker, SourceShift,
-    SyncPlan,
+    AbsenceReason, DestinationSnapshot, Outcome, PlanItem, PlanSystem, PlanningConfig,
+    SourceMarker, SourceShift, SyncPlan,
 };
 #[path = "preview_explanations.rs"]
 mod explanations;
@@ -167,6 +167,20 @@ fn detail(item: &PlanItem, destination: &DestinationSnapshot, zone: Tz) -> Resul
                 _ => String::new(),
             }
         }
+        "mithf.report_sick" => {
+            let name = item
+                .payload
+                .get("helper_name")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let reason = absence_label(&item.payload);
+            match item.outcome {
+                WouldCreate | WouldUpdate => format!("{name} meldes fraværende i MitHF: {reason}."),
+                AlreadyMatched => format!("{name} er meldt fraværende i MitHF: {reason}."),
+                PendingIntegration => "Fraværet kræver aflæsning af MitHF.".into(),
+                _ => String::new(),
+            }
+        }
         "mithf.set_meeting" if writes(item.outcome) => "Vagtmøde sættes på hele vagten.".into(),
         "mithf.set_meeting" if item.outcome == PendingIntegration => {
             "Vagtmøde kræver aflæsning af MitHF.".into()
@@ -196,6 +210,14 @@ fn detail(item: &PlanItem, destination: &DestinationSnapshot, zone: Tz) -> Resul
         }
         _ => String::new(),
     })
+}
+
+/// MitHF's name for the absence reason in a `mithf.report_sick` payload.
+fn absence_label(payload: &Map<String, Value>) -> &'static str {
+    payload
+        .get("reason")
+        .and_then(|v| serde_json::from_value::<AbsenceReason>(v.clone()).ok())
+        .map_or("fravær", AbsenceReason::label)
 }
 
 /// Build the existing desktop view types directly from core models.
@@ -275,8 +297,14 @@ pub fn build_week(
                     .map(|v| time(v, zone))
                     .transpose()?;
                 let mut index = first;
+                // SPS in an absence belongs to the substitute's segment, and
+                // the absent helper's own hours to the absent one.
+                let absence = item.step_key.starts_with("duos.absence:");
                 if let Some(at) = at {
                     for (candidate, group) in &segments {
+                        if group.iter().any(|i| base(i) == "mithf.report_sick") != absence {
+                            continue;
+                        }
                         if let Some(create) = group.iter().find(|i| base(i) == "mithf.create_shift")
                         {
                             if create.payload.contains_key("starts_at") {
@@ -330,6 +358,7 @@ pub fn build_week(
             };
             let mut details = Vec::new();
             let mut sps_label = String::new();
+            let mut absence = String::new();
             for item in group {
                 let line = detail(item, destination, zone)?;
                 if !line.is_empty() {
@@ -338,10 +367,35 @@ pub fn build_week(
                 if base(item) == "mithf.set_sps" {
                     sps_label = sps(&item.payload, zone)?;
                 }
+                if base(item) == "mithf.report_sick" {
+                    absence = absence_label(&item.payload).into();
+                }
             }
+            // A segment is worked by the helper it books: the substitute
+            // during an absence, which the next segment names.
+            let booked = |group: &[&PlanItem]| {
+                group
+                    .iter()
+                    .find(|i| base(i) == "mithf.assign_helper")
+                    .and_then(|i| i.payload.get("helper_name"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            };
+            let who = booked(group).unwrap_or_else(|| helper.into());
+            if !absence.is_empty() {
+                if let Some(substitute) = segments.get(&(index + 1)).and_then(|g| booked(g)) {
+                    details.push(format!("{substitute} tager vagten."));
+                }
+            }
+            let key = config
+                .helpers
+                .iter()
+                .find(|(_, h)| h.mithf_name == who)
+                .map_or(shift.helper_key.as_str(), |(key, _)| key.as_str());
             let block = Block {
-                helper: helper.into(),
-                helper_color: colors.get(&shift.helper_key).cloned().unwrap_or_default(),
+                helper: who.clone(),
+                helper_color: colors.get(key).cloned().unwrap_or_default(),
+                absence,
                 status: status.into(),
                 status_label: status_label.into(),
                 minutes_from: 0,
@@ -410,6 +464,7 @@ pub fn build_week(
                         "missing_configuration" | "sps_without_duos" => {
                             Some(SettingsLink::Integrations)
                         }
+                        "absence_duos_type" => Some(SettingsLink::Absences),
                         _ => None,
                     },
                 });
@@ -452,13 +507,13 @@ pub fn build_week(
     let can_apply = destination_read && attention.is_empty() && has_writes && !has_blockers;
     let summary = summary(&counts);
     let parts = labels(&counts);
-    let mithf = parts[..5]
+    let mithf = parts[..6]
         .iter()
         .filter(|v| !v.is_empty())
         .cloned()
         .collect::<Vec<_>>()
         .join(", ");
-    let duos = &parts[5];
+    let duos = &parts[6];
     let apply_summary = match (mithf.is_empty(), duos.is_empty()) {
         (false, false) => format!("Overfører {mithf} til MitHF og {duos} til DUOS."),
         (false, true) => format!("Overfører {mithf} til MitHF."),
@@ -529,9 +584,9 @@ pub fn build_week(
 fn plural(count: usize, one: &str, many: &str) -> String {
     format!("{count} {}", if count == 1 { one } else { many })
 }
-// created, updated, sps, assignments, meetings, duos, matched
-fn counts(plan: &SyncPlan) -> Result<[usize; 7]> {
-    let mut counts = [0; 7];
+// created, updated, sps, assignments, meetings, absences, duos, matched
+fn counts(plan: &SyncPlan) -> Result<[usize; 8]> {
+    let mut counts = [0; 8];
     let mut changed = BTreeSet::new();
     let mut created = BTreeSet::new();
     for item in &plan.items {
@@ -548,7 +603,7 @@ fn counts(plan: &SyncPlan) -> Result<[usize; 7]> {
             "mithf.create_shift" => match item.outcome {
                 Outcome::WouldCreate => counts[0] += 1,
                 Outcome::WouldUpdate => counts[1] += 1,
-                Outcome::AlreadyMatched if !changed.contains(&key) => counts[6] += 1,
+                Outcome::AlreadyMatched if !changed.contains(&key) => counts[7] += 1,
                 _ => {}
             },
             "mithf.set_sps" if writes(item.outcome) => counts[2] += 1,
@@ -556,21 +611,23 @@ fn counts(plan: &SyncPlan) -> Result<[usize; 7]> {
                 counts[3] += 1
             }
             "mithf.set_meeting" if writes(item.outcome) => counts[4] += 1,
+            "mithf.report_sick" if writes(item.outcome) => counts[5] += 1,
             _ if item.system == PlanSystem::Duos && writes(item.outcome) => {
-                counts[5] += 1;
+                counts[6] += 1;
             }
             _ => {}
         }
     }
     Ok(counts)
 }
-fn labels(counts: &[usize; 7]) -> Vec<String> {
+fn labels(counts: &[usize; 8]) -> Vec<String> {
     [
         ("ny vagt", "nye vagter"),
         ("ændret vagt", "ændrede vagter"),
         ("SPS-tidsrum", "SPS-tidsrum"),
         ("hjælpertildeling", "hjælpertildelinger"),
         ("vagtmøde", "vagtmøder"),
+        ("fraværsmelding", "fraværsmeldinger"),
         ("registrering", "registreringer"),
         ("vagt", "vagter"),
     ]
@@ -585,7 +642,7 @@ fn labels(counts: &[usize; 7]) -> Vec<String> {
     })
     .collect()
 }
-fn summary(counts: &[usize; 7]) -> Vec<String> {
+fn summary(counts: &[usize; 8]) -> Vec<String> {
     labels(counts)
         .into_iter()
         .enumerate()
@@ -594,8 +651,8 @@ fn summary(counts: &[usize; 7]) -> Vec<String> {
             format!(
                 "{s}{}",
                 match i {
-                    0..=4 => " i MitHF",
-                    5 => " i DUOS",
+                    0..=5 => " i MitHF",
+                    6 => " i DUOS",
                     _ => " er allerede på plads",
                 }
             )

@@ -72,6 +72,58 @@ fn listed(reason: &str, system: PlanSystem) -> Option<(&'static str, &'static st
             "Et SPS-tidsrum rammer en time, der findes to gange på grund af sommertid.",
             "Skriv et entydigt tidsrum i TeamUp.",
         ),
+        ("unreadable_absence", _) => (
+            "En fraværslinje i vagtplanen kan ikke læses.",
+            "Skriv linjen som »SYG: Anna« eller »SYG 8-12: Anna«.",
+        ),
+        ("ambiguous_absence_date", _) => (
+            "Vagten dækker mere end ét døgn, og fraværslinjen siger ikke hvilken dag.",
+            "Skriv datoen foran tiden, for eksempel »SYG 2026-09-28 8-12: Anna«.",
+        ),
+        ("absence_outside_shift", _) => (
+            "Et fraværstidsrum ligger uden for vagten.",
+            "Ret tidsrummet i fraværslinjen eller vagtens tidsrum i kilden.",
+        ),
+        ("overlapping_absences", _) => (
+            "To fraværslinjer på vagten dækker de samme timer.",
+            "Ret linjerne, så hver time kun står én gang.",
+        ),
+        ("unknown_absence_helper", _) => (
+            "Hjælperen i fraværslinjen findes ikke blandt de koblede hjælpere.",
+            "Skriv hjælperens navn, som det står i vagtplanen, eller kobl hjælperen under Hjælpere.",
+        ),
+        ("ambiguous_absence_helper", _) => (
+            "Flere hjælpere har det fornavn, der står i fraværslinjen.",
+            "Skriv hele navnet i fraværslinjen.",
+        ),
+        ("absence_helper_is_planned", _) => (
+            "Fraværslinjen nævner vagtens egen hjælper.",
+            "Skriv navnet på den, der tog vagten.",
+        ),
+        ("sps_crosses_absence", _) => (
+            "Et SPS-tidsrum ligger delvist i et fravær.",
+            "Del SPS-tidsrummet ved fraværets start eller slut, så det ligger hos én hjælper.",
+        ),
+        ("absence_duos_type", _) => (
+            "Der er SPS-timer i et fravær, men ikke valgt, hvordan DUOS skal registrere dem.",
+            "Vælg Åbn indstillingen, og vælg en DUOS-type under Fravær.",
+        ),
+        ("absent_in_mithf", _) => (
+            "MitHF har hjælperen meldt syg, men vagtplanen har ingen fraværslinje.",
+            "Skriv fx »SYG: navn« på vagten, eller fortryd sygemeldingen i MitHF.",
+        ),
+        ("absence_removed", _) => (
+            "Fraværet står ikke længere i vagtplanen, men hjælperen er stadig meldt syg i MitHF.",
+            "Fortryd sygemeldingen i MitHF, og hent ugen igen. Appen fortryder aldrig selv.",
+        ),
+        ("absence_reason_changed", _) => (
+            "Fraværsårsagen er ændret, efter hjælperen blev meldt syg i MitHF.",
+            "Ret årsagen i MitHF, eller skriv den gamle årsag i vagtplanen.",
+        ),
+        ("sps_on_absent_shift", _) => (
+            "SPS-timerne står stadig på den fraværende hjælpers vagt i MitHF.",
+            "Fjern SPS-timerne fra den vagt i MitHF, og hent ugen igen. Appen sætter dem på afløserens vagt.",
+        ),
         ("no_helper_mapping", _) => (
             "Hjælperen fra vagtplanen er ikke koblet til en hjælper i MitHF.",
             "Vælg Åbn indstillingen, og kobl hjælperen under Hjælpere.",

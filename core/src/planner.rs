@@ -5,13 +5,14 @@ use chrono::{DateTime, FixedOffset};
 use serde_json::{json, Map, Value};
 
 use crate::{
-    classify_source_title, parse_sps_instructions,
+    classify_source_title, parse_absences, parse_sps_instructions,
     reconciliation::{duos_payload, reconcile_duos, reconcile_mithf, shift_payload},
     segment_step,
     state::isoformat,
-    DestinationSnapshot, DuosRegistration, HelperMapping, Outcome, ParseIssueCode, PlanItem,
-    PlanSystem, PlanningConfig, SourceShift, SourceTitle, SpsInterval, StateError, StepRecord,
-    SyncPlan, SyncState, TimeInterval,
+    AbsencePart, AbsenceReason, DestinationSnapshot, DuosAbsence, DuosRegistration, HelperMapping,
+    MitHfShift, Outcome, ParseIssue, ParseIssueCode, PlanItem, PlanSystem, PlanningConfig,
+    SourceShift, SourceTitle, SpsInterval, StateError, StepRecord, SyncPlan, SyncState,
+    TimeInterval,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -100,6 +101,15 @@ fn plan_shifts(
     moves: &Moves,
 ) -> Result<Vec<PlanItem>, PlanningError> {
     let mut items = Vec::new();
+    // A sick-reported MitHF shift is not worked. Only absent segments may
+    // match one; everything else reconciles against the shifts people work.
+    let healthy: Vec<MitHfShift> = request
+        .destination
+        .mithf_shifts
+        .iter()
+        .filter(|s| !s.sick)
+        .cloned()
+        .collect();
     for &shift in shifts {
         if classify_source_title(&shift.title) == SourceTitle::Reminder {
             items.push(item(
@@ -123,16 +133,32 @@ fn plan_shifts(
                 "sps_without_duos",
             ));
         }
-        for issue in &parsed.issues {
-            let code = serde_json::to_value(issue.code).expect("issue codes serialize as strings");
-            let code = code.as_str().unwrap();
+        let absences = parse_absences(
+            shift,
+            &request.config.absences,
+            &request.config.helpers,
+            request.config.timezone,
+        );
+        for (prefix, issue) in parsed
+            .issues
+            .iter()
+            .map(|i| ("sps", i))
+            .chain(absences.issues.iter().map(|i| ("absence", i)))
+        {
+            items.push(issue_item(shift, prefix, issue));
+        }
+        let crossing = parsed
+            .intervals
+            .iter()
+            .any(|sps| crosses_absence(&sps.interval, &absences.parts));
+        if crossing {
             items.push(item(
                 shift,
                 PlanSystem::Source,
-                &format!("sps:{}:{code}", issue.source_id),
+                "absence.sps_crossing",
                 Outcome::Review,
-                &issue.message,
-                code,
+                "An SPS interval starts before an absence and ends inside it, or the reverse",
+                "sps_crosses_absence",
             ));
         }
         let Some(mapping) = request.config.helpers.get(&shift.helper_key) else {
@@ -158,14 +184,20 @@ fn plan_shifts(
         };
         // Read once, keeping all errors visible rather than treating bad state as absent.
         let records = state.steps_for_source(&shift.key())?;
-        let blocked = parsed
-            .issues
-            .iter()
-            .any(|i| i.code != ParseIssueCode::DuplicateUniInterval);
-        let segments = split_segments(shift, &parsed.intervals, blocked);
+        let blocked = crossing
+            || !absences.issues.is_empty()
+            || parsed
+                .issues
+                .iter()
+                .any(|i| i.code != ParseIssueCode::DuplicateUniInterval);
+        let segments = split_segments(shift, &parsed.intervals, &absences.parts, blocked);
+        let mut absent_segments = BTreeSet::new();
         for (index, segment) in segments.iter().enumerate() {
+            if segment.absence.is_some() {
+                absent_segments.insert(segment_step("mithf.report_sick", index));
+            }
             plan_segment(
-                request, shift, mapping, &records, index, segment, blocked, moves, &mut items,
+                request, shift, &records, index, segment, blocked, &healthy, moves, &mut items,
             );
         }
         for record in &records {
@@ -173,6 +205,12 @@ fn plan_shifts(
                 .step_key
                 .split_once('#')
                 .unwrap_or((&record.step_key, ""));
+            if base == "mithf.report_sick" && !absent_segments.contains(&record.step_key) {
+                let mut removed = item(shift, PlanSystem::Mithf, &record.step_key, Outcome::Review, "MitHF has the helper reported absent, but the source no longer has that absence; no undo planned", "absence_removed");
+                removed.payload = record.synced_payload.clone();
+                removed.destination_id = record.destination_id.clone();
+                items.push(removed);
+            }
             if base != "mithf.create_shift" {
                 continue;
             }
@@ -195,53 +233,74 @@ fn plan_shifts(
             if !request.config.duos_enabled {
                 continue;
             }
+            // The SPS hours belong to whoever works them: the substitute
+            // during an absence, the planned helper otherwise.
+            let worker = segments
+                .iter()
+                .find(|s| s.absence.is_none() && s.intervals.iter().any(|i| i.key == sps.key))
+                .map_or(mapping, |s| helper(request.config, s.helper));
             let key = format!("duos.interval:{}", sps.key);
             expected_steps.insert(key.clone());
             let expected = DuosRegistration {
                 id: String::new(),
                 arrangement_id: request.config.duos_arrangement_id.clone(),
-                employee_number: mapping.duos_employee_number.clone(),
+                employee_number: worker.duos_employee_number.clone(),
                 registration_type: request.config.duos_registration_type.clone(),
                 starts_at: sps.interval.starts_at,
                 ends_at: sps.interval.ends_at,
                 status_id: 0,
             };
-            let mut planned = if blocked {
-                item(shift, PlanSystem::Duos, &key, Outcome::Review, "DUOS write is blocked because another SPS instruction on this shift could not be resolved safely", "source_issue")
-            } else if expected.arrangement_id.is_empty() || expected.registration_type.is_empty() {
-                item(
-                    shift,
-                    PlanSystem::Duos,
-                    &key,
-                    Outcome::Review,
-                    "DUOS arrangement and registration type must be confirmed in configuration",
-                    "missing_configuration",
-                )
-            } else {
-                let reconciled = reconcile_duos(
-                    &expected,
-                    record(&records, &key),
-                    &request.destination.duos_registrations,
-                    &owned_by_others(&records, "duos.interval:", &key),
-                );
-                let mut planned = item(
-                    shift,
-                    PlanSystem::Duos,
-                    &key,
-                    reconciled.outcome,
-                    &reconciled.summary,
-                    reconciled.reason,
-                );
-                planned.destination_id = reconciled.matched.map(|m| m.id.clone());
-                planned
+            items.push(plan_duos(
+                request, shift, &records, &key, &expected, blocked,
+            ));
+            let Some(part) = absences.parts.iter().find(|p| {
+                p.interval.starts_at <= sps.interval.starts_at
+                    && sps.interval.ends_at <= p.interval.ends_at
+            }) else {
+                continue;
             };
-            planned.payload = duos_payload(&expected);
-            items.push(planned);
+            if blocked {
+                continue;
+            }
+            // The absent helper's missed SPS hours, registered with the type
+            // setup chose for this reason.
+            let key = format!("duos.absence:{}", sps.key);
+            let duos = request
+                .config
+                .absences
+                .iter()
+                .find(|m| m.reason == part.reason)
+                .map_or(&DuosAbsence::Unset, |m| &m.duos);
+            match duos {
+                DuosAbsence::Skip => {}
+                DuosAbsence::Unset => {
+                    expected_steps.insert(key.clone());
+                    let mut unset = item(
+                        shift,
+                        PlanSystem::Duos,
+                        &key,
+                        Outcome::Review,
+                        "Choose how DUOS registers this absence in setup",
+                        "absence_duos_type",
+                    );
+                    unset.payload = object(json!({"reason": part.reason}));
+                    items.push(unset);
+                }
+                DuosAbsence::Type(registration_type) => {
+                    expected_steps.insert(key.clone());
+                    let expected = DuosRegistration {
+                        employee_number: mapping.duos_employee_number.clone(),
+                        registration_type: registration_type.clone(),
+                        ..expected
+                    };
+                    items.push(plan_duos(
+                        request, shift, &records, &key, &expected, blocked,
+                    ));
+                }
+            }
         }
         for record in &records {
-            if record.step_key.starts_with("duos.interval:")
-                && !expected_steps.contains(&record.step_key)
-            {
+            if record.step_key.starts_with("duos.") && !expected_steps.contains(&record.step_key) {
                 let mut removed = item(shift, PlanSystem::Duos, &record.step_key, Outcome::Review, "Previously synchronized SPS interval is no longer in the source; no destructive action planned", "removed_from_source");
                 removed.payload = record.synced_payload.clone();
                 removed.destination_id = record.destination_id.clone();
@@ -268,20 +327,85 @@ fn payload_interval(payload: &Map<String, Value>) -> TimeInterval {
 struct Segment<'a> {
     starts_at: DateTime<FixedOffset>,
     ends_at: DateTime<FixedOffset>,
-    intervals: &'a [SpsInterval],
+    intervals: Vec<&'a SpsInterval>,
+    /// Source key of the helper who works the segment, or, when `absence` is
+    /// set, of the planned helper MitHF reports absent for it.
+    helper: &'a str,
+    absence: Option<AbsenceReason>,
 }
 
+/// Without absences, one segment per SPS interval as before. An absence
+/// becomes the planned helper's segment, reported absent, followed by the
+/// substitute's segments; the hours around it stay the planned helper's.
 fn split_segments<'a>(
-    shift: &SourceShift,
+    shift: &'a SourceShift,
     intervals: &'a [SpsInterval],
+    parts: &'a [AbsencePart],
     blocked: bool,
 ) -> Vec<Segment<'a>> {
     // An unresolved instruction must never move a shift boundary.
+    if blocked || parts.is_empty() {
+        let all = intervals.iter().collect();
+        return worked(
+            shift.starts_at,
+            shift.ends_at,
+            all,
+            &shift.helper_key,
+            blocked,
+        );
+    }
+    let mut runs = Vec::new();
+    let mut cursor = shift.starts_at;
+    for part in parts {
+        if cursor < part.interval.starts_at {
+            runs.push((cursor, part.interval.starts_at, None));
+        }
+        runs.push((part.interval.starts_at, part.interval.ends_at, Some(part)));
+        cursor = part.interval.ends_at;
+    }
+    if cursor < shift.ends_at {
+        runs.push((cursor, shift.ends_at, None));
+    }
+    let mut segments = Vec::new();
+    for (starts_at, ends_at, part) in runs {
+        let inside = intervals
+            .iter()
+            .filter(|sps| starts_at <= sps.interval.starts_at && sps.interval.starts_at < ends_at)
+            .collect();
+        let helper = match part {
+            None => shift.helper_key.as_str(),
+            Some(part) => {
+                segments.push(Segment {
+                    starts_at,
+                    ends_at,
+                    intervals: vec![],
+                    helper: &shift.helper_key,
+                    absence: Some(part.reason),
+                });
+                part.substitute.as_str()
+            }
+        };
+        segments.extend(worked(starts_at, ends_at, inside, helper, false));
+    }
+    segments
+}
+
+/// One helper's time, cut at each further SPS start so every MitHF shift
+/// carries at most one SPS interval.
+fn worked<'a>(
+    starts_at: DateTime<FixedOffset>,
+    ends_at: DateTime<FixedOffset>,
+    intervals: Vec<&'a SpsInterval>,
+    helper: &'a str,
+    blocked: bool,
+) -> Vec<Segment<'a>> {
     if blocked || intervals.len() <= 1 {
         return vec![Segment {
-            starts_at: shift.starts_at,
-            ends_at: shift.ends_at,
+            starts_at,
+            ends_at,
             intervals,
+            helper,
+            absence: None,
         }];
     }
     intervals
@@ -289,33 +413,139 @@ fn split_segments<'a>(
         .enumerate()
         .map(|(index, sps)| Segment {
             starts_at: if index == 0 {
-                shift.starts_at
+                starts_at
             } else {
                 sps.interval.starts_at
             },
             ends_at: intervals
                 .get(index + 1)
                 .map(|next| next.interval.starts_at)
-                .unwrap_or(shift.ends_at),
-            intervals: &intervals[index..index + 1],
+                .unwrap_or(ends_at),
+            intervals: vec![*sps],
+            helper,
+            absence: None,
         })
         .collect()
+}
+
+/// An SPS interval that an absence boundary cuts through cannot be given to
+/// either helper without guessing.
+fn crosses_absence(sps: &TimeInterval, parts: &[AbsencePart]) -> bool {
+    parts.iter().any(|part| {
+        [part.interval.starts_at, part.interval.ends_at]
+            .iter()
+            .any(|edge| sps.starts_at < *edge && *edge < sps.ends_at)
+    })
+}
+
+/// Absence lines only name mapped helpers, so a segment's helper always has one.
+fn helper<'a>(config: &'a PlanningConfig, key: &str) -> &'a HelperMapping {
+    config
+        .helpers
+        .get(key)
+        .expect("segments only name mapped helpers")
+}
+
+fn issue_item(shift: &SourceShift, prefix: &str, issue: &ParseIssue) -> PlanItem {
+    let code = serde_json::to_value(issue.code).expect("issue codes serialize as strings");
+    let code = code.as_str().unwrap();
+    item(
+        shift,
+        PlanSystem::Source,
+        &format!("{prefix}:{}:{code}", issue.source_id),
+        Outcome::Review,
+        &issue.message,
+        code,
+    )
+}
+
+fn plan_duos(
+    request: &PlanRequest<'_>,
+    shift: &SourceShift,
+    records: &[StepRecord],
+    key: &str,
+    expected: &DuosRegistration,
+    blocked: bool,
+) -> PlanItem {
+    let mut planned = if blocked {
+        item(shift, PlanSystem::Duos, key, Outcome::Review, "DUOS write is blocked because another SPS instruction on this shift could not be resolved safely", "source_issue")
+    } else if expected.arrangement_id.is_empty() || expected.registration_type.is_empty() {
+        item(
+            shift,
+            PlanSystem::Duos,
+            key,
+            Outcome::Review,
+            "DUOS arrangement and registration type must be confirmed in configuration",
+            "missing_configuration",
+        )
+    } else {
+        let reconciled = reconcile_duos(
+            expected,
+            record(records, key),
+            &request.destination.duos_registrations,
+            &owned_by_others(records, "duos.", key),
+        );
+        let mut planned = item(
+            shift,
+            PlanSystem::Duos,
+            key,
+            reconciled.outcome,
+            &reconciled.summary,
+            reconciled.reason,
+        );
+        planned.destination_id = reconciled.matched.map(|m| m.id.clone());
+        planned
+    };
+    planned.payload = duos_payload(expected);
+    planned
 }
 
 #[allow(clippy::too_many_arguments)]
 fn plan_segment(
     request: &PlanRequest<'_>,
     shift: &SourceShift,
-    mapping: &HelperMapping,
     records: &[StepRecord],
     index: usize,
     segment: &Segment<'_>,
     blocked: bool,
+    healthy: &[MitHfShift],
     moves: &Moves,
     items: &mut Vec<PlanItem>,
 ) {
     use Outcome::*;
+    let mapping = helper(request.config, segment.helper);
     let shift_key = segment_step("mithf.create_shift", index);
+    let candidates = if segment.absence.is_some() {
+        &request.destination.mithf_shifts[..]
+    } else {
+        healthy
+    };
+    // MitHF says this helper was absent here, but the source says they
+    // worked. Creating another shift beside the sick one would double it.
+    if segment.absence.is_none()
+        && request.destination.mithf_shifts.iter().any(|s| {
+            s.sick
+                && s.helper_name.as_ref() == Some(&mapping.mithf_name)
+                && s.starts_at < segment.ends_at
+                && s.ends_at > segment.starts_at
+        })
+    {
+        let mut sick = item(
+            shift,
+            PlanSystem::Mithf,
+            &shift_key,
+            Review,
+            "MitHF has the helper reported absent here, but the source has no absence line",
+            "absent_in_mithf",
+        );
+        sick.payload = shift_payload(
+            segment.starts_at,
+            segment.ends_at,
+            request.config.default_helper_count,
+        );
+        items.push(sick);
+        return;
+    }
     let moved: HashMap<_, _> = moves
         .iter()
         .filter(|(_, m)| m.source_key != shift.key() || m.step_key != shift_key)
@@ -329,7 +559,7 @@ fn plan_segment(
         request.config.default_helper_count,
         &mapping.mithf_name,
         record(records, &shift_key),
-        &request.destination.mithf_shifts,
+        candidates,
         &owned_by_others(records, "mithf.create_shift", &shift_key),
         &moved,
     );
@@ -401,6 +631,47 @@ fn plan_segment(
     let assignment_outcome = assignment.outcome;
     items.push(assignment);
 
+    if let Some(reason) = segment.absence {
+        let key = segment_step("mithf.report_sick", index);
+        let expected = object(json!({"helper_name": mapping.mithf_name, "reason": reason}));
+        let (outcome, summary, why) =
+            if reconciled.outcome == Conflicted || assignment_outcome == Conflicted {
+                (
+                    Conflicted,
+                    "The absence is blocked by the shift or helper conflict",
+                    "blocked_by_shift",
+                )
+            } else if matched.is_some_and(|m| m.sick) {
+                // MitHF does not show the reason, so only a recorded one can
+                // tell that the source changed it afterwards.
+                if record(records, &key).is_some_and(|r| r.synced_payload != expected) {
+                    (
+                        Review,
+                        "The absence reason changed after MitHF was told; change it in MitHF",
+                        "absence_reason_changed",
+                    )
+                } else {
+                    (
+                        AlreadyMatched,
+                        "MitHF already has the helper reported absent",
+                        "",
+                    )
+                }
+            } else if request.live {
+                (WouldCreate, "Would report the helper absent in MitHF", "")
+            } else {
+                (
+                    PendingIntegration,
+                    "The absence requires applying; live destination integration was not selected",
+                    "offline_preview",
+                )
+            };
+        let mut absent = item(shift, PlanSystem::Mithf, &key, outcome, summary, why);
+        absent.payload = expected;
+        absent.destination_id = destination_id.clone();
+        items.push(absent);
+    }
+
     let sps_record = record(records, &sps_key);
     if !segment.intervals.is_empty() {
         let mut expected: Vec<_> = segment
@@ -458,6 +729,21 @@ fn plan_segment(
         sps.payload = expected_payload;
         sps.destination_id = destination_id.clone();
         items.push(sps);
+    } else if segment.absence.is_some() {
+        // SPS moves to the substitute's shift. MitHF would count it twice if
+        // it stayed on the absent helper's, and the app never deletes.
+        if matched.is_some_and(|m| !m.sps_intervals.is_empty()) {
+            let mut stale = item(
+                shift,
+                PlanSystem::Mithf,
+                &sps_key,
+                Review,
+                "SPS is still on the absent helper's MitHF shift; remove it there",
+                "sps_on_absent_shift",
+            );
+            stale.destination_id = destination_id.clone();
+            items.push(stale);
+        }
     } else if let Some(record) = sps_record {
         let mut removed = item(
             shift,
@@ -472,7 +758,9 @@ fn plan_segment(
         items.push(removed);
     }
 
-    if let SourceTitle::Meeting(category) = classify_source_title(&shift.title) {
+    if let (SourceTitle::Meeting(category), None) =
+        (classify_source_title(&shift.title), segment.absence)
+    {
         let key = segment_step("mithf.set_meeting", index);
         let expected = [TimeInterval {
             starts_at: segment.starts_at,

@@ -193,9 +193,10 @@ pub async fn apply_plan_controlled(
                 .step_key
                 .split_once('#')
                 .unwrap_or((&item.step_key, ""));
-            if base == "mithf.assign_helper" {
-                // Booking can replace a MitHF shift ID. Preserve the parent
-                // payload/hash, but follow that segment's newly returned ID.
+            if matches!(base, "mithf.assign_helper" | "mithf.report_sick") {
+                // Booking or reporting a helper absent can replace a MitHF
+                // shift ID. Preserve the parent payload/hash, but follow that
+                // segment's newly returned ID.
                 let parent_key = if suffix.is_empty() {
                     "mithf.create_shift".into()
                 } else {

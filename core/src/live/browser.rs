@@ -18,7 +18,7 @@ fn write_allowed(service: Service, action: &str) -> bool {
     match service {
         Service::Mithf => matches!(
             action,
-            "opret" | "rettid" | "book" | "tilfoejreg" | "retreg"
+            "opret" | "rettid" | "book" | "tilfoejreg" | "retreg" | "sygemeld"
         ),
         // The citizen saves a pending registration. Only the helper can accept it,
         // and this transport exposes no DUOS acceptance action.

@@ -352,6 +352,9 @@ fn block_body<'a, M: 'a>(block: &'a Block) -> Element<'a, M> {
     if !block.sps_label.is_empty() {
         marks.push("◆ SPS");
     }
+    if !block.absence.is_empty() {
+        marks.push("✚ fravær");
+    }
     if block.standard_time {
         marks.push("standardtid");
     }
@@ -368,6 +371,9 @@ fn block_body<'a, M: 'a>(block: &'a Block) -> Element<'a, M> {
 /// and each change the transfer makes to this shift.
 fn block_details<'a, M: 'a>(block: &'a Block) -> Element<'a, M> {
     let mut facts = vec![block.time_label.as_str(), block.status_label.as_str()];
+    if !block.absence.is_empty() {
+        facts.push(&block.absence);
+    }
     if !block.part_label.is_empty() {
         facts.push(&block.part_label);
     }
