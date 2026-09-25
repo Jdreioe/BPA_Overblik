@@ -1,5 +1,5 @@
 //! Read-only planning. SQLite reads are blocking, so run this off the UI thread.
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use chrono::{DateTime, FixedOffset};
 use serde_json::{json, Map, Value};
@@ -47,14 +47,60 @@ pub fn reconciliation_range(
         })
 }
 
+/// A planned time change of an existing MitHF shift, keyed by its ID.
+struct Move {
+    source_key: String,
+    step_key: String,
+    to: TimeInterval,
+}
+
+type Moves = HashMap<String, Move>;
+
 pub fn build_plan(request: &PlanRequest<'_>, state: &SyncState) -> Result<SyncPlan, PlanningError> {
-    let mut shifts: Vec<_> = request.shifts.iter().collect();
+    let mut shifts: Vec<_> = request
+        .shifts
+        .iter()
+        .filter(|s| s.ends_at > request.range_start && s.starts_at < request.range_end)
+        .collect();
     shifts.sort_by_key(|s| s.starts_at);
-    let mut items = Vec::new();
-    for shift in shifts {
-        if shift.ends_at <= request.range_start || shift.starts_at >= request.range_end {
-            continue;
+    // Plan once to learn which MitHF shifts change time, then again so every
+    // other step is checked against where those will be. The first step to
+    // claim a shift moves it. Shifts whose time changes go first, so a
+    // shortened shift frees its hours before another shift is created in them.
+    let mut items = plan_shifts(request, state, &shifts, &Moves::new())?;
+    let mut moves = Moves::new();
+    for item in &items {
+        if item.outcome == Outcome::WouldUpdate && item.step_key.starts_with("mithf.create_shift") {
+            if let Some(id) = &item.destination_id {
+                moves.entry(id.clone()).or_insert_with(|| Move {
+                    source_key: item.source_key.clone(),
+                    step_key: item.step_key.clone(),
+                    to: payload_interval(&item.payload),
+                });
+            }
         }
+    }
+    if !moves.is_empty() {
+        let movers: BTreeSet<_> = moves.values().map(|m| m.source_key.clone()).collect();
+        shifts.sort_by_key(|s| !movers.contains(&s.key()));
+        items = plan_shifts(request, state, &shifts, &moves)?;
+    }
+    Ok(SyncPlan {
+        starts_at: request.range_start,
+        ends_at: request.range_end,
+        generated_at: request.now,
+        items,
+    })
+}
+
+fn plan_shifts(
+    request: &PlanRequest<'_>,
+    state: &SyncState,
+    shifts: &[&SourceShift],
+    moves: &Moves,
+) -> Result<Vec<PlanItem>, PlanningError> {
+    let mut items = Vec::new();
+    for &shift in shifts {
         if classify_source_title(&shift.title) == SourceTitle::Reminder {
             items.push(item(
                 shift,
@@ -119,7 +165,7 @@ pub fn build_plan(request: &PlanRequest<'_>, state: &SyncState) -> Result<SyncPl
         let segments = split_segments(shift, &parsed.intervals, blocked);
         for (index, segment) in segments.iter().enumerate() {
             plan_segment(
-                request, shift, mapping, &records, index, segment, blocked, &mut items,
+                request, shift, mapping, &records, index, segment, blocked, moves, &mut items,
             );
         }
         for record in &records {
@@ -203,12 +249,20 @@ pub fn build_plan(request: &PlanRequest<'_>, state: &SyncState) -> Result<SyncPl
             }
         }
     }
-    Ok(SyncPlan {
-        starts_at: request.range_start,
-        ends_at: request.range_end,
-        generated_at: request.now,
-        items,
-    })
+    Ok(items)
+}
+
+fn payload_interval(payload: &Map<String, Value>) -> TimeInterval {
+    let time = |key: &str| {
+        payload[key]
+            .as_str()
+            .and_then(|v| DateTime::parse_from_rfc3339(v).ok())
+            .expect("planned shift payloads hold RFC 3339 times")
+    };
+    TimeInterval {
+        starts_at: time("starts_at"),
+        ends_at: time("ends_at"),
+    }
 }
 
 struct Segment<'a> {
@@ -257,19 +311,27 @@ fn plan_segment(
     index: usize,
     segment: &Segment<'_>,
     blocked: bool,
+    moves: &Moves,
     items: &mut Vec<PlanItem>,
 ) {
     use Outcome::*;
     let shift_key = segment_step("mithf.create_shift", index);
+    let moved: HashMap<_, _> = moves
+        .iter()
+        .filter(|(_, m)| m.source_key != shift.key() || m.step_key != shift_key)
+        .map(|(id, m)| (id.clone(), m.to.clone()))
+        .collect();
     let assign_key = segment_step("mithf.assign_helper", index);
     let sps_key = segment_step("mithf.set_sps", index);
     let reconciled = reconcile_mithf(
         segment.starts_at,
         segment.ends_at,
         request.config.default_helper_count,
+        &mapping.mithf_name,
         record(records, &shift_key),
         &request.destination.mithf_shifts,
         &owned_by_others(records, "mithf.create_shift", &shift_key),
+        &moved,
     );
     let matched = reconciled.matched;
     let destination_id = matched.map(|m| m.id.clone());

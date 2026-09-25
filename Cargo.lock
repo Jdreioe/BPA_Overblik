@@ -615,20 +615,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
-name = "calcard"
-version = "0.3.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c601473ec15a875626bce73db1a1f0fc81e9c949ca25f1463b714947c0a70a1f"
-dependencies = [
- "ahash",
- "chrono",
- "chrono-tz",
- "hashify",
- "mail-builder",
- "mail-parser",
-]
-
-[[package]]
 name = "calamine"
 version = "0.36.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -643,6 +629,20 @@ dependencies = [
  "quick-xml",
  "serde",
  "zip",
+]
+
+[[package]]
+name = "calcard"
+version = "0.3.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c601473ec15a875626bce73db1a1f0fc81e9c949ca25f1463b714947c0a70a1f"
+dependencies = [
+ "ahash",
+ "chrono",
+ "chrono-tz",
+ "hashify",
+ "mail-builder",
+ "mail-parser",
 ]
 
 [[package]]
@@ -5047,8 +5047,8 @@ dependencies = [
 name = "teamup-shift-sync-core"
 version = "0.1.0"
 dependencies = [
- "calcard",
  "calamine",
+ "calcard",
  "chrono",
  "chrono-tz",
  "csv",

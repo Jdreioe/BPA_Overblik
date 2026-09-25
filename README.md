@@ -151,6 +151,13 @@ when a new SPS interval splits a transferred shift, the new part is created
 beside the existing shift that its first part updates, instead of conflicting
 with it.
 
+A MitHF shift entered by hand is adopted and its time changed when it is the
+only shift overlapping the source shift, is already assigned to the same helper,
+and shares the source's start or end. When another helper takes over part of
+it, as when A leaves early and B covers the rest, A's shift is shortened first
+and B's shift is created afterwards. The preview checks B against A's shortened
+time, and shows A's old and new time before approval.
+
 ## Supported SPS instruction grammar
 
 Helper identity is resolved from the confirmed TeamUp-to-destination mappings in

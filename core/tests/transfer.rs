@@ -480,6 +480,104 @@ fn manual_mithf_changes_block_automatic_edits() {
 }
 
 #[test]
+fn a_hand_entered_shift_is_shortened_before_another_helper_takes_its_hours() {
+    // A's Friday-Sunday shift was entered in MitHF by hand. B takes over the
+    // end of it, or the start; either way A's shift changes first.
+    for (a, b) in [
+        (
+            ("2026-09-18T16:00:00+02:00", "2026-09-20T17:30:00+02:00"),
+            ("2026-09-20T17:30:00+02:00", "2026-09-20T20:00:00+02:00"),
+        ),
+        (
+            ("2026-09-18T18:00:00+02:00", "2026-09-20T20:00:00+02:00"),
+            ("2026-09-18T16:00:00+02:00", "2026-09-18T18:00:00+02:00"),
+        ),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut adapter = MemoryDestinations {
+            state_path: temp.path().join("sync.sqlite3"),
+            ..Default::default()
+        };
+        adapter.snapshot.mithf_shifts.push(MitHfShift {
+            id: "manual".into(),
+            starts_at: moment("2026-09-18T16:00:00+02:00"),
+            ends_at: moment("2026-09-20T20:00:00+02:00"),
+            helper_count: 1,
+            helper_name: Some("Mit A".into()),
+            sps_intervals: vec![],
+            meeting_intervals: vec![],
+            sps_record_ids: vec![],
+            meeting_record_ids: vec![],
+        });
+        let mut request = request();
+        request.config = serde_json::from_value(json!({
+            "timezone": "Europe/Copenhagen", "default_helper_count": 1,
+            "duos_arrangement_id": "arrangement", "duos_registration_type": "Almindelig",
+            "helpers": {"a": {"mithf_name": "Mit A", "duos_employee_number": "1"},
+                        "b": {"mithf_name": "Mit B", "duos_employee_number": "2"}}}))
+        .unwrap();
+        request.shifts = [("a", a), ("b", b)]
+            .map(|(helper, (starts_at, ends_at))| {
+                serde_json::from_value(json!({
+                    "calendar_id": "calendar", "event_id": helper, "occurrence_id": helper,
+                    "title": "Shift", "helper_key": helper,
+                    "starts_at": starts_at, "ends_at": ends_at}))
+                .unwrap()
+            })
+            .into();
+
+        let preview = preview_plan(&request, &adapter);
+        let outcomes: Vec<_> = preview
+            .items
+            .iter()
+            .map(|i| (i.source_key.as_str(), i.step_key.as_str(), i.outcome))
+            .collect();
+        assert_eq!(
+            outcomes,
+            [
+                ("calendar:a:a", "mithf.create_shift", Outcome::WouldUpdate),
+                (
+                    "calendar:a:a",
+                    "mithf.assign_helper",
+                    Outcome::AlreadyMatched
+                ),
+                ("calendar:b:b", "mithf.create_shift", Outcome::WouldCreate),
+                ("calendar:b:b", "mithf.assign_helper", Outcome::WouldCreate),
+            ]
+        );
+        assert_eq!(preview.items[0].destination_id.as_deref(), Some("manual"));
+        approve(&mut request, &adapter);
+        runtime()
+            .block_on(apply_plan(
+                request,
+                adapter.state_path.clone(),
+                &mut adapter,
+                |_| {},
+            ))
+            .unwrap();
+        assert_eq!(
+            adapter.writes,
+            [
+                "mithf.create_shift",
+                "mithf.create_shift",
+                "mithf.assign_helper"
+            ]
+        );
+        let shift = |name: &str| {
+            let s = adapter
+                .snapshot
+                .mithf_shifts
+                .iter()
+                .find(|s| s.helper_name.as_deref() == Some(name))
+                .unwrap();
+            (s.starts_at, s.ends_at)
+        };
+        assert_eq!(shift("Mit A"), (moment(a.0), moment(a.1)));
+        assert_eq!(shift("Mit B"), (moment(b.0), moment(b.1)));
+    }
+}
+
+#[test]
 fn split_transfers_verify_changed_ids_and_repeat_without_writes() {
     let temp = tempfile::tempdir().unwrap();
     let mut adapter = MemoryDestinations {

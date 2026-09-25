@@ -1,10 +1,10 @@
 //! Destination identity and conflict rules shared by each planned segment.
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use chrono::{DateTime, FixedOffset};
 use serde_json::{json, Map, Value};
 
-use crate::{state::isoformat, DuosRegistration, MitHfShift, Outcome, StepRecord};
+use crate::{state::isoformat, DuosRegistration, MitHfShift, Outcome, StepRecord, TimeInterval};
 
 pub(crate) struct Reconciled<'a, T> {
     pub matched: Option<&'a T>,
@@ -52,13 +52,24 @@ pub(crate) fn duos_payload(item: &DuosRegistration) -> Map<String, Value> {
 /// A step without its own record never mistakes them for a duplicate or an
 /// overlap: their own steps move, match or block them first, as when a new SPS
 /// interval splits a transferred shift into more parts.
+///
+/// `moved` holds shifts that other steps change to the given times; those steps
+/// run first. They are checked where they will be, so a helper taking over the
+/// end of another's shift is created after that shift is shortened.
+///
+/// Without a record, the one overlapping shift is adopted and its time changed
+/// when it is already `helper_name`'s and shares the source's start or end:
+/// the same shift entered by hand, then shortened or extended in the source.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn reconcile_mithf<'a>(
     starts_at: DateTime<FixedOffset>,
     ends_at: DateTime<FixedOffset>,
     helper_count: i64,
+    helper_name: &str,
     record: Option<&StepRecord>,
     candidates: &'a [MitHfShift],
     owned: &BTreeSet<String>,
+    moved: &HashMap<String, TimeInterval>,
 ) -> Reconciled<'a, MitHfShift> {
     use Outcome::*;
     let expected = shift_payload(starts_at, ends_at, helper_count);
@@ -97,6 +108,7 @@ pub(crate) fn reconcile_mithf<'a>(
     }
     let foreign = || candidates.iter().filter(|c| !owned.contains(&c.id));
     let exact: Vec<_> = foreign()
+        .filter(|c| !moved.contains_key(&c.id))
         .filter(|c| shift_payload(c.starts_at, c.ends_at, c.helper_count) == expected)
         .collect();
     if exact.len() == 1 {
@@ -127,8 +139,27 @@ pub(crate) fn reconcile_mithf<'a>(
         );
     }
     let overlapping: Vec<_> = foreign()
-        .filter(|c| c.starts_at < ends_at && c.ends_at > starts_at)
+        .filter(|c| {
+            let (from, to) = moved
+                .get(&c.id)
+                .map_or((c.starts_at, c.ends_at), |i| (i.starts_at, i.ends_at));
+            from < ends_at && to > starts_at
+        })
         .collect();
+    if let [shift] = overlapping[..] {
+        if !moved.contains_key(&shift.id)
+            && shift.helper_name.as_deref() == Some(helper_name)
+            && shift.helper_count == helper_count
+            && (shift.starts_at == starts_at || shift.ends_at == ends_at)
+        {
+            return result(
+                Some(shift),
+                WouldUpdate,
+                "The helper's MitHF shift was entered by hand; its time would change to match the source",
+                "",
+            );
+        }
+    }
     if !overlapping.is_empty() {
         return result(None, Conflicted, format!("Existing MitHF shifts overlap the source interval {} to {}; review split or changed shifts before creating another: {}", isoformat(starts_at), isoformat(ends_at), describe_shifts(overlapping)), "overlapping");
     }
