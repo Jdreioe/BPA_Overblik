@@ -8,6 +8,7 @@ use teamup_shift_sync_core::ical::{HelperRule, TitlePart};
 use teamup_shift_sync_core::live::Service;
 use teamup_shift_sync_core::sheets::SheetLayout;
 use teamup_shift_sync_core::standard_time::StandardTimes;
+use teamup_shift_sync_core::{AbsenceMarking, AbsenceReason, DuosAbsence};
 use teamup_shift_sync_gui::protocol::{Notice, Tone};
 
 use crate::template::{self, Template};
@@ -50,6 +51,8 @@ pub struct SetupState {
     /// Titles shown as markers instead of planned as shifts.
     #[serde(default = "default_markers")]
     pub markers: Vec<String>,
+    #[serde(default = "teamup_shift_sync_core::default_absences")]
+    pub absences: Vec<AbsenceMarking>,
     pub calendars: Vec<Choice>,
     pub arrangements: Vec<Choice>,
     pub types: Vec<Choice>,
@@ -97,6 +100,9 @@ pub enum Message {
     MarkerDraft(String),
     AddMarker,
     RemoveMarker(usize),
+    AbsenceWords(AbsenceReason, String),
+    AbsenceDuos(AbsenceReason, DuosChoice),
+    SaveAbsences,
     Connect,
     ConnectSheets,
     IcalLink(usize, String),
@@ -162,6 +168,12 @@ const STANDARD_DAY_IDS: [&str; 7] = [
 const SOURCE_LINK_ID: &str = "source-link";
 const ICAL_SEPARATOR_ID: &str = "ical-separator";
 const MARKER_DRAFT_ID: &str = "marker-draft";
+const ABSENCE_WORD_IDS: [&str; 4] = [
+    "absence-own-illness",
+    "absence-child-illness",
+    "absence-work-injury",
+    "absence-other",
+];
 const TEAMUP_KEY_ID: &str = "teamup-key";
 
 #[derive(Default)]
@@ -182,6 +194,9 @@ pub struct SetupUi {
     pub standard_days: [String; 7],
     /// A marker title being typed, not saved until added.
     pub marker_draft: String,
+    /// Each absence reason's words as typed, comma separated, in
+    /// [`AbsenceReason::ALL`] order. Saved on Enter or **Gem ord**.
+    pub absence_words: [String; 4],
     /// Calendars the person reopened for editing. A row shows dropdowns
     /// while it is ambiguous (no match yet) or reopened here; a unique
     /// suggestion otherwise renders as plain text. Nothing is confirmed
@@ -355,6 +370,132 @@ impl SetupUi {
         content
             .push(text(self.error.as_deref().unwrap_or("")).size(13))
             .push(text("Gyldige tider gemmes automatisk.").size(12))
+            .into()
+    }
+
+    /// Show the absence words of a state about to replace `self.state`,
+    /// except in a field the person is still editing: one whose text is
+    /// neither what was saved before nor what was just saved.
+    pub fn load_absences(&mut self, after: &SetupState) {
+        for (index, reason) in AbsenceReason::ALL.iter().enumerate() {
+            let saved = |state: &SetupState| words_text(&state.absences, *reason);
+            let typed = &self.absence_words[index];
+            let tidy = typed
+                .split(',')
+                .map(|w| w.split_whitespace().collect::<Vec<_>>().join(" "))
+                .filter(|w| !w.is_empty())
+                .collect::<Vec<_>>()
+                .join(", ");
+            if tidy == saved(after) || self.state.as_ref().is_none_or(|b| *typed == saved(b)) {
+                self.absence_words[index] = saved(after);
+            }
+        }
+    }
+
+    /// The saved markings with the typed words and, if given, one changed
+    /// DUOS choice. The engine validates and cleans them.
+    pub fn absences(&self, changed: Option<(AbsenceReason, DuosAbsence)>) -> Vec<AbsenceMarking> {
+        let saved = self
+            .state
+            .as_ref()
+            .map_or_else(teamup_shift_sync_core::default_absences, |s| {
+                s.absences.clone()
+            });
+        AbsenceReason::ALL
+            .iter()
+            .enumerate()
+            .map(|(index, reason)| {
+                let duos = match &changed {
+                    Some((which, duos)) if which == reason => duos.clone(),
+                    _ => saved
+                        .iter()
+                        .find(|m| m.reason == *reason)
+                        .map(|m| m.duos.clone())
+                        .unwrap_or_default(),
+                };
+                AbsenceMarking {
+                    reason: *reason,
+                    words: self.absence_words[index]
+                        .split(',')
+                        .map(str::to_owned)
+                        .collect(),
+                    duos,
+                }
+            })
+            .collect()
+    }
+
+    /// One row per MitHF absence reason: the words that start its lines and,
+    /// with DUOS on, how the absent helper's SPS hours are registered.
+    pub fn absences_view(&self) -> Element<'_, Message> {
+        let Some(state) = &self.state else {
+            return column![].into();
+        };
+        let edited = AbsenceReason::ALL
+            .iter()
+            .enumerate()
+            .any(|(index, reason)| {
+                self.absence_words[index] != words_text(&state.absences, *reason)
+            });
+        let mut content = column![
+            text("Fravær").size(20),
+            text("Skriv en linje i vagtens noter eller kommentarer, når en anden tog vagten. »SYG: Anna« gælder hele vagten, »SYG 8-12: Anna« kun det tidsrum. Den planlagte hjælper meldes syg i MitHF, og Anna sættes på vagten.").size(13),
+        ]
+        .spacing(12);
+        let duos_choices: Vec<DuosChoice> = std::iter::once(DuosChoice::skip())
+            .chain(state.types.iter().map(DuosChoice::of))
+            .collect();
+        for (index, reason) in AbsenceReason::ALL.iter().enumerate() {
+            let reason = *reason;
+            let mut row_content = column![
+                text(format!("MitHF: {}", reason.label()))
+                    .size(14)
+                    .font(iced::Font {
+                        weight: iced::font::Weight::Bold,
+                        ..iced::Font::DEFAULT
+                    }),
+                text_input("Ingen ord – slået fra", &self.absence_words[index])
+                    .id(iced::widget::Id::new(ABSENCE_WORD_IDS[index]))
+                    .on_input(move |value| Message::AbsenceWords(reason, value))
+                    .on_submit(Message::SaveAbsences)
+                    .padding(10)
+                    .width(Length::Fixed(360.0)),
+            ]
+            .spacing(6);
+            if state.duos_enabled && !state.types.is_empty() {
+                let current = state
+                    .absences
+                    .iter()
+                    .find(|m| m.reason == reason)
+                    .map(|m| &m.duos);
+                let chosen = duos_choices
+                    .iter()
+                    .find(|c| Some(&c.value) == current)
+                    .cloned();
+                row_content = row_content.push(
+                    row![
+                        text("DUOS-type for den syges SPS-timer")
+                            .size(13)
+                            .width(Length::Fixed(230.0)),
+                        pick_list(duos_choices.clone(), chosen, move |choice| {
+                            Message::AbsenceDuos(reason, choice)
+                        })
+                        .placeholder("Vælg type"),
+                    ]
+                    .spacing(10)
+                    .align_y(iced::alignment::Vertical::Center),
+                );
+            }
+            content = content.push(row_content);
+        }
+        content
+            .push(
+                text("Adskil flere ord med komma. Store og små bogstaver er ligegyldige.").size(12),
+            )
+            .push(
+                quiet_button("Gem ord", Message::SaveAbsences)
+                    .on_press_maybe(edited.then_some(Message::SaveAbsences)),
+            )
             .into()
     }
 
@@ -917,6 +1058,41 @@ fn quiet_button<'a>(label: &'a str, message: Message) -> iced::widget::Button<'a
         .on_press(message)
 }
 
+fn words_text(markings: &[AbsenceMarking], reason: AbsenceReason) -> String {
+    markings
+        .iter()
+        .find(|m| m.reason == reason)
+        .map(|m| m.words.join(", "))
+        .unwrap_or_default()
+}
+
+/// A DUOS absence choice in the dropdown: a type of the arrangement, or not
+/// registering the absent helper's hours at all.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DuosChoice {
+    label: String,
+    pub value: DuosAbsence,
+}
+impl DuosChoice {
+    fn skip() -> Self {
+        Self {
+            label: "Registreres ikke".into(),
+            value: DuosAbsence::Skip,
+        }
+    }
+    fn of(choice: &Choice) -> Self {
+        Self {
+            label: choice.name.clone(),
+            value: DuosAbsence::Type(choice.id.clone()),
+        }
+    }
+}
+impl std::fmt::Display for DuosChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
+    }
+}
+
 fn find(choices: &[Choice], id: &str) -> Option<Choice> {
     choices.iter().find(|c| c.id == id).cloned()
 }
@@ -966,6 +1142,7 @@ mod tests {
             sheet_tabs: vec![],
             standard_times: Default::default(),
             markers: vec![],
+            absences: teamup_shift_sync_core::default_absences(),
             duos_enabled: true,
             stage: "mappings".into(),
             calendars: vec![

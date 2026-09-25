@@ -110,6 +110,7 @@ pub fn preview(
                 HelperMapping {
                     mithf_name: helper.mithf_name,
                     duos_employee_number: helper.duos_employee_number,
+                    source_name: String::new(),
                 },
             )
             .is_some()
@@ -124,6 +125,7 @@ pub fn preview(
         duos_registration_type: config.duos.registration_type,
         duos_enabled: config.duos_enabled,
         helpers,
+        absences: crate::default_absences(),
     };
     let (range_start, range_end) = resolve_range(config.timezone, from, to, now)?;
     let fixture: Fixture = serde_json::from_str(

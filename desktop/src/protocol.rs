@@ -20,6 +20,10 @@ pub struct Block {
     pub time_label: String,
     pub sps_label: String,
     pub part_label: String,
+    /// MitHF's reason when this is the planned helper's shift reported
+    /// absent, such as "Egen sygdom"; empty otherwise.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub absence: String,
     #[serde(default, skip_serializing_if = "is_false")]
     pub standard_time: bool,
     pub continues_before: bool,
@@ -72,6 +76,7 @@ pub struct Attention {
 pub enum SettingsLink {
     Helpers,
     Integrations,
+    Absences,
 }
 
 /// How a notice reads at a glance. The card shows it as an icon and text as

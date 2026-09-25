@@ -17,6 +17,7 @@ use super::{
     ical, rows, sheets, teamup, text, BrowserSessions, LiveError, INVALID,
 };
 use crate::standard_time::StandardTimes;
+use crate::{AbsenceMarking, DuosAbsence};
 
 const UNREADABLE: LiveError =
     LiveError("Den gemte opsætning kunne ikke læses. Gendan setup.json fra din sikkerhedskopi.");
@@ -99,6 +100,7 @@ fn defaults() -> Value {
         "duos_enabled": true,
         "standard_times": {"everyday": "", "weekdays": {}},
         "markers": super::config::DEFAULT_MARKERS,
+        "absences": crate::default_absences(),
         "arrangements": [], "types": [], "mithf": [], "duos": [], "mappings": [],
         "arrangement": "", "registration_type": "", "account": "", "catalog": null,
     })
@@ -138,6 +140,20 @@ impl Setup {
     /// Replace the titles that count as calendar markers.
     pub fn set_markers(&mut self, titles: &[String]) -> Result<(), LiveError> {
         self.data["markers"] = json!(crate::marker_titles(titles).map_err(LiveError)?);
+        self.save()
+    }
+    /// Replace the absence markings. A DUOS type must be one the chosen
+    /// arrangement offers.
+    pub fn set_absences(&mut self, markings: &[AbsenceMarking]) -> Result<(), LiveError> {
+        let cleaned = crate::absence_markings(markings).map_err(LiveError)?;
+        for marking in &cleaned {
+            if let DuosAbsence::Type(id) = &marking.duos {
+                selected(&self.data["types"], &json!(id)).map_err(|_| {
+                    LiveError("DUOS-typen findes ikke i den valgte ordning. Vælg en anden.")
+                })?;
+            }
+        }
+        self.data["absences"] = json!(cleaned);
         self.save()
     }
     pub fn duos_enabled(&self) -> bool {
@@ -316,6 +332,7 @@ impl Setup {
         let mut left = self.data.clone();
         let standard_times = left["standard_times"].clone();
         let markers = left.get("markers").cloned();
+        let absences = left.get("absences").cloned();
         if let Some(stage) = resume {
             left["stage"] = stage;
         }
@@ -333,6 +350,9 @@ impl Setup {
         self.data["standard_times"] = standard_times;
         if let Some(markers) = markers {
             self.data["markers"] = markers;
+        }
+        if let Some(absences) = absences {
+            self.data["absences"] = absences;
         }
         if left["credential"].as_str().is_some_and(|c| !c.is_empty()) {
             if let Some(name) = left["source"].as_str() {
@@ -656,6 +676,15 @@ impl Setup {
         // unchanged; otherwise propose again from the fresh catalog.
         if previous != catalog {
             self.data["mappings"] = json!([]);
+            // Another arrangement offers other types; choose absence types again.
+            if let Some(absences) = self.data["absences"].as_array_mut() {
+                for marking in absences {
+                    let id = &marking["duos"]["type"];
+                    if !id.is_null() && selected(&catalog["types"], id).is_err() {
+                        marking["duos"] = json!("unset");
+                    }
+                }
+            }
         }
         self.propose_missing()?;
         self.save()
@@ -831,6 +860,7 @@ mod tests {
                 object.remove("sheet_layout");
                 object.remove("standard_times");
                 object.remove("markers");
+                object.remove("absences");
                 // Check results are returned, no longer saved; see refresh_source.
                 let mut expected = expected.clone();
                 if let Some(object) = expected.as_object_mut() {
@@ -974,6 +1004,28 @@ mod tests {
         assert_eq!(setup.view()["standard_times"]["everyday"], "6-22");
         let restored = Setup::load(dir.path()).unwrap();
         assert_eq!(restored.view()["standard_times"]["everyday"], "6-22");
+    }
+
+    #[test]
+    fn absence_types_must_be_offered_and_are_dropped_with_the_arrangement() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut setup = Setup::load(dir.path()).unwrap();
+        setup.data["types"] =
+            json!([{"id": "0", "name": "Almindelig"}, {"id": "1", "name": "Egen sygdom"}]);
+        let mut markings = crate::default_absences();
+        markings[0].duos = DuosAbsence::Type("9".into());
+        assert!(setup.set_absences(&markings).is_err());
+        markings[0].duos = DuosAbsence::Type("1".into());
+        setup.set_absences(&markings).unwrap();
+        setup.choose_source("sheets").unwrap();
+        let restored = Setup::load(dir.path()).unwrap();
+        assert_eq!(restored.view()["absences"][0]["duos"], json!({"type": "1"}));
+
+        setup.data["catalog"] = json!({"types": []});
+        setup
+            .apply_catalog(json!({"types": [{"id": "0", "name": "Almindelig"}]}), "")
+            .unwrap();
+        assert_eq!(setup.data["absences"][0]["duos"], "unset");
     }
 
     /// A workbook with several tabs is not read until one is chosen, and the

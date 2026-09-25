@@ -60,7 +60,7 @@ on a daylight-saving transition requires correction before transfer.
 Marker titles (below) are never shifts. Ordinary timed shifts keep their own hours.
 Valid times save automatically. Changing the setting revokes approval of the
 currently shown week. **Indstillinger** opens on **Hjælpere**; use its sidebar
-for **Standardtider**, **Markeringer** and **Udbydere**. Under **Udbydere**, the **Vagtplan**
+for **Standardtider**, **Markeringer**, **Fravær** and **Udbydere**. Under **Udbydere**, the **Vagtplan**
 group holds the shift source (only one active at a time) and the **Løn** group
 the MitHF and DUOS services, each with its own login. DUOS registration always
 uses the ordinary shift type.
@@ -224,6 +224,47 @@ start of the next interval: `uni 8-10 & 13-14` on a 07:30-24:00 shift becomes
 parts cover exactly the original hours and leave no gap. An instruction that
 could not be resolved never moves a boundary: the shift stays whole and the
 SPS step is reported for review instead.
+
+## Absence lines
+
+When the planned helper is absent and someone else takes the shift, write one
+line in the event description or a comment, next to any `uni` lines:
+
+```text
+SYG: Anna
+syg anna tog den
+Barn syg 8-12 - Anna
+SYG 2026-09-15 22-2: Anna
+```
+
+The line starts with a word from **Indstillinger → Fravær**. Each MitHF
+reason (Egen sygdom, Barns sygdom, Arbejdsulykke, Andet fravær) has its own
+words, starting with `syg`, `barn syg`, `arbejdsskade` and `fravær`. Case,
+spacing and accents are ignored, and the longest word wins, so `barn syg` is
+never read as `syg`. An optional time follows, in the SPS format, then an
+optional `:` or `-`, then the helper who took the shift. The name may be a
+first name when only one mapped helper has it; trailing words such as `tog den`
+or `tager vagten` are ignored. Without a time the whole shift is covered. A
+shift spanning more than one local date needs a date before the time.
+
+The planned helper's shift for that time is created or kept in MitHF and
+reported absent with MitHF's own **Sygemeld** (`metode=vikar`), which leaves an
+open shift. The substitute is booked on that open shift and gets the SPS
+intervals inside the absence. The hours around a partial absence stay the
+planned helper's. In DUOS, the substitute's SPS hours use the ordinary type.
+The absent helper's missed SPS hours use the type chosen for that reason
+under **Fravær**, or are not registered. The chosen type must be one the DUOS
+arrangement offers.
+
+Lines that start with a marking word but cannot be read are never ignored.
+The same goes for an unknown or ambiguous name, the shift's own helper, a time
+outside the shift, overlapping absences or an SPS interval cut by an absence.
+Each needs correcting before the week can be transferred. MitHF does not show
+the absence reason, so a reason changed after transfer asks for the change in
+MitHF. The app never undoes a sickness. Removing the line after transfer asks
+for the undo in MitHF, as does a sickness reported in MitHF without a line.
+SPS still on the absent helper's MitHF shift has to be removed there first.
+Absence lines are not read from spreadsheets.
 
 ## Tests
 

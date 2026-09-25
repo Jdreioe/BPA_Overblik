@@ -5,7 +5,7 @@ use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::TimeInterval;
+use crate::{AbsenceMarking, TimeInterval};
 
 /// Only the confirmed configuration needed to plan transfers. Credentials and
 /// browser/setup settings belong to the adapters, not to planning.
@@ -18,6 +18,8 @@ pub struct PlanningConfig {
     #[serde(default = "enabled_by_default")]
     pub duos_enabled: bool,
     pub helpers: BTreeMap<String, HelperMapping>,
+    #[serde(default = "crate::default_absences")]
+    pub absences: Vec<AbsenceMarking>,
 }
 
 fn enabled_by_default() -> bool {
@@ -28,6 +30,9 @@ fn enabled_by_default() -> bool {
 pub struct HelperMapping {
     pub mithf_name: String,
     pub duos_employee_number: String,
+    /// The helper's name in the shift source, matched by absence lines.
+    #[serde(default)]
+    pub source_name: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -45,6 +50,9 @@ pub struct MitHfShift {
     pub sps_record_ids: Vec<String>,
     #[serde(default)]
     pub meeting_record_ids: Vec<String>,
+    /// MitHF has reported the booked helper sick on this shift.
+    #[serde(default)]
+    pub sick: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

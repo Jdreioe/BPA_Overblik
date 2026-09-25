@@ -101,6 +101,7 @@ impl Destinations for MemoryDestinations {
                         meeting_intervals: vec![],
                         sps_record_ids: vec![],
                         meeting_record_ids: vec![],
+                        sick: false,
                     });
                 }
                 Some(id)
@@ -133,7 +134,27 @@ impl Destinations for MemoryDestinations {
                 }];
                 Some(shift.id.clone())
             }
-            _ if item.step_key.starts_with("duos.interval:") => {
+            "mithf.report_sick" => {
+                // As MitHF's "Sygemeld" with `vikar`: the booked shift turns
+                // sick and an open shift for a substitute appears beside it.
+                let shift = shifts
+                    .iter_mut()
+                    .find(|s| Some(&s.id) == item.destination_id.as_ref())
+                    .unwrap();
+                shift.sick = true;
+                let open = MitHfShift {
+                    id: format!("open-{}", shift.id),
+                    helper_name: None,
+                    sick: false,
+                    sps_intervals: vec![],
+                    sps_record_ids: vec![],
+                    ..shift.clone()
+                };
+                let id = shift.id.clone();
+                shifts.push(open);
+                Some(id)
+            }
+            _ if item.step_key.starts_with("duos.") => {
                 let registration: DuosRegistration = serde_json::from_value(json!({
                     "id": item.destination_id.clone().unwrap_or_else(|| format!("duos-{}", self.snapshot.duos_registrations.len())),
                     "arrangement_id": payload["arrangement_id"], "employee_number": payload["employee_number"],
@@ -513,6 +534,7 @@ fn a_hand_entered_shift_is_shortened_before_another_helper_takes_its_hours() {
             meeting_intervals: vec![],
             sps_record_ids: vec![],
             meeting_record_ids: vec![],
+            sick: false,
         });
         let mut request = request();
         request.config = serde_json::from_value(json!({
@@ -1027,4 +1049,215 @@ fn competing_apply_stops_before_reading_destinations() {
     assert_eq!(adapter.reads, 0);
     assert!(adapter.writes.is_empty());
     drop(guard);
+}
+
+fn absence_request(notes: &str) -> ApplyRequest {
+    let mut request = request();
+    request.config = serde_json::from_value(json!({
+        "timezone": "Europe/Copenhagen", "default_helper_count": 1,
+        "duos_arrangement_id": "arrangement", "duos_registration_type": "0",
+        "helpers": {
+            "bo": {"mithf_name": "Bo Hansen", "duos_employee_number": "111", "source_name": "Bo"},
+            "anna": {"mithf_name": "Anna Holm", "duos_employee_number": "222", "source_name": "Anna"}
+        },
+        "absences": [
+            {"reason": "own_illness", "words": ["syg"], "duos": {"type": "1"}},
+            {"reason": "child_illness", "words": ["barn syg"], "duos": "skip"},
+            {"reason": "work_injury", "words": [], "duos": "unset"},
+            {"reason": "other_absence", "words": [], "duos": "unset"}
+        ]
+    }))
+    .unwrap();
+    request.shifts[0].helper_key = "bo".into();
+    request.shifts[0].starts_at = moment("2026-09-14T08:00:00+02:00");
+    request.shifts[0].ends_at = moment("2026-09-14T16:00:00+02:00");
+    request.shifts[0].notes = notes.into();
+    request
+}
+
+fn apply(request: &mut ApplyRequest, adapter: &mut MemoryDestinations) {
+    approve(request, adapter);
+    let verified = runtime()
+        .block_on(apply_plan(
+            request.clone(),
+            adapter.state_path.clone(),
+            adapter,
+            |_| {},
+        ))
+        .unwrap();
+    assert!(verified
+        .items
+        .iter()
+        .all(|item| item.outcome == Outcome::AlreadyMatched));
+}
+
+/// Each MitHF shift as (hours, helper, sick, SPS hours), in time order.
+fn mithf_view(adapter: &MemoryDestinations) -> Vec<(String, String, bool, Vec<String>)> {
+    use chrono::Timelike;
+    let hours = |from: DateTime<FixedOffset>, to: DateTime<FixedOffset>| {
+        format!("{}-{}", from.hour(), to.hour())
+    };
+    let mut view: Vec<_> = adapter
+        .snapshot
+        .mithf_shifts
+        .iter()
+        .map(|s| {
+            (
+                hours(s.starts_at, s.ends_at),
+                s.helper_name.clone().unwrap_or_default(),
+                s.sick,
+                s.sps_intervals
+                    .iter()
+                    .map(|i| hours(i.starts_at, i.ends_at))
+                    .collect(),
+            )
+        })
+        .collect();
+    view.sort();
+    view
+}
+
+fn duos_view(adapter: &MemoryDestinations) -> Vec<(String, String)> {
+    let mut view: Vec<_> = adapter
+        .snapshot
+        .duos_registrations
+        .iter()
+        .map(|r| (r.employee_number.clone(), r.registration_type.clone()))
+        .collect();
+    view.sort();
+    view
+}
+
+#[test]
+fn a_partial_absence_reports_the_planned_helper_sick_and_books_the_substitute() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut adapter = MemoryDestinations {
+        state_path: temp.path().join("sync.sqlite3"),
+        ..Default::default()
+    };
+    let mut request = absence_request("uni 13-14\nSYG 12-16: Anna tog den");
+    apply(&mut request, &mut adapter);
+    assert_eq!(
+        mithf_view(&adapter),
+        [
+            (
+                "12-16".into(),
+                "Anna Holm".into(),
+                false,
+                vec!["13-14".into()]
+            ),
+            ("12-16".into(), "Bo Hansen".into(), true, vec![]),
+            ("8-12".into(), "Bo Hansen".into(), false, vec![]),
+        ]
+    );
+    // Anna is paid for the SPS hour she worked; Bo's missed hour is sick pay.
+    assert_eq!(
+        duos_view(&adapter),
+        [("111".into(), "1".into()), ("222".into(), "0".into())]
+    );
+}
+
+#[test]
+fn an_absence_added_after_transfer_turns_the_booked_shift_sick() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut adapter = MemoryDestinations {
+        state_path: temp.path().join("sync.sqlite3"),
+        ..Default::default()
+    };
+    let mut request = absence_request("");
+    apply(&mut request, &mut adapter);
+    let booked = adapter.snapshot.mithf_shifts[0].id.clone();
+    adapter.writes.clear();
+
+    request.shifts[0].notes = "syg anna".into();
+    apply(&mut request, &mut adapter);
+    assert_eq!(
+        adapter.writes,
+        ["mithf.report_sick", "mithf.assign_helper#1"]
+    );
+    assert_eq!(
+        mithf_view(&adapter),
+        [
+            ("8-16".into(), "Anna Holm".into(), false, vec![]),
+            ("8-16".into(), "Bo Hansen".into(), true, vec![]),
+        ]
+    );
+    let sick = adapter
+        .snapshot
+        .mithf_shifts
+        .iter()
+        .find(|s| s.sick)
+        .unwrap();
+    assert_eq!(sick.id, booked);
+}
+
+#[test]
+fn sps_left_on_the_absent_helpers_shift_must_be_removed_first() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut adapter = MemoryDestinations {
+        state_path: temp.path().join("sync.sqlite3"),
+        ..Default::default()
+    };
+    let mut request = absence_request("uni 13-14");
+    apply(&mut request, &mut adapter);
+
+    request.shifts[0].notes = "uni 13-14\nsyg anna".into();
+    let plan = preview_plan(&request, &adapter);
+    let reasons: Vec<_> = plan
+        .items
+        .iter()
+        .filter(|i| i.outcome == Outcome::Review)
+        .map(|i| i.reason.as_str())
+        .collect();
+    assert_eq!(reasons, ["sps_on_absent_shift"]);
+    // The pending SPS registration would move to Anna, Bo's become sick hours.
+    let duos: Vec<_> = plan
+        .items
+        .iter()
+        .filter(|i| i.step_key.starts_with("duos."))
+        .map(|i| {
+            (
+                i.step_key.as_str(),
+                i.outcome,
+                i.payload["employee_number"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        duos,
+        [
+            ("duos.interval:notes:0", Outcome::WouldUpdate, "222"),
+            ("duos.absence:notes:0", Outcome::WouldCreate, "111"),
+        ]
+    );
+}
+
+fn review_reasons(request: &ApplyRequest, adapter: &MemoryDestinations) -> Vec<String> {
+    preview_plan(request, adapter)
+        .items
+        .into_iter()
+        .filter(|i| i.outcome == Outcome::Review)
+        .map(|i| i.reason)
+        .collect()
+}
+
+#[test]
+fn an_unchosen_duos_type_or_a_removed_absence_stops_for_review() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut adapter = MemoryDestinations {
+        state_path: temp.path().join("sync.sqlite3"),
+        ..Default::default()
+    };
+    let mut request = absence_request("uni 13-14\narbejdsskade: anna");
+    request.config.absences[2].words = vec!["arbejdsskade".into()];
+    assert_eq!(review_reasons(&request, &adapter), ["absence_duos_type"]);
+
+    request.shifts[0].notes = "syg anna".into();
+    apply(&mut request, &mut adapter);
+    request.shifts[0].notes.clear();
+    let reasons = review_reasons(&request, &adapter);
+    assert!(
+        reasons.contains(&"absence_removed".to_owned()),
+        "{reasons:?}"
+    );
 }

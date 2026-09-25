@@ -91,6 +91,13 @@ pub enum ParseIssueCode {
     UniOutsideShift,
     DuplicateUniInterval,
     OverlappingUniIntervals,
+    UnreadableAbsence,
+    AmbiguousAbsenceDate,
+    AbsenceOutsideShift,
+    OverlappingAbsences,
+    UnknownAbsenceHelper,
+    AmbiguousAbsenceHelper,
+    AbsenceHelperIsPlanned,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

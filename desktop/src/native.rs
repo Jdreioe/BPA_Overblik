@@ -21,8 +21,8 @@ use teamup_shift_sync_core::{
         app_version, forget_login, load_saved_setup, read_shapes, read_source, read_week,
         redacted_report, BrowserSessions, LiveConfig, LiveDestinations, Service, Setup, Visibility,
     },
-    plan_digest, ApplyOutcome, ApplyRequest, Outcome, PlanItem, PlanRequest, PlanSystem, SyncState,
-    TransferEvent, TransferOperation,
+    plan_digest, AbsenceReason, ApplyOutcome, ApplyRequest, Outcome, PlanItem, PlanRequest,
+    PlanSystem, SyncState, TransferEvent, TransferOperation,
 };
 use teamup_shift_sync_gui::{
     files::app_data_dir,
@@ -637,6 +637,13 @@ impl Engine {
                     teamup_shift_sync_core::live::LiveError("Standardtiderne kunne ikke læses.")
                 })
                 .and_then(|standard| document.set_standard_times(standard)),
+            "absences" => {
+                serde_json::from_value::<Vec<teamup_shift_sync_core::AbsenceMarking>>(params)
+                    .map_err(|_| {
+                        teamup_shift_sync_core::live::LiveError("Fraværet kunne ikke læses.")
+                    })
+                    .and_then(|markings| document.set_absences(&markings))
+            }
             _ => Err(teamup_shift_sync_core::live::LiveError(
                 "Handlingen findes ikke.",
             )),
@@ -1174,6 +1181,7 @@ enum SettingsSection {
     Helpers,
     StandardTimes,
     Markers,
+    Absences,
     Integrations,
 }
 
@@ -1494,6 +1502,7 @@ impl NativeApp {
                         self.week_error = None;
                         self.account = loaded.account.clone();
                         self.accept_standard(&loaded.state);
+                        self.setup.load_absences(&loaded.state);
                         self.setup.state = Some(loaded.state);
                         self.setup.error = None;
                         self.monday = self.monday();
@@ -1548,6 +1557,25 @@ impl NativeApp {
                     "markers",
                     serde_json::json!(titles),
                 )));
+            }
+            Message::Setup(setup::Message::AbsenceWords(reason, value)) => {
+                if let Some(index) = AbsenceReason::ALL.iter().position(|r| *r == reason) {
+                    self.setup.absence_words[index] = value;
+                }
+            }
+            Message::Setup(
+                message @ (setup::Message::SaveAbsences | setup::Message::AbsenceDuos(..)),
+            ) => {
+                if self.setup.state.is_none() {
+                    return Task::none();
+                }
+                let changed = match message {
+                    setup::Message::AbsenceDuos(reason, choice) => Some((reason, choice.value)),
+                    _ => None,
+                };
+                let params = serde_json::to_value(self.setup.absences(changed))
+                    .expect("absence markings serialize");
+                return self.update(Message::Setup(setup::Message::Action("absences", params)));
             }
             Message::Setup(setup::Message::Key(key)) => self.setup.key = key,
             Message::Setup(
@@ -1738,7 +1766,7 @@ impl NativeApp {
                 // leave the rest of the screen alone.
                 if matches!(
                     action,
-                    "edit" | "duos_enabled" | "standard_times" | "markers"
+                    "edit" | "duos_enabled" | "standard_times" | "markers" | "absences"
                 ) {
                     self.activity = Activity::Save;
                 } else {
@@ -1779,6 +1807,7 @@ impl NativeApp {
                             self.preview = None;
                         }
                         self.accept_standard(&state);
+                        self.setup.load_absences(&state);
                         self.setup.state = Some(state);
                         self.setup.error = None;
                         if confirmed {
@@ -2077,6 +2106,7 @@ impl NativeApp {
                     self.settings_section = match link {
                         SettingsLink::Helpers => SettingsSection::Helpers,
                         SettingsLink::Integrations => SettingsSection::Integrations,
+                        SettingsLink::Absences => SettingsSection::Absences,
                     };
                 }
                 return task;
@@ -2635,6 +2665,7 @@ impl NativeApp {
             (SettingsSection::Helpers, "👥", "Hjælpere"),
             (SettingsSection::StandardTimes, "◷", "Standardtider"),
             (SettingsSection::Markers, "⚑", "Markeringer"),
+            (SettingsSection::Absences, "✚", "Fravær"),
             (SettingsSection::Integrations, "⇄", "Udbydere"),
         ] {
             let selected = self.settings_section == section;
@@ -2732,6 +2763,9 @@ impl NativeApp {
             }
             SettingsSection::Markers => {
                 column![self.setup.markers_view().map(Message::Setup)].spacing(12)
+            }
+            SettingsSection::Absences => {
+                column![self.setup.absences_view().map(Message::Setup)].spacing(12)
             }
             SettingsSection::Integrations => self.providers(),
         };

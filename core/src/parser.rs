@@ -249,6 +249,34 @@ fn parse_block(
     }
 }
 
+/// Why a clock interval such as `8-12` cannot be placed on a date.
+pub(crate) enum IntervalProblem {
+    Unreadable,
+    Nonexistent,
+    Ambiguous,
+}
+
+/// One `8-12` or `08:30-16:00` interval on `day`; an end at or before the
+/// start ends the next day, as for SPS.
+pub(crate) fn local_interval(
+    token: &str,
+    day: NaiveDate,
+    timezone: Tz,
+) -> Result<TimeInterval, IntervalProblem> {
+    match parse_interval(token, day, timezone) {
+        None => Err(IntervalProblem::Unreadable),
+        Some(LocalizedInterval::Invalid(LocalTimeProblem::Nonexistent)) => {
+            Err(IntervalProblem::Nonexistent)
+        }
+        Some(LocalizedInterval::Invalid(LocalTimeProblem::Ambiguous)) => {
+            Err(IntervalProblem::Ambiguous)
+        }
+        Some(LocalizedInterval::Valid(starts_at, ends_at)) => {
+            Ok(TimeInterval { starts_at, ends_at })
+        }
+    }
+}
+
 enum LocalizedInterval {
     Valid(DateTime<chrono::FixedOffset>, DateTime<chrono::FixedOffset>),
     Invalid(LocalTimeProblem),

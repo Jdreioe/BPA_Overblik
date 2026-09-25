@@ -199,6 +199,7 @@ fn config_from_setup(
         helpers.insert(
             key,
             HelperMapping {
+                source_name: text(&source["name"])?.into(),
                 mithf_name: text(&mithf["name"])?.into(),
                 duos_employee_number: duos
                     .map(|duos| id(&duos["id"]))
@@ -264,6 +265,13 @@ fn config_from_setup(
             .and_then(|titles| crate::marker_titles(&titles).ok())
             .ok_or(LiveError("De gemte markeringer er ugyldige."))?,
     };
+    let absences = match setup.get("absences") {
+        None => crate::default_absences(),
+        Some(absences) => serde_json::from_value::<Vec<crate::AbsenceMarking>>(absences.clone())
+            .ok()
+            .and_then(|markings| crate::absence_markings(&markings).ok())
+            .ok_or(LiveError("De gemte fraværsmarkeringer er ugyldige."))?,
+    };
     let planning = PlanningConfig {
         timezone: setup["timezone"]
             .as_str()
@@ -283,6 +291,7 @@ fn config_from_setup(
         },
         duos_enabled,
         helpers,
+        absences,
     };
     let lookback_days = setup["lookback_days"].as_i64().unwrap_or(7);
     if !(1..=366).contains(&lookback_days) {
