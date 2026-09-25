@@ -396,14 +396,6 @@ fn plan_segment(
         &summary,
         reason,
     );
-    if record(records, &assign_key).is_some_and(|r| r.status == "uncertain")
-        && outcome != AlreadyMatched
-    {
-        assignment.outcome = Conflicted;
-        assignment.summary =
-            "Previous helper assignment has an uncertain outcome; review before retrying".into();
-        assignment.reason = "uncertain_write".into();
-    }
     assignment.payload = object(json!({"helper_name": mapping.mithf_name}));
     assignment.destination_id = destination_id.clone();
     let assignment_outcome = assignment.outcome;
@@ -418,7 +410,6 @@ fn plan_segment(
             .collect();
         let mut actual = matched.map(|m| m.sps_intervals.clone()).unwrap_or_default();
         let expected_payload = intervals_payload(&expected);
-        let actual_payload = intervals_payload(&actual);
         expected.sort_by_key(|i| i.starts_at);
         actual.sort_by_key(|i| i.starts_at);
         let (outcome, summary, reason) = if blocked {
@@ -439,17 +430,12 @@ fn plan_segment(
                 "Existing MitHF SPS intervals match exactly",
                 "",
             )
-        } else if sps_record.is_some_and(|r| actual_payload != r.synced_payload) {
-            (
-                Conflicted,
-                "MitHF SPS changed since synchronization; automatic replacement is blocked",
-                "changed_since_sync",
-            )
-        } else if !actual.is_empty() && sps_record.is_none() {
+        } else if actual.len() > 1 {
+            // MitHF edits one SPS record at a time; extra ones need deleting.
             (
                 Review,
-                "Existing MitHF SPS differs from the source; review before replacing it",
-                "existing_differs",
+                "The MitHF shift has more than one SPS interval; delete the extra ones",
+                "extra_intervals",
             )
         } else if request.live {
             (
@@ -495,30 +481,31 @@ fn plan_segment(
         let actual = matched
             .map(|m| m.meeting_intervals.as_slice())
             .unwrap_or_default();
-        let (mut outcome, mut reason) =
+        let (outcome, reason) =
             if reconciled.outcome == Conflicted || assignment_outcome == Conflicted {
                 (Conflicted, "blocked_by_shift")
             } else if actual == expected {
                 (AlreadyMatched, "")
-            } else if !actual.is_empty() {
-                (Review, "existing_differs")
+            } else if actual.len() > 1 {
+                (Review, "extra_intervals")
             } else if request.live {
-                (WouldCreate, "")
+                (
+                    if actual.is_empty() {
+                        WouldCreate
+                    } else {
+                        WouldUpdate
+                    },
+                    "",
+                )
             } else {
                 (PendingIntegration, "offline_preview")
             };
-        if record(records, &key).is_some_and(|r| r.status == "uncertain")
-            && outcome != AlreadyMatched
-        {
-            outcome = Conflicted;
-            reason = "uncertain_write";
-        }
         let mut meeting = item(
             shift,
             PlanSystem::Mithf,
             &key,
             outcome,
-            "Vagtmøde for the full shift; existing differences require review",
+            "Vagtmøde for the full shift",
             reason,
         );
         meeting.payload = object(

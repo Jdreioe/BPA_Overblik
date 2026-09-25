@@ -361,14 +361,17 @@ fn split_sps_edit_updates_only_its_own_mithf_part() {
     adapter.writes.clear();
     adapter.snapshot.mithf_shifts[1].sps_intervals[0].ends_at = moment("2026-09-14T14:30:00+02:00");
     request.shifts[0].notes = "uni 8-10 & 13-14".into();
-    let blocked = preview_plan(&request, &adapter);
-    let sps = blocked
+    let restored = preview_plan(&request, &adapter);
+    let sps = restored
         .items
         .iter()
         .find(|i| i.step_key == "mithf.set_sps#1")
         .unwrap();
-    assert_eq!(sps.outcome, Outcome::Conflicted);
-    assert_eq!(sps.reason, "changed_since_sync");
+    assert_eq!(sps.outcome, Outcome::WouldUpdate);
+    assert_eq!(
+        sps.payload["intervals"][0]["ends_at"],
+        "2026-09-14T14:00:00+02:00"
+    );
 }
 
 #[test]
@@ -438,7 +441,7 @@ fn an_earlier_sps_interval_splits_a_transferred_shift_without_conflict() {
 }
 
 #[test]
-fn manual_mithf_changes_block_automatic_edits() {
+fn manual_mithf_changes_are_changed_back_to_the_shift_plan() {
     let temp = tempfile::tempdir().unwrap();
     let mut adapter = MemoryDestinations {
         state_path: temp.path().join("sync.sqlite3"),
@@ -464,19 +467,21 @@ fn manual_mithf_changes_block_automatic_edits() {
         .iter()
         .find(|i| i.step_key == "mithf.create_shift")
         .unwrap();
-    assert_eq!(edit.outcome, Outcome::Conflicted);
-    assert_eq!(edit.reason, "manually_changed");
+    assert_eq!(edit.outcome, Outcome::WouldUpdate);
     approve(&mut request, &adapter);
-    assert!(matches!(
-        runtime().block_on(apply_plan(
+    runtime()
+        .block_on(apply_plan(
             request,
             adapter.state_path.clone(),
             &mut adapter,
             |_| {},
-        )),
-        Err(TransferError::Approval(ApprovalError::UnresolvedItems))
-    ));
-    assert!(adapter.writes.is_empty());
+        ))
+        .unwrap();
+    assert_eq!(adapter.writes, ["mithf.create_shift"]);
+    assert_eq!(
+        adapter.snapshot.mithf_shifts[0].ends_at,
+        moment("2026-09-14T16:00:00+02:00")
+    );
 }
 
 #[test]
@@ -708,20 +713,18 @@ fn lost_create_response_survives_reopening_and_resumes_without_duplicate() {
         "uncertain"
     );
     assert_eq!(snapshots(&adapter.state_path), 0);
+    // Only a complete read without the shift retries the create.
     let saved_snapshot = adapter.snapshot.clone();
     adapter.snapshot = DestinationSnapshot::default();
-    approve(&mut request, &adapter);
-    assert!(matches!(
-        runtime().block_on(apply_plan(
-            request.clone(),
-            adapter.state_path.clone(),
-            &mut adapter,
-            |_| {}
-        )),
-        Err(TransferError::Approval(ApprovalError::UnresolvedItems))
-    ));
-    assert_eq!(adapter.writes.len(), 1);
+    assert_eq!(
+        preview_plan(&request, &adapter).items[0].outcome,
+        Outcome::WouldCreate
+    );
     adapter.snapshot = saved_snapshot;
+    assert_eq!(
+        preview_plan(&request, &adapter).items[0].outcome,
+        Outcome::AlreadyMatched
+    );
     approve(&mut request, &adapter);
     runtime()
         .block_on(apply_plan(
@@ -894,7 +897,8 @@ fn step_record(value: &Value) -> StepRecord {
 
 #[test]
 fn complete_rust_runs_match_recorded_writes_and_recovery_records() {
-    // Frozen at the Python removal cutover: 10 recorded apply traces.
+    // Frozen at the Python removal cutover: 10 recorded apply traces, less the
+    // one that blocked a retry of an unconfirmed create the shift plan now makes.
     let oracle: Oracle = serde_json::from_str(include_str!("goldens/approval.json")).unwrap();
     assert!(oracle.traces.len() >= 6);
     let temp = tempfile::tempdir().unwrap();

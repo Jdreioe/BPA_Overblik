@@ -1,6 +1,6 @@
 //! Danish presentation of a finished Rust plan. No network, state writes, or
 //! approval authority lives here; the core revalidates every actual transfer.
-use crate::protocol::{Attention, Block, Day, Marker, Notice, Tone, Week};
+use crate::protocol::{Attention, Block, Day, Marker, Notice, SettingsLink, Tone, Week};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Timelike};
 use chrono_tz::Tz;
 use serde_json::{Map, Value};
@@ -11,6 +11,7 @@ use teamup_shift_sync_core::{
 };
 #[path = "preview_explanations.rs"]
 mod explanations;
+pub use explanations::DUOS_ACTION;
 
 const DAYS: [&str; 7] = ["man", "tir", "ons", "tor", "fre", "lør", "søn"];
 const MONTHS: [&str; 12] = [
@@ -404,10 +405,13 @@ pub fn build_week(
                     who: helper.into(),
                     explanation: explanation.into(),
                     action: action.into(),
-                    source_key: key.clone(),
-                    // Only a destination entry deleted by hand can be recovered
-                    // by forgetting this app's own records for the shift.
-                    can_allow_retransfer: item.reason == "destination_missing",
+                    settings: match item.reason.as_str() {
+                        "no_helper_mapping" => Some(SettingsLink::Helpers),
+                        "missing_configuration" | "sps_without_duos" => {
+                            Some(SettingsLink::Integrations)
+                        }
+                        _ => None,
+                    },
                 });
             }
         }

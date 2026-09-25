@@ -259,8 +259,8 @@ fn planning_preserves_recovery_records_and_rejects_corrupt_state() {
         live: true,
     };
     let plan = build_plan(&request, &state).unwrap();
-    assert_eq!(plan.items[0].outcome, Outcome::Conflicted);
-    assert_eq!(plan.items[0].reason, "uncertain_write");
+    // Nothing in MitHF matches the unconfirmed write, so it is retried.
+    assert_eq!(plan.items[0].outcome, Outcome::WouldCreate);
     assert_eq!(
         state.steps_for_source(&shifts[0].key()).unwrap(),
         std::slice::from_ref(&saved)

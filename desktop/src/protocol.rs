@@ -61,14 +61,17 @@ pub struct Attention {
     pub who: String,
     pub explanation: String,
     pub action: String,
-    /// The TeamUp shift this item belongs to. Opaque, and never displayed; it
-    /// only lets recovery act on exactly the shift the conflict came from.
-    #[serde(default)]
-    pub source_key: String,
-    /// True only when a previously transferred destination entry is gone,
-    /// which is the single conflict forgetting local records can resolve.
-    #[serde(default)]
-    pub can_allow_retransfer: bool,
+    /// The settings page that fixes this item, when the fix is in setup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<SettingsLink>,
+}
+
+/// A settings page an attention item can open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingsLink {
+    Helpers,
+    Integrations,
 }
 
 /// How a notice reads at a glance. The card shows it as an icon and text as
@@ -157,8 +160,7 @@ mod tests {
             }]}],
             "attention": [{"when": "man 14. sep 07:30", "who": "Zain Alnemr",
                            "explanation": "…", "action": "…",
-                           "source_key": "cal:event:2026-09-14T07:30:00+02:00",
-                           "can_allow_retransfer": true}],
+                           "settings": "helpers"}],
             "status": {"tone": "info", "title": "Ugen er klar til godkendelse",
                        "detail": "Overfører …"},
             "summary": ["1 ny vagt i MitHF"], "apply_summary": "Overfører …",
@@ -169,7 +171,10 @@ mod tests {
         assert_eq!(week.days[0].blocks[0].part_label, "Del 1 af 2");
         assert_eq!(week.days[0].blocks[0].helper_color, "#4770d8");
         assert_eq!(week.attention.len(), 1);
-        assert!(week.attention[0].can_allow_retransfer);
+        assert_eq!(
+            week.attention[0].settings,
+            Some(super::SettingsLink::Helpers)
+        );
     }
 
     #[test]

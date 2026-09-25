@@ -200,7 +200,8 @@ struct Trace {
 
 #[test]
 fn digests_and_validation_match_recorded_apply_runs() {
-    // Frozen at the Python removal cutover: 10 recorded apply traces.
+    // Frozen at the Python removal cutover: 10 recorded apply traces, less the
+    // one that blocked a retry of an unconfirmed create the shift plan now makes.
     let oracle: Oracle = serde_json::from_str(include_str!("goldens/approval.json")).unwrap();
     assert_eq!(
         plan_digest(&oracle.hash_case.plan).unwrap(),
