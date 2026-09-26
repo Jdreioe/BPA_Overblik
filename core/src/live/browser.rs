@@ -126,13 +126,22 @@ impl BrowserSessions {
     pub fn new(data_dir: PathBuf) -> Result<Self, LiveError> {
         let root = data_dir.join("rust-preview");
         private_dir(&root)?;
+        // Read+write, not append-only: on Windows LockFileEx needs
+        // GENERIC_READ/WRITE, and an append-only handle fails every lock
+        // with ERROR_ACCESS_DENIED even when nothing else is running.
         let lock = std::fs::OpenOptions::new()
             .create(true)
-            .append(true)
+            .read(true)
+            .write(true)
             .open(root.join("browser.lock"))
             .map_err(|_| INVALID)?;
-        fs2::FileExt::try_lock_exclusive(&lock)
-            .map_err(|_| LiveError("Appen kører allerede i et andet vindue. Luk det først."))?;
+        fs2::FileExt::try_lock_exclusive(&lock).map_err(|error| {
+            if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() {
+                LiveError("Appen kører allerede i et andet vindue. Luk det først.")
+            } else {
+                INVALID
+            }
+        })?;
         let client = reqwest::Client::builder()
             .no_proxy()
             .timeout(Duration::from_secs(10))
@@ -522,8 +531,11 @@ pub(super) struct Browser {
 /// Find a Chromium-based browser. They all speak the same DevTools protocol and
 /// accept the launch flags above. `TEAMUP_BROWSER_PATH` overrides the search;
 /// otherwise the app's old `browsers/` folder, then the standard install
-/// locations for this system in a fixed order. Flatpak and Snap browsers are
-/// left out: their sandbox cannot write to the app's private profile.
+/// locations for this system. On Windows the system default browser goes first
+/// when it is one of the known Chromium browsers; Microsoft Edge is the
+/// fallback, used when it is the default or nothing else is installed.
+/// Flatpak and Snap browsers are left out: their sandbox cannot write to the
+/// app's private profile.
 pub(super) fn browser_executable(data_dir: &Path) -> Result<Browser, LiveError> {
     if let Some(path) = std::env::var_os("TEAMUP_BROWSER_PATH") {
         let path = PathBuf::from(path);
@@ -554,7 +566,7 @@ pub(super) fn browser_executable(data_dir: &Path) -> Result<Browser, LiveError> 
     }
     let env = |name: &str| std::env::var_os(name).map(PathBuf::from);
     let candidates = if cfg!(windows) {
-        windows_browsers(env)
+        ordered_candidates(windows_browsers(env), windows_default_browser_name())
     } else if cfg!(target_os = "macos") {
         macos_browsers(env("HOME"))
     } else {
@@ -567,28 +579,193 @@ pub(super) fn browser_executable(data_dir: &Path) -> Result<Browser, LiveError> 
         .ok_or(LiveError("Ingen browser fundet. Installér Google Chrome eller Microsoft Edge, eller angiv browserfilen i TEAMUP_BROWSER_PATH, og prøv igen."))
 }
 
-/// Edge first: it ships with Windows 10 and 11, so no extra install is needed.
+/// Third-party Chromium browsers first, Microsoft Edge last: Edge is the
+/// fallback for machines where nothing else is installed. On Windows the
+/// system default is promoted to the front by `ordered_candidates` when it is
+/// one of these names.
 fn windows_browsers(env: impl Fn(&str) -> Option<PathBuf>) -> Vec<(&'static str, PathBuf)> {
-    let (x86, programs, local) = (
-        env("ProgramFiles(x86)"),
-        env("ProgramFiles"),
-        env("LOCALAPPDATA"),
-    );
-    let edge = r"Microsoft\Edge\Application\msedge.exe";
+    let local = env("LOCALAPPDATA");
+    let programs_user = local.as_ref().map(|local| local.join("Programs"));
+    let (x86, programs) = (env("ProgramFiles(x86)"), env("ProgramFiles"));
     let chrome = r"Google\Chrome\Application\chrome.exe";
     let brave = r"BraveSoftware\Brave-Browser\Application\brave.exe";
+    let vivaldi = r"Vivaldi\Application\vivaldi.exe";
+    let chromium = r"Chromium\Application\chrome.exe";
+    let edge = r"Microsoft\Edge\Application\msedge.exe";
     [
-        ("Microsoft Edge", &x86, edge),
-        ("Microsoft Edge", &programs, edge),
         ("Google Chrome", &programs, chrome),
         ("Google Chrome", &x86, chrome),
         ("Google Chrome", &local, chrome),
         ("Brave", &programs, brave),
         ("Brave", &local, brave),
+        ("Vivaldi", &local, vivaldi),
+        ("Vivaldi", &programs, vivaldi),
+        ("Opera", &programs_user, r"Opera\opera.exe"),
+        ("Opera GX", &programs_user, r"Opera GX\opera.exe"),
+        ("Arc", &programs_user, r"Arc\Arc.exe"),
+        ("Chromium", &local, chromium),
+        ("Chromium", &programs, chromium),
+        ("Microsoft Edge", &x86, edge),
+        ("Microsoft Edge", &programs, edge),
     ]
     .into_iter()
     .filter_map(|(name, root, rest)| Some((name, root.as_ref()?.join(rest))))
     .collect()
+}
+
+/// Promote the system default browser to the front, keeping the relative order
+/// of everything else. Edge stays last unless it is the default or the only
+/// browser installed.
+fn ordered_candidates(
+    candidates: Vec<(&'static str, PathBuf)>,
+    default: Option<&'static str>,
+) -> Vec<(&'static str, PathBuf)> {
+    let mut ordered = candidates;
+    if let Some(default) = default {
+        ordered.sort_by_key(|(name, _)| if *name == default { 0 } else { 1 });
+    }
+    ordered
+}
+
+/// The Windows default browser, if it is one of the candidates above.
+/// Reads the StartMenuInternet client name first, then the URL association
+/// ProgIds. Anything else (Firefox, an unknown client) is `None`, which leaves
+/// the candidate order untouched and Edge as the fallback.
+#[cfg(windows)]
+fn windows_default_browser_name() -> Option<&'static str> {
+    if let Some(client) = reg_sz_value(
+        r"HKCU\SOFTWARE\Clients\StartMenuInternet",
+        None,
+    )
+    .and_then(|client| client_name_to_browser(&client))
+    {
+        return Some(client);
+    }
+    // The app only opens https:// addresses, so the https association is the
+    // meaningful default; http covers a split setup.
+    let ids = ["https", "http"].map(|scheme| {
+        let key = format!(
+            r"HKCU\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\{scheme}"
+        );
+        current_prog_id(
+            reg_sz_value(&format!(r"{key}\UserChoiceLatest\ProgId"), Some("ProgId")),
+            reg_sz_value(&format!(r"{key}\UserChoice"), Some("ProgId")),
+        )
+    });
+    prog_ids_to_browser(&ids)
+}
+
+/// Newer Windows 11 builds store the chosen ProgId under
+/// `UserChoiceLatest\ProgId` and stop updating `UserChoice`, which then keeps
+/// a stale value (often Edge). The newer key wins when it is set.
+fn current_prog_id(latest: Option<String>, legacy: Option<String>) -> Option<String> {
+    latest.or(legacy)
+}
+
+/// First known browser from the https then http ProgIds. Unknown and
+/// non-Chromium ProgIds are skipped, so a split setup still finds the usable
+/// default.
+fn prog_ids_to_browser(ids: &[Option<String>; 2]) -> Option<&'static str> {
+    ids.iter().flatten().find_map(|id| prog_id_to_browser(id))
+}
+
+/// One `REG_SZ`/`REG_EXPAND_SZ` value from `reg query`: the default value with
+/// `None`, a named value with `Some`. Never fails loudly; callers fall back to
+/// the plain candidate order when the registry cannot be read.
+#[cfg(windows)]
+fn reg_sz_value(key: &str, value: Option<&str>) -> Option<String> {
+    let mut command = std::process::Command::new("reg");
+    command.args(["query", key]);
+    match value {
+        Some(name) => {
+            command.args(["/v", name]);
+        }
+        None => {
+            command.arg("/ve");
+        }
+    }
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_reg_sz(
+        &String::from_utf8_lossy(&output.stdout),
+        value.unwrap_or("(Default)"),
+    )
+}
+
+/// Parse one `REG_SZ`/`REG_EXPAND_SZ` line from `reg query` output. The value
+/// may hold spaces, so everything after the type token is rejoined.
+fn parse_reg_sz(output: &str, field: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        if !line.contains(field) {
+            return None;
+        }
+        let words: Vec<&str> = line
+            .split_whitespace()
+            .skip_while(|word| *word != "REG_SZ" && *word != "REG_EXPAND_SZ")
+            .skip(1)
+            .collect();
+        if words.is_empty() {
+            return None;
+        }
+        Some(words.join(" "))
+    })
+}
+
+/// A StartMenuInternet client name such as "Google Chrome" or "Opera GX" to
+/// one of the candidate names above. Unknown and non-Chromium clients are
+/// `None`.
+fn client_name_to_browser(client: &str) -> Option<&'static str> {
+    let client = client.trim().to_lowercase();
+    if client.contains("edge") {
+        Some("Microsoft Edge")
+    } else if client.contains("chrome") {
+        Some("Google Chrome")
+    } else if client.contains("brave") {
+        Some("Brave")
+    } else if client.contains("vivaldi") {
+        Some("Vivaldi")
+    } else if client.contains("opera") {
+        if client.contains("gx") {
+            Some("Opera GX")
+        } else {
+            Some("Opera")
+        }
+    } else if client.contains("arc") {
+        Some("Arc")
+    } else if client.contains("chromium") {
+        Some("Chromium")
+    } else {
+        None
+    }
+}
+
+/// An http association ProgId such as "ChromeHTML" or "MSEdgeHTM" to one of
+/// the candidate names above. Unknown and non-Chromium ProgIds are `None`.
+fn prog_id_to_browser(id: &str) -> Option<&'static str> {
+    let id = id.trim().to_lowercase();
+    if id.contains("edge") {
+        Some("Microsoft Edge")
+    } else if id.contains("brave") {
+        Some("Brave")
+    } else if id.contains("vivaldi") {
+        Some("Vivaldi")
+    } else if id.contains("opera") {
+        if id.contains("gx") {
+            Some("Opera GX")
+        } else {
+            Some("Opera")
+        }
+    } else if id.contains("chrome") {
+        Some("Google Chrome")
+    } else if id.contains("arc") {
+        Some("Arc")
+    } else if id.contains("chromium") {
+        Some("Chromium")
+    } else {
+        None
+    }
 }
 
 fn macos_browsers(home: Option<PathBuf>) -> Vec<(&'static str, PathBuf)> {
@@ -597,12 +774,15 @@ fn macos_browsers(home: Option<PathBuf>) -> Vec<(&'static str, PathBuf)> {
             "Google Chrome",
             "Google Chrome.app/Contents/MacOS/Google Chrome",
         ),
+        ("Brave", "Brave Browser.app/Contents/MacOS/Brave Browser"),
+        ("Vivaldi", "Vivaldi.app/Contents/MacOS/Vivaldi"),
+        ("Opera", "Opera.app/Contents/MacOS/Opera"),
+        ("Arc", "Arc.app/Contents/MacOS/Arc"),
+        ("Chromium", "Chromium.app/Contents/MacOS/Chromium"),
         (
             "Microsoft Edge",
             "Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
         ),
-        ("Chromium", "Chromium.app/Contents/MacOS/Chromium"),
-        ("Brave", "Brave Browser.app/Contents/MacOS/Brave Browser"),
     ];
     let roots = std::iter::once(PathBuf::from("/Applications"))
         .chain(home.map(|home| home.join("Applications")));
@@ -617,10 +797,13 @@ fn linux_browsers() -> Vec<(&'static str, PathBuf)> {
         ("Chromium", "/usr/bin/chromium-browser"),
         ("Google Chrome", "/usr/bin/google-chrome"),
         ("Google Chrome", "/opt/google/chrome/chrome"),
-        ("Microsoft Edge", "/usr/bin/microsoft-edge"),
-        ("Microsoft Edge", "/opt/microsoft/msedge/msedge"),
         ("Brave", "/usr/bin/brave-browser"),
         ("Brave", "/opt/brave.com/brave/brave"),
+        ("Vivaldi", "/usr/bin/vivaldi"),
+        ("Vivaldi", "/opt/vivaldi/vivaldi"),
+        ("Opera", "/usr/bin/opera"),
+        ("Microsoft Edge", "/usr/bin/microsoft-edge"),
+        ("Microsoft Edge", "/opt/microsoft/msedge/msedge"),
     ]
     .map(|(name, path)| (name, PathBuf::from(path)))
     .into()
@@ -660,6 +843,171 @@ mod tests {
         // 32-bit layout: only ProgramFiles is set.
         let found = super::windows_browsers(|name| (name == "ProgramFiles").then(|| "C:/P".into()));
         assert!(found.iter().all(|(_, path)| path.starts_with("C:/P")));
-        assert_eq!(found[0].0, "Microsoft Edge");
+        assert_eq!(found[0].0, "Google Chrome");
+        // Edge is the fallback: its entries come last.
+        let last = found.last().expect("at least Edge is listed");
+        assert_eq!(last.0, "Microsoft Edge");
+        assert!(found.iter().any(|(name, _)| *name == "Vivaldi"));
+        assert!(found.iter().any(|(name, _)| *name == "Chromium"));
+    }
+
+    #[test]
+    fn edge_is_listed_last_on_every_platform() {
+        let mac = super::macos_browsers(None);
+        assert_eq!(mac.last().expect("mac list").0, "Microsoft Edge");
+        let linux = super::linux_browsers();
+        assert_eq!(linux.last().expect("linux list").0, "Microsoft Edge");
+        assert!(linux.iter().any(|(name, _)| *name == "Vivaldi"));
+        assert!(linux.iter().any(|(name, _)| *name == "Opera"));
+    }
+
+    #[test]
+    fn the_system_default_browser_is_promoted_to_the_front() {
+        use std::path::PathBuf;
+        let candidates = vec![
+            ("Google Chrome", PathBuf::from("chrome")),
+            ("Brave", PathBuf::from("brave")),
+            ("Microsoft Edge", PathBuf::from("edge")),
+        ];
+        let ordered = super::ordered_candidates(candidates.clone(), Some("Brave"));
+        assert_eq!(ordered[0].0, "Brave");
+        assert_eq!(ordered[2].0, "Microsoft Edge");
+        // No detectable default: the order, and Edge last, is untouched.
+        let ordered = super::ordered_candidates(candidates.clone(), None);
+        assert_eq!(ordered, candidates);
+        // Edge as the default is honoured too.
+        let ordered = super::ordered_candidates(candidates, Some("Microsoft Edge"));
+        assert_eq!(ordered[0].0, "Microsoft Edge");
+    }
+
+    #[test]
+    fn reg_output_parses_the_default_value_and_named_values() {
+        let start_menu = "HKEY_CURRENT_USER\\SOFTWARE\\Clients\\StartMenuInternet\r\n    (Default)    REG_SZ    Google Chrome\r\n";
+        assert_eq!(
+            super::parse_reg_sz(start_menu, "(Default)").as_deref(),
+            Some("Google Chrome")
+        );
+        let user_choice = "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\http\\UserChoice\r\n    ProgId    REG_SZ    ChromeHTML\r\n";
+        assert_eq!(
+            super::parse_reg_sz(user_choice, "ProgId").as_deref(),
+            Some("ChromeHTML")
+        );
+        let latest = "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\https\\UserChoiceLatest\\ProgId\r\n    ProgId    REG_SZ    VivaldiHTM.DT5WWRCYTEVNTDQTZBKZRFJ5KQ\r\n";
+        assert_eq!(
+            super::parse_reg_sz(latest, "ProgId").as_deref(),
+            Some("VivaldiHTM.DT5WWRCYTEVNTDQTZBKZRFJ5KQ")
+        );
+        assert_eq!(super::parse_reg_sz("empty", "(Default)"), None);
+        assert_eq!(
+            super::parse_reg_sz("HKEY\\X\r\n    (Default)    REG_SZ\r\n", "(Default)"),
+            None
+        );
+    }
+
+    #[test]
+    fn the_newer_user_choice_key_wins_over_a_stale_legacy_one() {
+        let some = |id: &str| Some(id.to_string());
+        // Windows 11 left UserChoice on Edge after switching to Vivaldi.
+        assert_eq!(
+            super::current_prog_id(some("VivaldiHTM.ABC"), some("MSEdgeHTM")).as_deref(),
+            Some("VivaldiHTM.ABC")
+        );
+        // Older builds only have UserChoice.
+        assert_eq!(
+            super::current_prog_id(None, some("ChromeHTML")).as_deref(),
+            Some("ChromeHTML")
+        );
+        assert_eq!(super::current_prog_id(None, None), None);
+        let ids = [
+            super::current_prog_id(some("VivaldiHTM.ABC"), some("MSEdgeHTM")),
+            super::current_prog_id(None, some("MSEdgeHTM")),
+        ];
+        assert_eq!(super::prog_ids_to_browser(&ids), Some("Vivaldi"));
+    }
+
+    #[test]
+    fn client_names_and_prog_ids_map_to_known_chromium_browsers() {
+        assert_eq!(
+            super::client_name_to_browser("Google Chrome"),
+            Some("Google Chrome")
+        );
+        assert_eq!(
+            super::client_name_to_browser("Opera GX"),
+            Some("Opera GX")
+        );
+        assert_eq!(
+            super::client_name_to_browser("Microsoft Edge"),
+            Some("Microsoft Edge")
+        );
+        assert_eq!(super::client_name_to_browser("Firefox"), None);
+        assert_eq!(super::client_name_to_browser(""), None);
+        assert_eq!(
+            super::prog_id_to_browser("ChromeHTML"),
+            Some("Google Chrome")
+        );
+        assert_eq!(
+            super::prog_id_to_browser("MSEdgeHTM"),
+            Some("Microsoft Edge")
+        );
+        assert_eq!(super::prog_id_to_browser("BraveHTML"), Some("Brave"));
+        assert_eq!(
+            super::prog_id_to_browser("VivaldiHTM"),
+            Some("Vivaldi")
+        );
+        assert_eq!(
+            super::prog_id_to_browser("FirefoxURL-1234"),
+            None
+        );
+    }
+
+    #[test]
+    fn https_prog_id_wins_over_http_and_unknowns_are_skipped() {
+        let vivaldi = Some("VivaldiHTM".to_owned());
+        let edge = Some("MSEdgeHTM".to_owned());
+        assert_eq!(
+            super::prog_ids_to_browser(&[vivaldi.clone(), edge.clone()]),
+            Some("Vivaldi")
+        );
+        assert_eq!(
+            super::prog_ids_to_browser(&[edge.clone(), vivaldi.clone()]),
+            Some("Microsoft Edge")
+        );
+        assert_eq!(
+            super::prog_ids_to_browser(&[Some("FirefoxURL-1".to_owned()), vivaldi]),
+            Some("Vivaldi")
+        );
+        assert_eq!(
+            super::prog_ids_to_browser(&[None, None]),
+            None
+        );
+    }
+
+    #[test]
+    fn the_browser_lock_can_be_acquired_on_this_platform() {
+        // The lock file used to be opened append-only, whose handle Windows
+        // rejects in LockFileEx with access denied even when nothing else is
+        // running, so every launch reported another window.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let sessions =
+            super::BrowserSessions::new(dir.path().to_path_buf()).expect("first launch locks");
+        drop(sessions);
+        // Releasing the only instance frees the lock, so a relaunch works.
+        let _again =
+            super::BrowserSessions::new(dir.path().to_path_buf()).expect("relaunch locks");
+    }
+
+    #[test]
+    fn a_second_launch_reports_the_window_already_running() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let _first =
+            super::BrowserSessions::new(dir.path().to_path_buf()).expect("first launch locks");
+        let error = match super::BrowserSessions::new(dir.path().to_path_buf()) {
+            Ok(_) => panic!("second launch must be refused"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.to_string(),
+            "Appen kører allerede i et andet vindue. Luk det først."
+        );
     }
 }

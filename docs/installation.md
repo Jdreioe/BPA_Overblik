@@ -14,9 +14,10 @@ Udgivelserne hedder efter datoen, for eksempel `2026.09.21`.
 | macOS 11 eller nyere, både Intel og Apple Silicon | `teamup-shift-sync-ÅÅÅÅ.MM.DD-universal.pkg` |
 | Linux, 64-bit | `teamup-shift-sync-ÅÅÅÅ.MM.DD-x86_64.AppImage` |
 
-Programmet bruger en browser, der allerede er installeret: Microsoft Edge,
-som følger med Windows, Google Chrome, Chromium eller Brave. På en Mac med kun
-Safari skal du først installere Google Chrome eller Microsoft Edge.
+Programmet bruger en browser, der allerede er installeret: din
+standardbrowser, hvis den er Chromium-baseret (Google Chrome, Brave, Vivaldi,
+Opera, Arc eller Chromium), ellers Microsoft Edge, som følger med Windows. På
+en Mac med kun Safari skal du først installere en Chromium-baseret browser.
 BPA Overblik henter aldrig selv en browser, og den rører aldrig din
 almindelige browser: den åbner sit eget vindue til MitHF og DUOS.
 

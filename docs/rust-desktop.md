@@ -93,15 +93,17 @@ profile is never touched. The first executable found wins:
 
 1. `TEAMUP_BROWSER_PATH`, if set. It must point to a file.
 2. A browser in the app's old `browsers/` data folder.
-3. The standard locations for the system:
-   - **Windows:** Edge under `%ProgramFiles(x86)%` and `%ProgramFiles%`, then
-     Chrome under `%ProgramFiles%`, `%ProgramFiles(x86)%` and
-     `%LOCALAPPDATA%`, then Brave under `%ProgramFiles%` and `%LOCALAPPDATA%`.
-   - **macOS:** Google Chrome, Microsoft Edge, Chromium and Brave in
-     `/Applications`, then the same apps in `~/Applications`.
-   - **Linux:** `chromium`, `chromium-browser` and `google-chrome` in
-     `/usr/bin`, `/opt/google/chrome/chrome`, then Edge and Brave in `/usr/bin`
-     and `/opt`.
+3. The standard locations for the system. On Windows the system default
+   browser goes first when it is a known Chromium browser; Microsoft Edge is
+   the fallback:
+   - **Windows:** Chrome, Brave, Vivaldi, Opera, Opera GX, Arc and Chromium in
+     their `%ProgramFiles%`, `%ProgramFiles(x86)%` and `%LOCALAPPDATA%`
+     locations, then Microsoft Edge.
+   - **macOS:** Google Chrome, Brave, Vivaldi, Opera, Arc and Chromium in
+     `/Applications`, then the same apps in `~/Applications`, then
+     Microsoft Edge.
+   - **Linux:** `chromium`, `chromium-browser`, `google-chrome`, Brave,
+     Vivaldi and Opera in `/usr/bin` and `/opt`, then Microsoft Edge.
 
 Flatpak and Snap browsers are not searched: their sandbox cannot write the
 app's private profile, so the browser never reports its DevTools port.
