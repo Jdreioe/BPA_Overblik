@@ -10,7 +10,7 @@ Udgivelserne hedder efter datoen, for eksempel `2026.09.21`.
 
 | Dit system | Filen du skal bruge |
 | --- | --- |
-| Windows 10 eller 11, 64-bit | `teamup-shift-sync-ÅÅÅÅ.MM.DD-x86_64.exe` |
+| Windows 10 eller 11, 64-bit | `teamup-shift-sync-ÅÅÅÅ.MM.DD-x86_64-setup.exe` |
 | macOS 11 eller nyere, både Intel og Apple Silicon | `teamup-shift-sync-ÅÅÅÅ.MM.DD-universal.pkg` |
 | Linux, 64-bit | `teamup-shift-sync-ÅÅÅÅ.MM.DD-x86_64.AppImage` |
 
@@ -23,15 +23,21 @@ almindelige browser: den åbner sit eget vindue til MitHF og DUOS.
 
 ## Windows
 
-1. Gem `.exe`-filen et sted du kan finde igen, for eksempel i mappen
-   **Dokumenter** eller på skrivebordet.
-2. Dobbeltklik på filen.
-3. Windows viser "Windows beskyttede din pc", fordi filen endnu ikke er
+1. Dobbeltklik på `-setup.exe`-filen.
+2. Windows viser "Windows beskyttede din pc", fordi filen endnu ikke er
    signeret. Klik **Flere oplysninger** og derefter **Kør alligevel**.
+3. Klik **Installer**. Du skal ikke være administrator.
 
-Der er ikke noget at afinstallere: du sletter filen. Dine logins, dine kobler
-mellem TeamUp, MitHF og DUOS og din historik ligger i
-`%APPDATA%\teamup-shift-sync\data` og bliver ikke slettet med programmet.
+Programmet lægger sig i din egen brugermappe og får en genvej i
+**Start**-menuen og på skrivebordet. Installationsfilen kan du slette bagefter.
+
+Du afinstallerer under **Indstillinger → Apps → Installerede apps → BPA
+Overblik**. Dine logins, dine kobler mellem TeamUp, MitHF og DUOS og din
+historik ligger i `%APPDATA%\teamup-shift-sync\data` og bliver ikke slettet
+med programmet.
+
+Brugte du før den enkelte `.exe`-fil uden installation, flytter appen selv
+over til installationen ved næste opdatering og sletter den gamle fil.
 
 ## macOS
 
@@ -96,7 +102,8 @@ spørger installationen én gang. Den kører ikke noget i baggrunden.
 Appen søger selv efter en nyere udgivelse, mens den er åbnet. I sidepanelet under
 **Indstillinger** søger det runde pilikon igen. Når en ny version er klar, bliver
 det til et downloadikon. Ikonet animerer, mens opdateringen hentes. Når den er
-klar, bliver det til et genstartsikon. På Windows og Linux genstarter et klik
+klar, bliver det til et genstartsikon. På Windows lukker et klik appen,
+installerer den nye version og åbner den igen. På Linux genstarter et klik
 appen i den nye version. På macOS åbner klikket installationspakken, som du
 følger som første gang. Dine logins,
 dine kobler og din synkroniseringshistorik følger med over. Appen henter aldrig

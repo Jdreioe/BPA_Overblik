@@ -1,7 +1,9 @@
 //! Check GitHub releases and replace the running package.
 //!
-//! Windows and Linux are one file the app can overwrite. macOS is a `.pkg`, so
-//! the updater downloads an installer instead of writing into `/Applications`.
+//! Linux is one AppImage the app can overwrite. Windows runs the next per-user
+//! setup silently once the app has exited, which also moves a portable copy
+//! into the installed location. macOS is a `.pkg`, so the updater downloads an
+//! installer instead of writing into `/Applications`.
 
 use std::path::{Path, PathBuf};
 
@@ -64,7 +66,7 @@ pub fn is_newer(current: &str, latest: &str) -> bool {
 
 pub fn asset_suffix(os: &str) -> Option<&'static str> {
     match os {
-        "windows" => Some("x86_64.exe"),
+        "windows" => Some("x86_64-setup.exe"),
         "linux" => Some("x86_64.AppImage"),
         "macos" => Some("universal.pkg"),
         _ => None,
@@ -112,7 +114,14 @@ pub async fn apply(offer: Offer) -> Result<ApplyOutcome, String> {
         download(&offer.url, &path).await?;
         return Ok(ApplyOutcome::OpenInstaller(path));
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        // The setup cannot replace the running exe, so it only starts on restart.
+        let path = std::env::temp_dir().join(&offer.asset_name);
+        download(&offer.url, &path).await?;
+        Ok(ApplyOutcome::Restart(path))
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         let current = install_path()?;
         let staged = sibling(&current, ".new");
@@ -135,7 +144,8 @@ pub fn open_installer(path: &Path) -> Result<(), String> {
     open_path(path)
 }
 
-/// Start the replaced package as its own process.
+/// Start the replaced package, or on Windows the downloaded setup, as its own
+/// process.
 ///
 /// An AppImage child must not inherit this process's mount (`APPDIR` and
 /// friends), or it keeps running the old image. On Windows the new process
@@ -147,6 +157,8 @@ fn spawn_restart(path: &Path) -> std::io::Result<std::process::Child> {
 
 fn restart_command(path: &Path) -> std::process::Command {
     let mut command = std::process::Command::new(path);
+    #[cfg(windows)]
+    command.args(installer_args(install_path().ok().as_deref()));
     command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -174,12 +186,52 @@ fn restart_command(path: &Path) -> std::process::Command {
     command
 }
 
-/// Drop the previous binary left behind after a Windows/Linux replace.
+/// Arguments for the Windows setup started by an update. It shows only its
+/// progress, closes this app if it is still running, starts the installed app
+/// when it is done, and deletes the portable exe this process ran from; see
+/// `packaging/windows/bpa-overblik.iss`.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn installer_args(current: Option<&Path>) -> Vec<std::ffi::OsString> {
+    let mut args: Vec<std::ffi::OsString> = [
+        "/SILENT",
+        "/SUPPRESSMSGBOXES",
+        "/NORESTART",
+        "/CLOSEAPPLICATIONS",
+        "/RELAUNCH",
+    ]
+    .into_iter()
+    .map(Into::into)
+    .collect();
+    if let Some(current) = current {
+        let mut replaces = std::ffi::OsString::from("/REPLACES=");
+        replaces.push(current);
+        args.push(replaces);
+    }
+    args
+}
+
+/// Drop the previous binary left behind after a Linux replace, or by a
+/// portable Windows release from before the installer, and on Windows the
+/// setups earlier updates downloaded.
 pub fn cleanup_replaced_backup() {
+    #[cfg(windows)]
+    if let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) {
+        for entry in entries.flatten() {
+            if is_downloaded_setup(&entry.file_name().to_string_lossy()) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
     let Ok(current) = install_path() else {
         return;
     };
     let _ = std::fs::remove_file(sibling(&current, ".old"));
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn is_downloaded_setup(name: &str) -> bool {
+    name.starts_with("teamup-shift-sync-")
+        && name.ends_with(&format!("-{}", asset_suffix("windows").unwrap_or_default()))
 }
 
 fn install_path() -> Result<PathBuf, String> {
@@ -200,7 +252,7 @@ fn sibling(path: &Path, extra: &str) -> PathBuf {
     path.with_file_name(name)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 fn replace_current(current: &Path, staged: &Path) -> Result<(), String> {
     let backup = sibling(current, ".old");
     let _ = std::fs::remove_file(&backup);
@@ -212,20 +264,14 @@ fn replace_current(current: &Path, staged: &Path) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 fn make_executable(path: &Path) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = std::fs::metadata(path)
-            .map_err(|_| INSTALL_FAILED.to_string())?
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(path, permissions).map_err(|_| INSTALL_FAILED.to_string())?;
-    }
-    #[cfg(not(unix))]
-    let _ = path;
-    Ok(())
+    use std::os::unix::fs::PermissionsExt;
+    let mut permissions = std::fs::metadata(path)
+        .map_err(|_| INSTALL_FAILED.to_string())?
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(path, permissions).map_err(|_| INSTALL_FAILED.to_string())
 }
 
 #[cfg(target_os = "macos")]
@@ -319,7 +365,7 @@ mod tests {
     const BODY: &str = r#"{
         "tag_name": "v2026.09.22",
         "assets": [
-            {"name": "teamup-shift-sync-2026.09.22-x86_64.exe", "browser_download_url": "https://example.test/win.exe"},
+            {"name": "teamup-shift-sync-2026.09.22-x86_64-setup.exe", "browser_download_url": "https://example.test/win.exe"},
             {"name": "teamup-shift-sync-2026.09.22-universal.pkg", "browser_download_url": "https://example.test/mac.pkg"},
             {"name": "teamup-shift-sync-2026.09.22-x86_64.AppImage", "browser_download_url": "https://example.test/linux.AppImage"}
         ]
@@ -331,7 +377,10 @@ mod tests {
             .expect("parse")
             .expect("newer");
         assert_eq!(offer.version, "2026.09.22");
-        assert_eq!(offer.asset_name, "teamup-shift-sync-2026.09.22-x86_64.exe");
+        assert_eq!(
+            offer.asset_name,
+            "teamup-shift-sync-2026.09.22-x86_64-setup.exe"
+        );
         assert_eq!(offer.url, "https://example.test/win.exe");
         assert_eq!(
             offer_from_release(BODY, "2026.09.21", "linux")
@@ -415,7 +464,49 @@ mod tests {
         }
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn windows_does_not_offer_the_portable_exe() {
+        let body = r#"{
+            "tag_name": "v2026.09.22",
+            "assets": [{"name": "teamup-shift-sync-2026.09.22-x86_64.exe", "browser_download_url": "https://example.test/win.exe"}]
+        }"#;
+        assert!(offer_from_release(body, "2026.09.21", "windows").is_err());
+    }
+
+    #[test]
+    fn the_windows_setup_runs_unattended_and_replaces_the_portable_copy() {
+        let portable =
+            Path::new(r"C:\Users\Anna\Downloads\teamup-shift-sync-2026.09.21-x86_64.exe");
+        let args = installer_args(Some(portable));
+        for flag in [
+            "/SILENT",
+            "/SUPPRESSMSGBOXES",
+            "/CLOSEAPPLICATIONS",
+            "/RELAUNCH",
+        ] {
+            assert!(args.iter().any(|arg| arg == flag), "{flag} is missing");
+        }
+        assert_eq!(
+            args.last().unwrap(),
+            r"/REPLACES=C:\Users\Anna\Downloads\teamup-shift-sync-2026.09.21-x86_64.exe"
+        );
+        assert!(!installer_args(None)
+            .iter()
+            .any(|arg| arg.to_string_lossy().starts_with("/REPLACES")));
+    }
+
+    #[test]
+    fn only_downloaded_setups_are_cleaned_up() {
+        assert!(is_downloaded_setup(
+            "teamup-shift-sync-2026.09.22-x86_64-setup.exe"
+        ));
+        assert!(!is_downloaded_setup(
+            "teamup-shift-sync-2026.09.22-x86_64.exe"
+        ));
+        assert!(!is_downloaded_setup("other-x86_64-setup.exe"));
+    }
+
+    #[cfg(not(any(target_os = "macos", windows)))]
     #[test]
     fn replace_swaps_the_running_file_and_keeps_the_previous_one() {
         let dir = tempfile::tempdir().expect("temp dir");

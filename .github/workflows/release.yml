@@ -111,33 +111,64 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build the portable exe
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+      - name: Build the installer and the portable exe
         shell: pwsh
         run: ./scripts/package-windows-exe.ps1
-      - name: Verify the packaged exe
+      - name: Install, check and uninstall the installer
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $exe = (Get-Item "dist\*.exe").FullName
+          $setup = (Get-Item "dist\*-x86_64-setup.exe").FullName
 
-          # A person who already used the app has data here. Replacing or
-          # deleting the exe both have to leave it alone.
+          # A person who already used the app has data here. Installing,
+          # updating and uninstalling all have to leave it alone.
           $data = Join-Path $env:APPDATA "teamup-shift-sync\data"
           New-Item -ItemType Directory -Force $data | Out-Null
           Set-Content -Path (Join-Path $data "setup.json") -Value '{"stage":"kept"}'
 
+          # An update from a portable release names the old exe; the installer
+          # deletes it and nothing else.
+          $downloads = Join-Path $env:TEMP "downloads"
+          New-Item -ItemType Directory -Force $downloads | Out-Null
+          $portable = Join-Path $downloads "teamup-shift-sync-2026.01.01-x86_64.exe"
+          Copy-Item (Get-Item "dist\*-x86_64.exe").FullName $portable
+          Set-Content -Path (Join-Path $downloads "other.exe") -Value "keep"
+
+          # Wait on the setup process itself: Start-Process -Wait would also
+          # wait for anything it starts.
+          $dir = Join-Path $env:TEMP "BPA Overblik"
+          $install = Start-Process -FilePath $setup -PassThru -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=`"$dir`"", "`"/REPLACES=$portable`""
+          $install.WaitForExit()
+          if ($install.ExitCode -ne 0) { throw "the installer failed with $($install.ExitCode)" }
+          $exe = Join-Path $dir "BPA Overblik.exe"
+          if (-not (Test-Path $exe)) { throw "the installer did not install $exe" }
+          if (Test-Path $portable) { throw "the installer left the portable exe behind" }
+          if (-not (Test-Path (Join-Path $downloads "other.exe"))) { throw "the installer deleted an unrelated file" }
+          $uninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{155291D4-EF41-47E1-B584-D1954E8A9148}_is1"
+          if ((Get-ItemProperty $uninstallKey).DisplayVersion -ne $env:TEAMUP_SHIFT_SYNC_VERSION) { throw "Apps & features shows the wrong version" }
+
           $env:TEAMUP_SHIFT_SYNC_CONFIG = Join-Path (Get-Location) "fixtures\offline-config.toml"
           $env:TEAMUP_FIXTURE = Join-Path (Get-Location) "fixtures\representative-week.json"
-          # The packaged GUI is a windowed app, so `&` returns without waiting
+          # The installed GUI is a windowed app, so `&` returns without waiting
           # and $LASTEXITCODE keeps a stale value. Wait for the process and
           # read its exit code instead.
           $stdout = Join-Path $env:TEMP "teamup-selfcheck.log"
           $stderr = Join-Path $env:TEMP "teamup-selfcheck.err.log"
           $selfcheck = Start-Process -FilePath $exe -ArgumentList "--self-check" -NoNewWindow -Wait -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
           Get-Content $stdout
-          if ($selfcheck.ExitCode -ne 0) { Get-Content $stderr; throw "packaged app failed its self-check" }
+          if ($selfcheck.ExitCode -ne 0) { Get-Content $stderr; throw "installed app failed its self-check" }
           Remove-Item Env:TEAMUP_SHIFT_SYNC_CONFIG, Env:TEAMUP_FIXTURE
-          if (-not (Test-Path (Join-Path $data "setup.json"))) { throw "the packaged exe erased the user's data" }
+
+          $uninstall = Start-Process -FilePath (Join-Path $dir "unins000.exe") -PassThru -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"
+          $uninstall.WaitForExit()
+          if ($uninstall.ExitCode -ne 0) { throw "the uninstaller failed with $($uninstall.ExitCode)" }
+          Start-Sleep -Seconds 2
+          if (Test-Path $exe) { throw "the uninstaller left the app behind" }
+          if (Test-Path $uninstallKey) { throw "the uninstaller left the Apps & features entry" }
+          if (-not (Test-Path (Join-Path $data "setup.json"))) { throw "installing or uninstalling erased the user's data" }
       - uses: actions/upload-artifact@v4
         with:
           name: windows-exe
@@ -218,7 +249,7 @@ jobs:
 
           | System | Fil |
           | --- | --- |
-          | Windows 10 og 11 (64-bit) | `.exe` |
+          | Windows 10 og 11 (64-bit) | `-setup.exe` |
           | macOS 11 og nyere (Intel og Apple Silicon) | `.pkg` |
           | Linux (64-bit) | `.AppImage` |
 
@@ -232,6 +263,10 @@ jobs:
           Afinstallation sletter dem heller ikke.
 
           Chromium skal være installeret på maskinen. Appen henter aldrig selv en browser.
+
+          Den `.exe`, der ikke hedder `-setup.exe`, er den gamle bærbare udgave. Den
+          ligger her kun, så ældre versioner kan opdatere sig selv; de flytter over
+          til installationen ved den næste opdatering.
           NOTES
 
           gh release create "$tag" \
