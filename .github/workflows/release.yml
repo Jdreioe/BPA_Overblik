@@ -26,13 +26,13 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 # Manual runs choose the next free suffix at the start, so serialize them to
 # keep two runs from building packages with the same version.
 concurrency:
-  group: release-${{ github.event_name == 'workflow_dispatch' && 'manual' || github.run_id }}
-  cancel-in-progress: false
+  group: release-${{ github.event_name == 'workflow_dispatch' && 'manual' || github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   version:
@@ -88,7 +88,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev
+      - uses: Swatinem/rust-cache@v2
       - name: Run the workspace tests
+        # The desktop workflow already runs these on packaging PRs.
+        if: github.event_name != 'pull_request'
         run: cargo test --workspace --all-targets
       - name: Build the AppImage
         run: ./scripts/package-linux-appimage.sh
@@ -111,6 +114,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - run: rustup target add x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
       - name: Build the portable exe
         shell: pwsh
         run: ./scripts/package-windows-exe.ps1
@@ -153,6 +158,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
       - name: Build the pkg
         run: ./scripts/package-macos-pkg.sh
       - name: Install and verify the pkg
@@ -169,9 +176,8 @@ jobs:
           pkgutil --files io.github.jdreioe.teamup-shift-sync | head -20 || true
           ls -la /Applications
 
-          # Resolved rather than spelled out, so the check follows the bundle
-          # name and survives its space.
-          app="$(ls -d /Applications/*.app | grep -i overblik | head -1)"
+          # The package installs this app at a fixed path.
+          app="/Applications/BPA Overblik.app"
           echo "Installed app: $app"
           test -x "$app/Contents/MacOS/teamup-shift-sync-gui"
           lipo -archs "$app/Contents/MacOS/teamup-shift-sync-gui" | tee /dev/stderr | grep -q "x86_64 arm64"
@@ -190,6 +196,8 @@ jobs:
     needs: [version, linux, windows, macos]
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref_type == 'tag')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4

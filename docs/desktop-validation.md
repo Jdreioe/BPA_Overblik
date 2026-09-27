@@ -1,10 +1,16 @@
 # Desktop validation
 
-Issue #2 uses the same package check on Windows, macOS and Linux. The CI matrix
-builds the release GUI and CLI binaries, places them beside `fixtures/`, and
-runs `teamup-shift-sync-gui --self-check`. The check builds the representative
-fixture preview through the core and prints its approval digest. The resulting
-portable directory is uploaded as an artifact.
+The desktop workflow runs the workspace tests on Windows, macOS and Linux for
+code-changing pull requests. It also checks formatting and Clippy on Linux.
+Documentation-only pull requests finish after the changed-file check. New
+commits cancel older runs for the same pull request.
+
+On `main`, the CI matrix also builds the release GUI and CLI binaries, places
+them beside `fixtures/`, and runs `teamup-shift-sync-gui --self-check`. The
+check builds the representative fixture preview through the core and prints
+its approval digest. The portable directory is uploaded as an artifact.
+Pull requests that change packaging run the actual installer builds through
+the Release workflow instead of repeating these portable builds.
 
 Dated releases wrap the same binaries in the files people download, and CI
 checks each one before publishing; see [packaging](packaging.md) for what that
@@ -15,6 +21,14 @@ Run the same check locally with:
 ```bash
 cargo build --release --workspace
 ./target/release/teamup-shift-sync-gui --self-check
+```
+
+Run the pull request checks locally with:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --all-targets
 ```
 
 ## Accessibility check

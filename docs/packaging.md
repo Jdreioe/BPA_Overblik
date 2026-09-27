@@ -43,7 +43,11 @@ the tag and publishes the release after every platform passes. Manual runs are
 serialized so they cannot choose the same tag. You can also push an unused tag
 in the format above to start the same build. Merging a branch does not
 publish a release; pull requests that change packaging run the package checks
-without publishing.
+without publishing. The desktop workflow runs tests on all three systems for
+those pull requests; the Release workflow builds the installers without
+repeating its Linux test run. Both workflows cache compiled Rust dependencies
+per compatible platform, target and toolchain. Dated release builds still
+compile the app with that release's version.
 
 Build one package locally with `scripts/package-linux-appimage.sh`,
 `scripts/package-windows-exe.ps1` or `scripts/package-macos-pkg.sh`. Each one
