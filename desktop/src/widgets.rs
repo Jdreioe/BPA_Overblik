@@ -454,9 +454,14 @@ fn block_body<'a, M: 'a>(block: &'a Block) -> Element<'a, M> {
     // The cell carries who and what-state. Time is the block's position on
     // the clock; continuation and SPS are marks. Their exact values are in
     // the block's tooltip.
-    let mut body =
-        column![text(format!("{} {}", status_marker(&block.status), block.helper)).size(11),]
-            .spacing(0);
+    // The name moves under the label when a narrow lane has no room beside it.
+    let mut body = column![
+        row![status_badge(&block.status), text(&block.helper).size(11)]
+            .spacing(3)
+            .wrap()
+            .vertical_spacing(1)
+    ]
+    .spacing(0);
     let mut marks: Vec<&str> = Vec::new();
     if block.continues_before {
         marks.push("▲");
@@ -519,12 +524,38 @@ fn block_details<'a, M: 'a>(block: &'a Block) -> Element<'a, M> {
 /// Text cue beside every colour, so status never depends on colour alone.
 fn status_marker(status: &str) -> &'static str {
     match status {
-        "create" => "[NY]",
-        "update" => "[ÆNDRET]",
-        "matched" => "[OK]",
-        "attention" => "[!]",
-        _ => "[?]",
+        "create" => "NY",
+        "update" => "ÆNDRET",
+        "matched" => "OK",
+        "attention" => "!",
+        _ => "?",
     }
+}
+
+/// The status as a small filled label in the outline's colour. White on
+/// every status colour passes contrast, and the word itself carries the state.
+fn status_badge<'a, M: 'a>(status: &str) -> Element<'a, M> {
+    let color = status_color(status);
+    container(
+        text(status_marker(status))
+            .size(9)
+            .font(iced::Font {
+                weight: iced::font::Weight::Bold,
+                ..iced::Font::DEFAULT
+            })
+            .wrapping(text::Wrapping::None),
+    )
+    .padding([0, 3])
+    .style(move |_theme: &iced::Theme| container::Style {
+        background: Some(color.into()),
+        text_color: Some(Color::WHITE),
+        border: iced::Border {
+            radius: 3.0.into(),
+            ..iced::Border::default()
+        },
+        ..container::Style::default()
+    })
+    .into()
 }
 
 /// Fill the block with the helper's own Teamup colour, tinted so the text
