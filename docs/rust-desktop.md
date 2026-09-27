@@ -9,9 +9,11 @@ cargo run -p teamup-shift-sync-gui
 ```
 
 It uses the per-user application data directory, or `TEAMUP_SHIFT_SYNC_DATA_DIR`
-when set, for `setup.json`, browser profiles and sync history. Source credentials or a Google Sheets capability link are read from and written to the OS vault.
+when set, for `setup.json`, browser profiles, sync history and the
+Kompensationsydelse log. Source credentials or a Google Sheets capability link are read from and written to the OS vault.
 
-The home screen shows only the week, its changes and the two primary actions.
+The main window has two tabs. **Vagtplan** shows only the week, its changes
+and the two primary actions; **Kompensationsydelse** is described below.
 Everything technical lives on **Indstillinger** and **Support**. Setup runs on
 Indstillinger: until a setup is confirmed that is the screen the app opens, and
 confirming revalidates both services and returns to the week. Importing a legacy
@@ -32,6 +34,27 @@ TOML configuration is the one setup feature not carried over from the old engine
 
 Opening Indstillinger revokes a shown approval, because editing settings can
 change the account behind it.
+
+## Kompensationsydelse
+
+The tab keeps an expense log for kompensationsydelse; the README describes
+what the person sees. It is deliberately independent of the shift workflow:
+
+- `kompensation.json` and `bilag/` are separate from `setup.json` and from
+  every `sync-<scope>.sqlite3`, so switching accounts leaves them alone.
+- Every edit goes through the core's `compensation::Store`, which reads the
+  file, applies one change and writes it back atomically under one lock. A log
+  that cannot be read is reported and never replaced by an empty one.
+- A chosen bilag is copied in, so an export months later still has it. A
+  replaced or deleted expense removes its copy.
+- Its messages are handled before the one-operation guard, because they touch
+  neither setup nor the services. The tab stays usable during a transfer.
+- The export PDFs use the PDF standard fonts Helvetica and Helvetica-Bold with
+  WinAnsi encoding, so no font file is embedded. Characters outside that
+  encoding print as `?`.
+
+The reminder card on Vagtplan is queued by a completed, not stopped, transfer
+while the setting is on, and is stored with the log, so it survives a restart.
 
 ## Switching accounts
 
