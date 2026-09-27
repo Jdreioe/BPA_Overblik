@@ -7,7 +7,9 @@
 //! blocking threads.
 
 use chrono::NaiveDate;
-use iced::widget::{button, column, pick_list, row, space, text, text_input, toggler, Column};
+use iced::widget::{
+    button, column, container, row, rule, space, text, text_input, toggler, Column,
+};
 use iced::{Element, Length, Task};
 use std::path::PathBuf;
 use teamup_shift_sync_core::compensation::{
@@ -71,6 +73,8 @@ pub enum Message {
     ExportAnyway,
     CancelExport,
     ExportTarget(Option<PathBuf>),
+    /// Open Indstillinger → Kompensation. The app handles it.
+    PriceSettings,
     Exported(Result<PathBuf, String>),
     Remind(bool),
     /// A week's transfer completed.
@@ -332,7 +336,13 @@ impl CompensationUi {
                 Err(error) => self.log = Loading::Failed(error),
             },
             Message::Saved(result) => match result {
-                Ok(log) => self.accept(log),
+                Ok(log) => {
+                    self.accept(log);
+                    // A price per km saved after the km were typed prices them.
+                    if self.form.pris.is_empty() {
+                        self.fill_price();
+                    }
+                }
                 Err(error) => self.error(&error),
             },
             // A failure keeps what the person typed.
@@ -533,6 +543,8 @@ impl CompensationUi {
                 self.error(&error);
             }
             Message::CancelExport => self.export_missing = None,
+            // The app opens Indstillinger; the form stays as typed.
+            Message::PriceSettings => {}
             Message::ExportTarget(None) => {}
             Message::ExportTarget(Some(mut target)) => {
                 let Some(log) = self.log().cloned() else {
@@ -801,44 +813,77 @@ impl CompensationUi {
         })
     }
 
+    /// Type tiles on the left; the chosen type's fields on the right.
     fn form<'a>(&'a self, log: &'a Log) -> Column<'a, Message> {
+        let mut tiles = column![text("1 · Hvad har du betalt for?").size(16)].spacing(10);
+        for kinds in ExpenseType::ALL.chunks(3) {
+            let mut line = row![].spacing(10);
+            for &kind in kinds {
+                let tile = column![
+                    text(icon(kind)).size(24),
+                    text(kind.label()).size(13).center()
+                ]
+                .spacing(6)
+                .align_x(iced::alignment::Horizontal::Center);
+                line = line.push(
+                    button(container(tile).center(Length::Fill))
+                        .style(chosen(self.form.kind == Some(kind), 8.0))
+                        .padding([8, 4])
+                        .width(Length::Fill)
+                        .height(Length::Fixed(88.0))
+                        .on_press(Message::Kind(kind)),
+                );
+            }
+            tiles = tiles.push(line);
+        }
+        let tiles = tiles
+            .push(text("Hver type viser kun de felter, den skal bruge.").size(13))
+            .width(Length::Fixed(420.0));
+        let fields = match self.form.kind {
+            None => column![
+                text("2 · Udfyld").size(16),
+                text("Vælg først, hvad du har betalt for."),
+            ]
+            .spacing(12),
+            Some(kind) => self.fields(log, kind),
+        };
+        column![row![tiles, fields.width(Length::Fill)].spacing(28)]
+    }
+
+    fn fields<'a>(&'a self, log: &'a Log, kind: ExpenseType) -> Column<'a, Message> {
         let form = &self.form;
+        let driving = kind == ExpenseType::Driving;
         let labelled = |label: &'static str, input: Element<'a, Message>| -> Element<'a, Message> {
             column![text(label).size(13), input].spacing(4).into()
         };
-        let input = |placeholder: &'static str, value: &'a str, on: fn(String) -> Message| {
-            text_input(placeholder, value)
+        let input = |value: &'a str, on: fn(String) -> Message| {
+            text_input("", value)
                 .on_input(on)
                 .on_submit(Message::Save)
                 .padding(8)
         };
-        let mut fields = column![row![
-            labelled(
-                "Type",
-                pick_list(ExpenseType::ALL, form.kind, Message::Kind)
-                    .placeholder("Vælg type")
-                    .padding(8)
-                    .width(Length::Fixed(240.0))
-                    .into(),
-            ),
-            labelled(
-                "Dato",
-                crate::widgets::date_picker(
-                    form.date,
-                    form.calendar,
-                    Message::ToggleCalendar,
-                    Message::CalendarMonth,
-                    Message::PickDate,
+        let mut fields = column![
+            text(format!("2 · {}", kind.label())).size(16),
+            row![
+                labelled(
+                    "Dato",
+                    crate::widgets::date_picker(
+                        form.date,
+                        form.calendar,
+                        Message::ToggleCalendar,
+                        Message::CalendarMonth,
+                        Message::PickDate,
+                    ),
                 ),
-            ),
+                labelled(
+                    if driving { "Formål" } else { "Beskrivelse" },
+                    input(&form.beskrivelse, Message::Beskrivelse).into(),
+                ),
+            ]
+            .spacing(12),
         ]
-        .spacing(12)]
         .spacing(12);
-        fields = fields.push(labelled(
-            "Beskrivelse",
-            input("", &form.beskrivelse, Message::Beskrivelse).into(),
-        ));
-        if form.kind == Some(ExpenseType::Driving) {
+        if driving {
             for (field, label, value) in [
                 (AddressField::Fra, "Fra", &form.fra),
                 (AddressField::Til, "Til", &form.til),
@@ -846,7 +891,7 @@ impl CompensationUi {
                 let mut address = column![text_input("", value)
                     .on_input(move |value| Message::Address(field, value))
                     .padding(8)]
-                .spacing(4);
+                .spacing(6);
                 if form.suggest == Some(field) {
                     for suggestion in address_suggestions(log, value) {
                         address = address.push(
@@ -856,38 +901,49 @@ impl CompensationUi {
                         );
                     }
                 }
+                // Frequent addresses are one press away, by nickname.
+                if !log.addresses.is_empty() {
+                    let mut chips = row![].spacing(8);
+                    for frequent in &log.addresses {
+                        chips = chips.push(
+                            button(text(&frequent.nickname).size(14))
+                                .style(chosen(*value == frequent.address, 16.0))
+                                .padding([6, 12])
+                                .on_press(Message::Suggested(field, frequent.address.clone())),
+                        );
+                    }
+                    address = address.push(chips.wrap().vertical_spacing(8));
+                }
                 fields = fields.push(labelled(label, address.into()));
+                if field == AddressField::Fra {
+                    fields = fields.push(quiet("⇅ Byt Fra og Til", Some(Message::Swap)));
+                }
             }
+            if log.price_per_km.is_none() {
+                fields = fields.push(price_missing());
+            }
+        }
+        let amount = labelled("Beløb (kr)", input(&form.pris, Message::Pris).into());
+        fields = fields.push(if driving {
+            row![labelled("Km", input(&form.km, Message::Km).into()), amount].spacing(12)
+        } else {
+            row![amount, space::horizontal()].spacing(12)
+        });
+        if let (true, Some(km), Some(price)) = (driving, parse_decimal(&form.km), log.price_per_km)
+        {
             fields = fields.push(
-                row![
-                    quiet("Byt Fra/Til", Some(Message::Swap)),
-                    labelled(
-                        "Km",
-                        input("", &form.km, Message::Km)
-                            .width(Length::Fixed(100.0))
-                            .into()
-                    ),
-                ]
-                .spacing(12)
-                .align_y(iced::alignment::Vertical::Bottom),
+                text(format!(
+                    "{} km × {} kr/km",
+                    format_km(km),
+                    price.to_string().replace('.', ",")
+                ))
+                .size(13),
             );
         }
-        let placeholder = if form.kind == Some(ExpenseType::Driving) && log.price_per_km.is_none() {
-            "Pris pr. km sættes i Indstillinger"
-        } else {
-            ""
-        };
-        fields = fields
-            .push(labelled(
-                "Beløb",
-                input(placeholder, &form.pris, Message::Pris)
-                    .width(Length::Fixed(240.0))
-                    .into(),
-            ))
-            .push(labelled(
-                "Andet",
-                input("", &form.andet, Message::Andet).into(),
-            ));
+        fields = fields.push(labelled(
+            "Note (valgfri)",
+            input(&form.andet, Message::Andet).into(),
+        ));
         let bilag_name = match &form.bilag {
             FormBilag::None => None,
             FormBilag::Saved(bilag) => Some(bilag.name.clone()),
@@ -896,7 +952,7 @@ impl CompensationUi {
                 .map(|name| name.to_string_lossy().into_owned()),
         };
         fields = fields.push(match bilag_name {
-            None => row![quiet("Vælg bilag", Some(Message::ChooseBilag))],
+            None => row![quiet("Tilføj bilag", Some(Message::ChooseBilag))],
             Some(name) => row![
                 text(format!("Bilag: {name}")).size(14),
                 quiet("Skift", Some(Message::ChooseBilag)),
@@ -906,15 +962,17 @@ impl CompensationUi {
             .align_y(iced::alignment::Vertical::Center),
         });
         let save = (!self.saving).then_some(Message::Save);
-        fields.push(if form.editing.is_some() {
-            row![
-                primary("Gem ændring", save),
-                quiet("Fortryd", Some(Message::CancelEdit))
-            ]
-            .spacing(8)
-        } else {
-            row![primary("Gem udgift", save)]
-        })
+        fields
+            .push(rule::horizontal(1))
+            .push(if form.editing.is_some() {
+                row![
+                    primary("Gem ændring", save),
+                    quiet("Fortryd", Some(Message::CancelEdit))
+                ]
+                .spacing(8)
+            } else {
+                row![primary("Gem udgift", save)]
+            })
     }
 
     fn report<'a>(&'a self, log: &'a Log) -> Column<'a, Message> {
@@ -1093,6 +1151,70 @@ fn primary<'a>(label: &'a str, message: Option<Message>) -> iced::widget::Button
         .on_press_maybe(message)
 }
 
+/// The icon on an expense type's tile.
+fn icon(kind: ExpenseType) -> &'static str {
+    match kind {
+        ExpenseType::Driving => "🚗",
+        ExpenseType::Medicine => "💊",
+        ExpenseType::Diet => "🍎",
+        ExpenseType::Rent => "🏠",
+        ExpenseType::Leisure => "🎟",
+        ExpenseType::Courses => "🎓",
+        ExpenseType::Clothing => "👕",
+        ExpenseType::Utilities => "💡",
+        ExpenseType::Other => "…",
+    }
+}
+
+/// An outlined choice. The selected one gets a thicker accent border and a
+/// tint, so the choice does not depend on colour alone.
+fn chosen(
+    selected: bool,
+    radius: f32,
+) -> impl Fn(&iced::Theme, iced::widget::button::Status) -> iced::widget::button::Style {
+    move |theme, status| {
+        let mut style = crate::widgets::outlined(theme, status);
+        style.border.radius = radius.into();
+        if selected {
+            let accent = theme.extended_palette().primary.base.color;
+            style.border.color = accent;
+            style.border.width = 2.0;
+            style.background = Some(accent.scale_alpha(0.2).into());
+        }
+        style
+    }
+}
+
+/// Kørsel is priced from pris pr. km, so its absence is said where the
+/// amount is entered, with the way to fix it.
+fn price_missing<'a>() -> Element<'a, Message> {
+    container(
+        row![
+            text("! Pris pr. km mangler, så beløbet kan ikke regnes ud.")
+                .size(14)
+                .width(Length::Fill),
+            quiet("Sæt pris pr. km", Some(Message::PriceSettings)),
+        ]
+        .spacing(10)
+        .align_y(iced::alignment::Vertical::Center),
+    )
+    .padding([8, 12])
+    .width(Length::Fill)
+    .style(|theme: &iced::Theme| {
+        let warning = theme.extended_palette().warning.base.color;
+        iced::widget::container::Style {
+            background: Some(warning.scale_alpha(0.12).into()),
+            border: iced::Border {
+                color: warning.scale_alpha(0.6),
+                width: 1.0,
+                radius: 8.0.into(),
+            },
+            ..iced::widget::container::Style::default()
+        }
+    })
+    .into()
+}
+
 #[cfg(test)]
 impl CompensationUi {
     /// A tab whose log has already loaded.
@@ -1130,6 +1252,22 @@ mod tests {
         let _ = ui.update(Message::FormSaved(Ok(Log::default())));
         assert!(ui.form.pris.is_empty());
         assert_eq!(ui.view, View::Expenses);
+    }
+
+    #[test]
+    fn a_price_per_km_saved_later_prices_typed_km_but_keeps_a_typed_amount() {
+        let mut ui = CompensationUi::loaded(Log::default());
+        let _ = ui.update(Message::Kind(ExpenseType::Driving));
+        let _ = ui.update(Message::Km("10".into()));
+        assert!(ui.form.pris.is_empty());
+        let mut priced = Log::default();
+        priced.price_per_km = Some(3.79);
+        let _ = ui.update(Message::Saved(Ok(priced.clone())));
+        assert_eq!(ui.form.pris, "38");
+
+        let _ = ui.update(Message::Pris("40".into()));
+        let _ = ui.update(Message::Saved(Ok(priced)));
+        assert_eq!(ui.form.pris, "40");
     }
 
     #[test]

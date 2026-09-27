@@ -331,11 +331,15 @@ revokes an approval.
 Like the app, the tab has **Udgifter** (grouped by month), **Kørsel** (to copy
 an earlier trip), **Tilføj udgift** and **Rapport**. The app's settings,
 pris pr. km and hyppige adresser, are under **Indstillinger → Kompensation**.
+**Tilføj udgift** starts with a tile per type and then shows only that type's
+fields.
 
 Kørsel works without sending addresses anywhere, unlike the app, which asked
 Photon and OSRM. Fra and Til suggest hyppige adresser and addresses used
-before. A route driven before fills in its km (either direction), and the
-amount is km × pris pr. km, still editable.
+before, and each hyppig adresse is also a button under both fields. A route
+driven before fills in its km (either direction), and the amount is km × pris
+pr. km, still editable. Without a pris pr. km, the form says so and links to
+the setting.
 
 **Eksportér rapport** saves one `.zip` of all expenses:
 `Udgiftsoversigt.pdf`, `Bilagsliste.pdf` and the bilag in `Bilag/`, numbered

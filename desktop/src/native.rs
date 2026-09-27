@@ -2329,6 +2329,13 @@ impl NativeApp {
         Task::none()
     }
     fn compensation_message(&mut self, message: compensation::Message) -> Task<Message> {
+        if matches!(message, compensation::Message::PriceSettings) {
+            let task = self.update(Message::Open(Screen::Settings));
+            if self.screen == Screen::Settings {
+                self.settings_section = SettingsSection::Compensation;
+            }
+            return task;
+        }
         if matches!(message, compensation::Message::EnterForWeek(_)) {
             self.screen = Screen::Compensation;
         }
