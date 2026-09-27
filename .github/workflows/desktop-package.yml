@@ -5,8 +5,69 @@ on:
     branches: [main, 2-iced-desktop-shell]
   pull_request:
 
+permissions:
+  contents: read
+  pull-requests: read
+
+# A new commit makes earlier checks for the same PR obsolete. Main builds
+# always finish, since their artifacts can be used for validation.
+concurrency:
+  group: desktop-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.classify.outputs.code }}
+    steps:
+      - name: Check whether the PR changes code
+        id: classify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Include a rename's old path so moving code into docs still runs CI.
+          files="$(gh api --paginate "repos/$REPOSITORY/pulls/$PR_NUMBER/files?per_page=100" --jq '.[] | .filename, (.previous_filename // empty)')"
+          code=false
+          if [[ -z "$files" ]]; then
+            code=true
+          else
+            while IFS= read -r file; do
+              case "$file" in
+                *.md|docs/*) ;;
+                *) code=true; break ;;
+              esac
+            done <<< "$files"
+          fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+
+  lint:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Install Linux system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev
+      - uses: Swatinem/rust-cache@v2
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
   package:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     # The Windows runner is slow (a release iced build alone takes ~10
     # min), but a silent hang must never burn the 6-hour default again.
     timeout-minutes: 60
@@ -21,11 +82,14 @@ jobs:
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev
+      - uses: Swatinem/rust-cache@v2
       - name: Run Rust tests
         run: cargo test --workspace --all-targets
       - name: Build release binaries
+        if: github.event_name == 'push'
         run: cargo build --release --workspace
       - name: Bundle and self-check portable bundle
+        if: github.event_name == 'push'
         shell: bash
         run: |
           bundle="dist/teamup-shift-sync-${{ runner.os }}-${{ runner.arch }}"
@@ -42,6 +106,7 @@ jobs:
             "./teamup-shift-sync-gui$exe" --self-check
           )
       - uses: actions/upload-artifact@v4
+        if: github.event_name == 'push'
         with:
           name: desktop-${{ runner.os }}-${{ runner.arch }}
           path: dist/
