@@ -27,6 +27,7 @@ futures-util = "0.3.34"
 quick-xml = "0.41"
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
 keyring = { version = "3", features = ["sync-secret-service", "crypto-rust", "apple-native", "windows-native"] }
+pdf-writer = "0.15"
 
 [dev-dependencies]
 tempfile = "3"

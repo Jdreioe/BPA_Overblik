@@ -194,6 +194,98 @@ pub fn group<'a, M: 'a>(
     .into()
 }
 
+/// A bordered card around one item in a list.
+pub fn card<'a, M: 'a>(content: impl Into<Element<'a, M>>) -> Element<'a, M> {
+    container(content.into())
+        .padding([10, 12])
+        .width(Length::Fill)
+        .style(group_box)
+        .into()
+}
+
+/// Width of one day in [`date_picker`].
+const DAY_WIDTH: f32 = 40.0;
+
+/// A date button that opens a Danish month calendar under it, Monday first.
+/// `shown` is the month in view while the calendar is open, `None` while it
+/// is closed; the caller closes it when a day is picked.
+pub fn date_picker<'a, M: Clone + 'a>(
+    selected: NaiveDate,
+    shown: Option<NaiveDate>,
+    toggle: M,
+    on_month: impl Fn(NaiveDate) -> M,
+    on_pick: impl Fn(NaiveDate) -> M,
+) -> Element<'a, M> {
+    let field = button(text(format!("{}  ▾", selected.format("%d.%m.%Y"))))
+        .style(outlined)
+        .padding([8, 12])
+        .on_press(toggle);
+    let Some(shown) = shown else {
+        return field.into();
+    };
+    let first = shown.with_day(1).expect("the first of a month exists");
+    let next = first + chrono::Months::new(1);
+    let centered = |label: String| {
+        text(label)
+            .width(Length::Fixed(DAY_WIDTH))
+            .align_x(iced::alignment::Horizontal::Center)
+    };
+    let mut calendar = column![row![
+        button(text("‹"))
+            .style(outlined)
+            .padding([4, 12])
+            .on_press(on_month(first - chrono::Months::new(1))),
+        text(format!(
+            "{} {}",
+            DANISH_MONTHS[first.month0() as usize],
+            first.year()
+        ))
+        .width(Length::Fill)
+        .align_x(iced::alignment::Horizontal::Center),
+        button(text("›"))
+            .style(outlined)
+            .padding([4, 12])
+            .on_press(on_month(next)),
+    ]
+    .align_y(iced::alignment::Vertical::Center)
+    .width(Length::Fixed(7.0 * DAY_WIDTH))]
+    .spacing(4);
+    let mut weekdays = row![];
+    for label in ["ma", "ti", "on", "to", "fr", "lø", "sø"] {
+        weekdays = weekdays.push(centered(label.into()).size(13));
+    }
+    calendar = calendar.push(weekdays);
+    let mut day = first - chrono::Duration::days(first.weekday().num_days_from_monday().into());
+    while day < next {
+        let mut week = row![];
+        for _ in 0..7 {
+            let cell: Element<'a, M> = if day.month() == first.month() {
+                let chosen = day == selected;
+                button(centered(day.day().to_string()))
+                    .width(Length::Fixed(DAY_WIDTH))
+                    .padding([8, 0])
+                    .style(move |theme, status| {
+                        if chosen {
+                            button::primary(theme, status)
+                        } else {
+                            button::text(theme, status)
+                        }
+                    })
+                    .on_press(on_pick(day))
+                    .into()
+            } else {
+                space().width(Length::Fixed(DAY_WIDTH)).into()
+            };
+            week = week.push(cell);
+            day = day.succ_opt().expect("a later day exists");
+        }
+        calendar = calendar.push(week);
+    }
+    column![field, container(calendar).padding(8).style(group_box)]
+        .spacing(6)
+        .into()
+}
+
 fn group_box(theme: &iced::Theme) -> container::Style {
     let palette = theme.extended_palette();
     container::Style {

@@ -5,6 +5,7 @@
 
 mod absence;
 mod approval;
+pub mod compensation;
 pub mod fixture;
 pub mod ical;
 pub mod live;

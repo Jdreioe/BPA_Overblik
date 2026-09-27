@@ -1,7 +1,8 @@
 # BPA Overblik
 A local, manually triggered weekly importer for planning helper shifts from
 TeamUp, a spreadsheet or any calendar's iCal feed in MitHF. SPS
-registration in DUOS is optional.
+registration in DUOS is optional. A second tab keeps the expenses a BPA user
+documents when applying for kompensationsydelse.
 
 One pure Rust core owns parsing, planning, approval, transfers and sync state.
 The Iced desktop app and a small CLI both use it. There is no Python
@@ -319,6 +320,47 @@ unresolved items and at least one write. Clicking it re-reads the source and
 enabled destinations; only an unchanged plan counts as approved. Changing the
 week, the setup or the plan revokes an approval. The transfer verifies every
 step through read-back and keeps recovery records for anything uncertain.
+
+## Kompensationsydelse
+
+The desktop app has two tabs: **Vagtplan** is the week above, and
+**Kompensationsydelse** is a port of
+[kompensationsydelsesapp](https://github.com/Jdreioe/kompensationsydelsesapp).
+It needs no shift setup, works during a transfer, and switching tabs never
+revokes an approval.
+
+Like the app, the tab has **Udgifter** (grouped by month), **Kørsel** (to copy
+an earlier trip), **Tilføj udgift** and **Rapport**. The app's settings,
+pris pr. km and hyppige adresser, are under **Indstillinger → Kompensation**.
+**Tilføj udgift** starts with a tile per type and then shows only that type's
+fields.
+
+Kørsel works without sending addresses anywhere, unlike the app, which asked
+Photon and OSRM. Fra and Til suggest hyppige adresser and addresses used
+before, and each hyppig adresse is also a button under both fields. A route
+driven before fills in its km (either direction), and the amount is km × pris
+pr. km, still editable. Without a pris pr. km, the form says so and links to
+the setting.
+
+**Eksportér rapport** saves one `.zip` of all expenses:
+`Udgiftsoversigt.pdf`, `Bilagsliste.pdf` and the bilag in `Bilag/`, numbered
+in date order. A bilag whose file has gone missing is named before the export
+continues. The monthly estimate is the app's: everything registered, spread
+over the days from the first to the last expense.
+
+**Importér fra kompensationsydelsesapp** reads the app's report zip
+(`udgifter.csv` and `bilag/`) once, for moving over. The CSV has no bilag
+column, so a bilag is linked only when exactly one expense has the
+beskrivelse in its `Bilag: <beskrivelse>.pdf` name. The others are named
+afterwards, to attach by hand. Importing again adds nothing twice.
+
+With **Påmind om udgifter** turned on (it is off by default), each completed
+**Godkend ændringer** leaves a card on Vagtplan asking for that week's
+expenses, until it is answered.
+
+Everything lives in the app data directory: `kompensation.json` and the copied
+bilag in `bilag/`. Expenses and routes are health and location information,
+so they never appear in logs, diagnostics or the shared problem report.
 
 ## Desktop login
 
