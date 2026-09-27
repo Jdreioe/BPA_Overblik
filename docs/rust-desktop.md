@@ -37,8 +37,8 @@ change the account behind it.
 
 ## Kompensationsydelse
 
-The tab keeps an expense log for kompensationsydelse; the README describes
-what the person sees. It is deliberately independent of the shift workflow:
+The tab ports kompensationsydelsesapp; the README describes what the person
+sees. It is deliberately independent of the shift workflow:
 
 - `kompensation.json` and `bilag/` are separate from `setup.json` and from
   every `sync-<scope>.sqlite3`, so switching accounts leaves them alone.
@@ -46,9 +46,14 @@ what the person sees. It is deliberately independent of the shift workflow:
   file, applies one change and writes it back atomically under one lock. A log
   that cannot be read is reported and never replaced by an empty one.
 - A chosen bilag is copied in, so an export months later still has it. A
-  replaced or deleted expense removes its copy.
+  replaced or deleted expense removes its copy. The app converted photos to
+  PDF; this port keeps the file as it is.
 - Its messages are handled before the one-operation guard, because they touch
   neither setup nor the services. The tab stays usable during a transfer.
+- Nothing contacts a network service. The app's Photon and OSRM lookups are
+  replaced by remembered routes.
+- The date field is a small Danish month calendar in `widgets.rs`, built from
+  Iced's own widgets.
 - The export PDFs use the PDF standard fonts Helvetica and Helvetica-Bold with
   WinAnsi encoding, so no font file is embedded. Characters outside that
   encoding print as `?`.

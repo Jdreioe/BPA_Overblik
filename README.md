@@ -323,38 +323,38 @@ step through read-back and keeps recovery records for anything uncertain.
 ## Kompensationsydelse
 
 The desktop app has two tabs: **Vagtplan** is the week above, and
-**Kompensationsydelse** is a log of the expenses a person documents for
-kompensationsydelse (servicelovens § 100). It follows DUKH's
-[lovguide](https://www.dukh.dk/Guides-og-Praksisnyt/@14/Lovguide---Kompensationsydelse-til-voksne)
-and needs no shift setup, so it works before MitHF is connected and during a
-transfer. Switching tabs never revokes an approval.
+**Kompensationsydelse** is a port of
+[kompensationsydelsesapp](https://github.com/Jdreioe/kompensationsydelsesapp).
+It needs no shift setup, works during a transfer, and switching tabs never
+revokes an approval.
 
-Each expense has a date, a category from positivlisten, an amount in whole
-kroner and an optional note and bilag. An expense with a bilag counts as
-*dokumenteret*, one without as *sandsynliggjort*. For the last twelve months
-or a calendar year, the tab shows totals per category, the monthly average
-and which group it points to at that year's rates, always as a guide: the
-municipality decides. Only documented expenses can reach group II.
+Like the app, the tab has **Udgifter** (grouped by month), **Kørsel** (to copy
+an earlier trip), **Tilføj udgift** and **Rapport**. The app's settings,
+pris pr. km and hyppige adresser, are under **Indstillinger → Kompensation**.
 
-**Eksportér til ansøgning** saves one `.zip` for the period:
-`Udgiftsoversigt.pdf` (the expenses as a table, with totals and averages),
-`Bilagsliste.pdf` (one row per bilag) and the bilag themselves in `Bilag/`,
-numbered in date order so both documents and the folder agree. A bilag whose
-file has gone missing is named before the export continues and marked
-»Bilag mangler«.
+Kørsel works without sending addresses anywhere, unlike the app, which asked
+Photon and OSRM. Fra and Til suggest hyppige adresser and addresses used
+before. A route driven before fills in its km (either direction), and the
+amount is km × pris pr. km, still editable.
 
-The rates are a table in `core/src/compensation/mod.rs` (2025 and 2026). **Add
-each new year's rates there**; a period ending in an unknown year shows no
-estimate rather than a guess.
+**Eksportér rapport** saves one `.zip` of all expenses:
+`Udgiftsoversigt.pdf`, `Bilagsliste.pdf` and the bilag in `Bilag/`, numbered
+in date order. A bilag whose file has gone missing is named before the export
+continues. The monthly estimate is the app's: everything registered, spread
+over the days from the first to the last expense.
 
-With **Indstillinger → Kompensation → Påmind mig om at indtaste
-dokumentation** turned on (it is off by default), each completed
+**Importér fra kompensationsydelsesapp** reads the app's report zip
+(`udgifter.csv` and `bilag/`) once, for moving over. The CSV has no bilag
+column, so a bilag is linked only when exactly one expense has the
+beskrivelse in its `Bilag: <beskrivelse>.pdf` name. The others are named
+afterwards, to attach by hand. Importing again adds nothing twice.
+
+With **Påmind om udgifter** turned on (it is off by default), each completed
 **Godkend ændringer** leaves a card on Vagtplan asking for that week's
-expenses. It stays until the person answers **Indtast udgifter** or **Ingen
-udgifter**.
+expenses, until it is answered.
 
 Everything lives in the app data directory: `kompensation.json` and the copied
-bilag in `bilag/`. Expenses such as medicine and diet are health information,
+bilag in `bilag/`. Expenses and routes are health and location information,
 so they never appear in logs, diagnostics or the shared problem report.
 
 ## Desktop login

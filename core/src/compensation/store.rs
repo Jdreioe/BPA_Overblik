@@ -29,15 +29,39 @@ pub struct Log {
     pub remind: bool,
     /// Mondays of transferred weeks whose reminder is not answered yet.
     pub reminders: BTreeSet<NaiveDate>,
+    /// Kørsel costs km × this.
+    pub price_per_km: Option<f64>,
+    pub addresses: Vec<FrequentAddress>,
     next_id: u64,
     /// Counts saved changes, so a view can tell a newer log from an older one.
-    revision: u64,
+    pub(super) revision: u64,
 }
 
 impl Log {
     pub fn revision(&self) -> u64 {
         self.revision
     }
+
+    /// Add an expense under a new id.
+    pub(super) fn push(&mut self, entry: Entry, bilag: Option<Bilag>) {
+        let id = self
+            .expenses
+            .iter()
+            .map(|e| e.id)
+            .max()
+            .unwrap_or(0)
+            .max(self.next_id)
+            + 1;
+        self.next_id = id;
+        self.expenses.push(Expense { id, entry, bilag });
+    }
+}
+
+/// A named address offered for Fra and Til, such as `Hjem`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FrequentAddress {
+    pub nickname: String,
+    pub address: String,
 }
 
 impl Default for Log {
@@ -47,6 +71,8 @@ impl Default for Log {
             expenses: Vec::new(),
             remind: false,
             reminders: BTreeSet::new(),
+            price_per_km: None,
+            addresses: Vec::new(),
             next_id: 0,
             revision: 0,
         }
@@ -78,6 +104,11 @@ pub enum Change {
     Transferred(NaiveDate),
     /// Either answer to a reminder.
     AnswerReminder(NaiveDate),
+    PricePerKm(f64),
+    /// Add a frequent address, replacing one with the same nickname.
+    AddAddress(FrequentAddress),
+    /// Remove the frequent address with this nickname.
+    RemoveAddress(String),
 }
 
 #[derive(Clone)]
@@ -130,22 +161,7 @@ impl Store {
                     BilagChange::Keep | BilagChange::Remove => None,
                 };
                 match id {
-                    None => {
-                        let id = log
-                            .expenses
-                            .iter()
-                            .map(|e| e.id)
-                            .max()
-                            .unwrap_or(0)
-                            .max(log.next_id)
-                            + 1;
-                        log.next_id = id;
-                        log.expenses.push(Expense {
-                            id,
-                            entry,
-                            bilag: new_bilag,
-                        });
-                    }
+                    None => log.push(entry, new_bilag),
                     Some(id) => {
                         let Some(expense) = log.expenses.iter_mut().find(|e| e.id == id) else {
                             self.remove(copied.as_ref());
@@ -184,6 +200,13 @@ impl Store {
                     return Ok(log);
                 }
             }
+            Change::PricePerKm(price) => log.price_per_km = Some(price),
+            Change::AddAddress(address) => {
+                log.addresses.retain(|a| a.nickname != address.nickname);
+                log.addresses.push(address);
+                log.addresses.sort_by_key(|a| a.nickname.to_lowercase());
+            }
+            Change::RemoveAddress(nickname) => log.addresses.retain(|a| a.nickname != nickname),
         }
         log.revision += 1;
         if let Err(error) = self.write(&log) {
@@ -194,7 +217,14 @@ impl Store {
         Ok(log)
     }
 
-    fn read(&self) -> Result<Log, CompensationError> {
+    /// Hold the one lock for a change made outside `apply`.
+    pub(super) fn locked(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub(super) fn read(&self) -> Result<Log, CompensationError> {
         let path = self.dir.join("kompensation.json");
         if !path.exists() {
             return Ok(Log::default());
@@ -209,7 +239,7 @@ impl Store {
         Ok(log)
     }
 
-    fn write(&self, log: &Log) -> Result<(), CompensationError> {
+    pub(super) fn write(&self, log: &Log) -> Result<(), CompensationError> {
         private_dir(&self.dir).map_err(|_| UNSAVED)?;
         let text = serde_json::to_vec_pretty(log).map_err(|_| UNSAVED)?;
         write_atomically(&self.dir.join("kompensation.json"), |file| {
@@ -226,26 +256,33 @@ impl Store {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .ok_or(UNCOPIED)?;
-        let folder = self.dir.join("bilag");
-        private_dir(&self.dir).map_err(|_| UNCOPIED)?;
-        private_dir(&folder).map_err(|_| UNCOPIED)?;
+        if !std::fs::metadata(source).is_ok_and(|metadata| metadata.is_file()) {
+            return Err(UNCOPIED);
+        }
+        self.new_bilag(name, |file| {
+            std::io::copy(&mut std::fs::File::open(source)?, file).map(|_| ())
+        })
+        .map_err(|_| UNCOPIED)
+    }
+
+    /// Write a new bilag called `name` into the bilag folder.
+    pub(super) fn new_bilag(
+        &self,
+        name: String,
+        write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+    ) -> std::io::Result<Bilag> {
+        private_dir(&self.dir)?;
+        private_dir(&self.dir.join("bilag"))?;
         let file = match extension(&name) {
             Some(extension) => format!("{}.{extension}", uuid::Uuid::new_v4()),
             None => uuid::Uuid::new_v4().to_string(),
         };
         let bilag = Bilag { file, name };
-        let target = self.bilag_path(&bilag);
-        if !std::fs::metadata(source).is_ok_and(|metadata| metadata.is_file()) {
-            return Err(UNCOPIED);
-        }
-        write_atomically(&target, |file| {
-            std::io::copy(&mut std::fs::File::open(source)?, file).map(|_| ())
-        })
-        .map_err(|_| UNCOPIED)?;
+        write_atomically(&self.bilag_path(&bilag), write)?;
         Ok(bilag)
     }
 
-    fn remove(&self, bilag: Option<&Bilag>) {
+    pub(super) fn remove(&self, bilag: Option<&Bilag>) {
         if let Some(bilag) = bilag {
             let _ = std::fs::remove_file(self.bilag_path(bilag));
         }
@@ -307,14 +344,16 @@ pub(super) fn write_atomically(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compensation::Category;
+    use crate::compensation::ExpenseType;
 
-    fn entry(amount: u32) -> Entry {
+    fn entry(pris: u32) -> Entry {
         Entry {
             date: "2026-09-22".parse().unwrap(),
-            category: Category::Transport,
-            amount,
-            note: "Taxa".into(),
+            kind: ExpenseType::Medicine,
+            beskrivelse: "Taxa".into(),
+            route: None,
+            pris,
+            andet: String::new(),
         }
     }
 
@@ -344,7 +383,7 @@ mod tests {
             })
             .unwrap();
         let second = log.expenses[0].bilag.clone().unwrap();
-        assert_eq!(log.expenses[0].entry.amount, 400);
+        assert_eq!(log.expenses[0].entry.pris, 400);
         assert!(!store.bilag_path(&first).exists());
 
         let log = store.apply(Change::Delete(log.expenses[0].id)).unwrap();

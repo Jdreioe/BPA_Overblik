@@ -1,53 +1,76 @@
-//! The Kompensationsydelse tab: the person's expense log, a guiding estimate,
-//! the zip export for an application, and how to apply.
+//! The Kompensationsydelse tab, a port of kompensationsydelsesapp: expenses
+//! grouped by month, Kørsel to copy from, a form to add or edit one, and the
+//! report. Its settings live in Indstillinger → Kompensation.
 //!
 //! It needs no shift setup and works during a transfer: it only touches
-//! `kompensation.json` and its bilag folder. File work runs on blocking
-//! threads through the core `Store`, which applies one change at a time.
+//! `kompensation.json` and its bilag folder, through the core `Store` on
+//! blocking threads.
 
-use chrono::{Datelike, NaiveDate};
-use iced::widget::{button, column, pick_list, row, space, text, text_input, Column};
+use chrono::NaiveDate;
+use iced::widget::{button, column, pick_list, row, space, text, text_input, toggler, Column};
 use iced::{Element, Length, Task};
 use std::path::PathBuf;
 use teamup_shift_sync_core::compensation::{
-    export_rows, format_date, format_kr, latest_rates, parse_amount, parse_date, rates,
-    write_export, Bilag, BilagChange, Category, Change, Documentation, Entry, Estimate, Log,
-    Period, Store, Summary,
+    address_suggestions, driving_price, export_rows, format_date, format_km, format_kr,
+    month_label, newest_first, parse_amount, parse_decimal, remembered_km, write_export, Bilag,
+    BilagChange, Change, Documentation, Entry, Expense, ExpenseType, FrequentAddress, Imported,
+    Log, MonthlyEstimate, Route, Store,
 };
 use teamup_shift_sync_gui::protocol::{Notice, Tone};
 
-pub const DUKH_GUIDE_URL: &str =
-    "https://www.dukh.dk/Guides-og-Praksisnyt/@14/Lovguide---Kompensationsydelse-til-voksne";
-pub const BORGER_URL: &str = "https://www.borger.dk/handicap/Hjaelp-i-hverdagen/hjaelp-til-daekning-af-kompensationsberettigende-udgifter-for-voksne";
+/// The app's sections, except its settings.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum View {
+    Expenses,
+    Driving,
+    Add,
+    Report,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AddressField {
+    Fra,
+    Til,
+}
 
 #[derive(Clone)]
 pub enum Message {
     Loaded(Result<Log, String>),
-    /// Any other change's result.
+    /// Any change's result that leaves the form alone.
     Saved(Result<Log, String>),
     /// The form's own save. Only it clears the form.
     FormSaved(Result<Log, String>),
-    Date(String),
-    Category(Category),
-    Amount(String),
-    Note(String),
+    /// Adding a frequent address. Only success clears what was typed.
+    AddressSaved(Result<Log, String>),
+    Show(View),
+    Kind(ExpenseType),
+    ToggleCalendar,
+    CalendarMonth(NaiveDate),
+    PickDate(NaiveDate),
+    Beskrivelse(String),
+    Address(AddressField, String),
+    Suggested(AddressField, String),
+    Swap,
+    Km(String),
+    Pris(String),
+    Andet(String),
     ChooseBilag,
     BilagChosen(Option<PathBuf>),
     RemoveBilag,
     Save,
     Edit(u64),
+    /// Start a new expense from an earlier Kørsel.
+    Copy(u64),
     CancelEdit,
     Delete(u64),
     ConfirmDelete,
     CancelDelete,
-    Period(PeriodChoice),
     Export,
-    /// The expenses whose bilag has gone missing, named for the person.
+    /// The expenses whose bilag has gone missing.
     ExportChecked(Result<Vec<String>, String>),
     ExportAnyway,
     CancelExport,
-    /// Where to save the period's export, chosen in the file dialog.
-    ExportTarget(Period, Option<PathBuf>),
+    ExportTarget(Option<PathBuf>),
     Exported(Result<PathBuf, String>),
     Remind(bool),
     /// A week's transfer completed.
@@ -55,33 +78,15 @@ pub enum Message {
     /// Answer a week's reminder by entering its expenses now.
     EnterForWeek(NaiveDate),
     NoExpenses(NaiveDate),
-    /// Handled by the app, which owns opening the browser.
-    OpenLink(&'static str),
-}
-
-/// The overview's period: the last twelve months or one calendar year.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PeriodChoice {
-    LastTwelveMonths,
-    Year(i32),
-}
-
-impl PeriodChoice {
-    fn period(self, today: NaiveDate) -> Period {
-        match self {
-            PeriodChoice::LastTwelveMonths => Period::last_twelve_months(today),
-            PeriodChoice::Year(year) => Period::year(year),
-        }
-    }
-}
-
-impl std::fmt::Display for PeriodChoice {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PeriodChoice::LastTwelveMonths => f.write_str("Seneste 12 måneder"),
-            PeriodChoice::Year(year) => write!(f, "{year}"),
-        }
-    }
+    PriceDraft(String),
+    SavePrice,
+    NicknameDraft(String),
+    AddressDraft(String),
+    AddAddress,
+    RemoveAddress(String),
+    Import,
+    ImportChosen(Option<PathBuf>),
+    Imported(Result<(Log, Imported), String>),
 }
 
 enum Loading {
@@ -100,22 +105,58 @@ enum FormBilag {
 struct Form {
     /// The expense being edited, or `None` for a new one.
     editing: Option<u64>,
-    date: String,
-    category: Option<Category>,
-    amount: String,
-    note: String,
+    kind: Option<ExpenseType>,
+    date: NaiveDate,
+    /// The month the date picker shows while it is open.
+    calendar: Option<NaiveDate>,
+    beskrivelse: String,
+    fra: String,
+    til: String,
+    km: String,
+    pris: String,
+    andet: String,
     bilag: FormBilag,
+    /// The address field last typed in, which shows suggestions.
+    suggest: Option<AddressField>,
 }
 
 impl Form {
     fn new(date: NaiveDate) -> Self {
         Self {
             editing: None,
-            date: format_date(date),
-            category: None,
-            amount: String::new(),
-            note: String::new(),
+            kind: None,
+            date,
+            calendar: None,
+            beskrivelse: String::new(),
+            fra: String::new(),
+            til: String::new(),
+            km: String::new(),
+            pris: String::new(),
+            andet: String::new(),
             bilag: FormBilag::None,
+            suggest: None,
+        }
+    }
+
+    fn from_expense(expense: &Expense, editing: bool) -> Self {
+        let entry = &expense.entry;
+        let route = entry.route.as_ref();
+        Self {
+            editing: editing.then_some(expense.id),
+            kind: Some(entry.kind),
+            date: entry.date,
+            calendar: None,
+            beskrivelse: entry.beskrivelse.clone(),
+            fra: route.map(|r| r.fra.clone()).unwrap_or_default(),
+            til: route.map(|r| r.til.clone()).unwrap_or_default(),
+            km: route.and_then(|r| r.km).map(format_km).unwrap_or_default(),
+            pris: entry.pris.to_string(),
+            andet: entry.andet.clone(),
+            bilag: match (&expense.bilag, editing) {
+                (Some(bilag), true) => FormBilag::Saved(bilag.clone()),
+                _ => FormBilag::None,
+            },
+            suggest: None,
         }
     }
 }
@@ -123,15 +164,22 @@ impl Form {
 pub struct CompensationUi {
     store: Store,
     log: Loading,
+    view: View,
     form: Form,
-    period: PeriodChoice,
     confirm_delete: Option<u64>,
     /// Named before an export with missing bilag continues.
     export_missing: Option<Vec<String>>,
-    /// A form save or export file work is running, so their buttons do
-    /// nothing until it finishes. File dialogs do not count: one that never
-    /// answers must not lock the tab.
-    busy: bool,
+    /// Work whose button does nothing until it finishes. File dialogs do not
+    /// count: one that never answers must not lock the tab.
+    saving: bool,
+    exporting: bool,
+    importing: bool,
+    price_draft: String,
+    nickname_draft: String,
+    address_draft: String,
+    /// What the last import did. It stays, because bilag it could not link
+    /// are named here to attach by hand.
+    import_report: Option<String>,
     notice: Option<Notice>,
 }
 
@@ -159,11 +207,17 @@ impl CompensationUi {
         Self {
             store: Store::new(data_dir),
             log: Loading::Pending,
+            view: View::Expenses,
             form: Form::new(today()),
-            period: PeriodChoice::LastTwelveMonths,
             confirm_delete: None,
             export_missing: None,
-            busy: false,
+            saving: false,
+            exporting: false,
+            importing: false,
+            price_draft: String::new(),
+            nickname_draft: String::new(),
+            address_draft: String::new(),
+            import_report: None,
             notice: None,
         }
     }
@@ -226,62 +280,121 @@ impl CompensationUi {
         }
     }
 
-    /// The log has loaded, so its settings can change.
-    pub fn is_loaded(&self) -> bool {
-        self.log().is_some()
-    }
-
-    pub fn load_failed(&self) -> bool {
-        matches!(self.log, Loading::Failed(_))
-    }
-
     fn error(&mut self, message: &str) {
         self.notice = Some(Notice::from_message(Tone::Error, message));
     }
 
+    /// Fill in the km of a route driven before, and its price.
+    fn fill_km(&mut self) {
+        if let Some(km) = self
+            .log()
+            .and_then(|log| remembered_km(&log.expenses, &self.form.fra, &self.form.til))
+        {
+            self.form.km = format_km(km);
+            self.fill_price();
+        }
+    }
+
+    /// Kørsel costs km × pris/km. The amount stays editable.
+    fn fill_price(&mut self) {
+        let price = self.log().and_then(|log| log.price_per_km);
+        if let (Some(ExpenseType::Driving), Some(km), Some(price)) =
+            (self.form.kind, parse_decimal(&self.form.km), price)
+        {
+            self.form.pris = driving_price(km, price).to_string();
+        }
+    }
+
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::Loaded(result) => {
-                self.log = match result {
-                    Ok(log) => Loading::Ready(log),
-                    Err(error) => Loading::Failed(error),
+            Message::Loaded(result) => match result {
+                Ok(log) => {
+                    self.price_draft = log
+                        .price_per_km
+                        .map(|price| price.to_string().replace('.', ","))
+                        .unwrap_or_default();
+                    self.log = Loading::Ready(log);
                 }
-            }
+                Err(error) => self.log = Loading::Failed(error),
+            },
             Message::Saved(result) => match result {
                 Ok(log) => self.accept(log),
                 Err(error) => self.error(&error),
             },
             // A failure keeps what the person typed.
             Message::FormSaved(result) => {
-                self.busy = false;
+                self.saving = false;
                 match result {
                     Ok(log) => {
                         self.accept(log);
-                        // Keep the date and category: receipts often come in
-                        // batches from the same day or kind.
-                        self.form.editing = None;
-                        self.form.amount.clear();
-                        self.form.note.clear();
-                        self.form.bilag = FormBilag::None;
+                        self.form = Form::new(today());
+                        self.view = View::Expenses;
                     }
                     Err(error) => self.error(&error),
                 }
             }
-            Message::Date(value) => self.form.date = value,
-            Message::Category(category) => self.form.category = Some(category),
-            Message::Amount(value) => self.form.amount = value,
-            Message::Note(value) => self.form.note = value,
+            Message::AddressSaved(result) => match result {
+                Ok(log) => {
+                    self.accept(log);
+                    self.nickname_draft.clear();
+                    self.address_draft.clear();
+                }
+                Err(error) => self.error(&error),
+            },
+            Message::Show(view) => {
+                self.view = view;
+                self.confirm_delete = None;
+            }
+            Message::Kind(kind) => {
+                self.form.kind = Some(kind);
+                self.fill_price();
+            }
+            Message::ToggleCalendar => {
+                self.form.calendar = match self.form.calendar {
+                    Some(_) => None,
+                    None => Some(self.form.date),
+                }
+            }
+            Message::CalendarMonth(month) => self.form.calendar = Some(month),
+            Message::PickDate(date) => {
+                self.form.date = date;
+                self.form.calendar = None;
+            }
+            Message::Beskrivelse(value) => self.form.beskrivelse = value,
+            Message::Address(field, value) => {
+                match field {
+                    AddressField::Fra => self.form.fra = value,
+                    AddressField::Til => self.form.til = value,
+                }
+                self.form.suggest = Some(field);
+                self.fill_km();
+            }
+            Message::Suggested(field, value) => {
+                match field {
+                    AddressField::Fra => self.form.fra = value,
+                    AddressField::Til => self.form.til = value,
+                }
+                self.form.suggest = None;
+                self.fill_km();
+            }
+            Message::Swap => {
+                std::mem::swap(&mut self.form.fra, &mut self.form.til);
+                self.form.suggest = None;
+            }
+            Message::Km(value) => {
+                self.form.km = value;
+                self.fill_price();
+            }
+            Message::Pris(value) => self.form.pris = value,
+            Message::Andet(value) => self.form.andet = value,
             Message::ChooseBilag => {
                 return Task::perform(
                     async {
                         rfd::AsyncFileDialog::new()
-                            .set_title("Vælg bilaget")
+                            .set_title("Vælg bilag")
                             .add_filter(
-                                "Kvitteringer og bilag",
-                                &[
-                                    "pdf", "jpg", "jpeg", "png", "heic", "webp", "tif", "tiff",
-                                    "gif",
-                                ],
+                                "PDF og billeder",
+                                &["pdf", "jpg", "jpeg", "png", "heic", "webp"],
                             )
                             .pick_file()
                             .await
@@ -298,7 +411,7 @@ impl CompensationUi {
             }
             Message::RemoveBilag => self.form.bilag = FormBilag::None,
             Message::Save => {
-                if self.busy || self.log().is_none() {
+                if self.saving || self.log().is_none() {
                     return Task::none();
                 }
                 let entry = match self.entry() {
@@ -313,7 +426,7 @@ impl CompensationUi {
                     FormBilag::Chosen(path) => BilagChange::Replace(path.clone()),
                     FormBilag::None => BilagChange::Remove,
                 };
-                self.busy = true;
+                self.saving = true;
                 return self.change_then(
                     Change::Save {
                         id: self.form.editing,
@@ -323,27 +436,21 @@ impl CompensationUi {
                     Message::FormSaved,
                 );
             }
-            Message::Edit(id) => {
-                let Some(expense) = self
+            Message::Edit(id) | Message::Copy(id) => {
+                let editing = matches!(message, Message::Edit(_));
+                if let Some(expense) = self
                     .log()
                     .and_then(|log| log.expenses.iter().find(|e| e.id == id))
-                else {
-                    return Task::none();
-                };
-                self.form = Form {
-                    editing: Some(id),
-                    date: format_date(expense.entry.date),
-                    category: Some(expense.entry.category),
-                    amount: expense.entry.amount.to_string(),
-                    note: expense.entry.note.clone(),
-                    bilag: expense
-                        .bilag
-                        .clone()
-                        .map_or(FormBilag::None, FormBilag::Saved),
-                };
-                self.confirm_delete = None;
+                {
+                    self.form = Form::from_expense(expense, editing);
+                    self.view = View::Add;
+                    self.confirm_delete = None;
+                }
             }
-            Message::CancelEdit => self.form = Form::new(today()),
+            Message::CancelEdit => {
+                self.form = Form::new(today());
+                self.view = View::Expenses;
+            }
             Message::Delete(id) => self.confirm_delete = Some(id),
             Message::CancelDelete => self.confirm_delete = None,
             Message::ConfirmDelete => {
@@ -355,27 +462,30 @@ impl CompensationUi {
                 }
                 return self.change(Change::Delete(id));
             }
-            Message::Period(choice) => {
-                self.period = choice;
-                self.export_missing = None;
-            }
             Message::Export => {
                 let Some(log) = self.log().cloned() else {
                     return Task::none();
                 };
-                if self.busy {
+                if self.exporting {
                     return Task::none();
                 }
-                self.busy = true;
+                self.exporting = true;
                 let store = self.store.clone();
-                let period = self.period.period(today());
                 return blocking(
                     move || {
                         Ok(
-                            export_rows(&log.expenses, period, |b| store.bilag_path(b).is_file())
+                            export_rows(&log.expenses, |b| store.bilag_path(b).is_file())
                                 .into_iter()
                                 .filter(|row| row.documentation == Documentation::Missing)
-                                .map(|row| expense_label(&row.expense.entry))
+                                .map(|row| {
+                                    let entry = &row.expense.entry;
+                                    format!(
+                                        "{} · {} · {}",
+                                        format_date(entry.date),
+                                        entry.kind.label(),
+                                        entry.beskrivelse
+                                    )
+                                })
                                 .collect(),
                         )
                     },
@@ -383,38 +493,37 @@ impl CompensationUi {
                 );
             }
             Message::ExportChecked(Ok(missing)) if !missing.is_empty() => {
-                self.busy = false;
+                self.exporting = false;
                 self.export_missing = Some(missing);
             }
             Message::ExportChecked(Ok(_)) | Message::ExportAnyway => {
+                self.exporting = false;
                 self.export_missing = None;
-                self.busy = false;
-                let period = self.period.period(today());
-                let name = format!("Kompensationsydelse {}.zip", period.file_label());
+                let name = format!("Kompensationsydelse {}.zip", today());
                 return Task::perform(
                     async move {
                         rfd::AsyncFileDialog::new()
-                            .set_title("Gem eksporten")
+                            .set_title("Gem rapport")
                             .set_file_name(name)
                             .add_filter("Zip-fil", &["zip"])
                             .save_file()
                             .await
                             .map(|file| file.path().to_path_buf())
                     },
-                    move |target| Message::ExportTarget(period, target),
+                    Message::ExportTarget,
                 );
             }
             Message::ExportChecked(Err(error)) => {
-                self.busy = false;
+                self.exporting = false;
                 self.error(&error);
             }
             Message::CancelExport => self.export_missing = None,
-            Message::ExportTarget(_, None) => {}
-            Message::ExportTarget(period, Some(mut target)) => {
+            Message::ExportTarget(None) => {}
+            Message::ExportTarget(Some(mut target)) => {
                 let Some(log) = self.log().cloned() else {
                     return Task::none();
                 };
-                self.busy = true;
+                self.exporting = true;
                 if !target
                     .extension()
                     .is_some_and(|e| e.eq_ignore_ascii_case("zip"))
@@ -422,10 +531,9 @@ impl CompensationUi {
                     target.as_mut_os_string().push(".zip");
                 }
                 let store = self.store.clone();
-                let today = today();
                 return blocking(
                     move || {
-                        write_export(&store, &log, period, today, &target)
+                        write_export(&store, &log, today(), &target)
                             .map(|()| target)
                             .map_err(|e| e.0.to_owned())
                     },
@@ -433,15 +541,12 @@ impl CompensationUi {
                 );
             }
             Message::Exported(result) => {
-                self.busy = false;
+                self.exporting = false;
                 self.notice = Some(match result {
                     Ok(path) => Notice::new(
                         Tone::Success,
-                        "Eksporten er gemt",
-                        format!(
-                            "Den ligger i {}. Den indeholder dine udgifter og bilag, så del den kun med kommunen eller din rådgiver.",
-                            path.display()
-                        ),
+                        "Rapporten er gemt",
+                        path.display().to_string(),
                     ),
                     Err(error) => Notice::from_message(Tone::Error, &error),
                 });
@@ -458,237 +563,185 @@ impl CompensationUi {
             }
             Message::EnterForWeek(monday) => {
                 if self.form.editing.is_none() {
-                    self.form.date = format_date(monday);
+                    self.form.date = monday;
                 }
-                if !self.period.period(today()).contains(monday) {
-                    self.period = PeriodChoice::Year(monday.year());
-                }
+                self.view = View::Add;
                 return self.change(Change::AnswerReminder(monday));
             }
             Message::NoExpenses(monday) => return self.change(Change::AnswerReminder(monday)),
-            // The app opens links before handing messages here.
-            Message::OpenLink(_) => {}
+            Message::PriceDraft(value) => self.price_draft = value,
+            Message::SavePrice => match parse_decimal(&self.price_draft) {
+                Some(price) if self.log().is_some() => {
+                    return self.change(Change::PricePerKm(price))
+                }
+                Some(_) => {}
+                None => self.error("Skriv pris pr. km, fx 3,79."),
+            },
+            Message::NicknameDraft(value) => self.nickname_draft = value,
+            Message::AddressDraft(value) => self.address_draft = value,
+            Message::AddAddress => {
+                let (nickname, address) = (
+                    self.nickname_draft.trim().to_owned(),
+                    self.address_draft.trim().to_owned(),
+                );
+                if nickname.is_empty() || address.is_empty() {
+                    self.error("Skriv både kaldenavn og adresse.");
+                } else if self.log().is_some() {
+                    return self.change_then(
+                        Change::AddAddress(FrequentAddress { nickname, address }),
+                        Message::AddressSaved,
+                    );
+                }
+            }
+            Message::RemoveAddress(nickname) => {
+                return self.change(Change::RemoveAddress(nickname));
+            }
+            Message::Import => {
+                return Task::perform(
+                    async {
+                        rfd::AsyncFileDialog::new()
+                            .set_title("Vælg rapporten fra kompensationsydelsesapp")
+                            .add_filter("Zip-fil", &["zip"])
+                            .pick_file()
+                            .await
+                            .map(|file| file.path().to_path_buf())
+                    },
+                    Message::ImportChosen,
+                );
+            }
+            Message::ImportChosen(None) => {}
+            Message::ImportChosen(Some(path)) => {
+                if self.importing || self.log().is_none() {
+                    return Task::none();
+                }
+                self.importing = true;
+                let store = self.store.clone();
+                return blocking(
+                    move || store.import_rapport(&path).map_err(|e| e.0.to_owned()),
+                    Message::Imported,
+                );
+            }
+            Message::Imported(result) => {
+                self.importing = false;
+                match result {
+                    Ok((log, imported)) => {
+                        self.accept(log);
+                        self.import_report = Some(import_report(&imported));
+                    }
+                    Err(error) => self.error(&error),
+                }
+            }
         }
         Task::none()
     }
 
     fn entry(&self) -> Result<Entry, &'static str> {
-        let date = parse_date(&self.form.date).map_err(|e| e.0)?;
-        let category = self
-            .form
-            .category
-            .ok_or("Vælg en kategori fra positivlisten.")?;
-        let amount = parse_amount(&self.form.amount).map_err(|e| e.0)?;
+        let kind = self.form.kind.ok_or("Vælg en type.")?;
+        let beskrivelse = self.form.beskrivelse.trim().to_owned();
+        if beskrivelse.is_empty() {
+            return Err("Skriv en beskrivelse.");
+        }
+        let route = if kind == ExpenseType::Driving {
+            let (fra, til) = (self.form.fra.trim(), self.form.til.trim());
+            if fra.is_empty() || til.is_empty() {
+                return Err("Skriv både Fra og Til.");
+            }
+            Some(Route {
+                fra: fra.to_owned(),
+                til: til.to_owned(),
+                km: Some(parse_decimal(&self.form.km).ok_or("Skriv antal km.")?),
+            })
+        } else {
+            None
+        };
         Ok(Entry {
-            date,
-            category,
-            amount,
-            note: self.form.note.trim().to_owned(),
+            date: self.form.date,
+            kind,
+            beskrivelse,
+            route,
+            pris: parse_amount(&self.form.pris).map_err(|e| e.0)?,
+            andet: self.form.andet.trim().to_owned(),
         })
     }
 
     pub fn view(&self) -> Element<'_, Message> {
-        let today = today();
         let log = match &self.log {
             Loading::Ready(log) => log,
-            Loading::Pending => return text("Indlæser udgifterne …").into(),
+            Loading::Pending => return text("Indlæser …").into(),
             Loading::Failed(error) => {
-                return column![
-                    crate::widgets::notice_card::<Message>(
-                        Notice::from_message(Tone::Error, error),
-                        None
-                    ),
-                    self.guide(today),
-                ]
-                .spacing(16)
-                .into()
+                return crate::widgets::notice_card::<Message>(
+                    Notice::from_message(Tone::Error, error),
+                    None,
+                )
             }
         };
-        let period = self.period.period(today);
-        let mut choices = vec![PeriodChoice::LastTwelveMonths];
-        let mut years: Vec<i32> = log
-            .expenses
-            .iter()
-            .map(|e| e.entry.date.year())
-            .chain([today.year()])
-            .collect();
-        years.sort_unstable_by(|a, b| b.cmp(a));
-        years.dedup();
-        choices.extend(years.into_iter().map(PeriodChoice::Year));
-
-        let header = row![
-            text("Periode").size(14),
-            pick_list(choices, Some(self.period), Message::Period),
-            space::horizontal(),
-            primary(
-                "Eksportér til ansøgning",
-                (!self.busy).then_some(Message::Export)
-            ),
-        ]
-        .spacing(10)
-        .align_y(iced::alignment::Vertical::Center);
-
+        let mut sections = row![].spacing(8);
+        for (view, label) in [
+            (View::Expenses, "Udgifter"),
+            (View::Driving, "Kørsel"),
+            (View::Add, "Tilføj udgift"),
+            (View::Report, "Rapport"),
+        ] {
+            let selected = self.view == view;
+            sections = sections.push(
+                button(text(label).size(14))
+                    .style(move |theme, status| {
+                        if selected {
+                            iced::widget::button::secondary(theme, status)
+                        } else {
+                            crate::widgets::outlined(theme, status)
+                        }
+                    })
+                    .padding([7, 12])
+                    .on_press(Message::Show(view)),
+            );
+        }
+        let content = match self.view {
+            View::Expenses => self.expenses(log),
+            View::Driving => self.driving(log),
+            View::Add => self.form(log),
+            View::Report => self.report(log),
+        };
         // Room for the scrollbar the app puts beside the tab.
-        let mut page = column![header]
+        column![sections, content]
             .spacing(16)
             .width(Length::Fill)
-            .padding(iced::Padding::ZERO.right(16));
-        if let Some(missing) = &self.export_missing {
-            let mut names = column![].spacing(2);
-            for name in missing {
-                names = names.push(text(name.clone()).size(13));
-            }
-            page = page.push(
-                column![
-                    crate::widgets::notice_card::<Message>(
-                        Notice::new(
-                            Tone::Warning,
-                            "Nogle bilag findes ikke længere",
-                            "Ret eller slet udgifterne herunder, eller eksportér alligevel. Så står de som »Bilag mangler« og tæller som sandsynliggjort.",
-                        ),
-                        None,
-                    ),
-                    names,
-                    row![
-                        quiet("Eksportér alligevel", (!self.busy).then_some(Message::ExportAnyway)),
-                        quiet("Fortryd", Some(Message::CancelExport)),
-                    ]
-                    .spacing(8),
-                ]
-                .spacing(8),
-            );
-        }
-        page = page
-            .push(crate::widgets::group(
-                text("Overblik").size(16),
-                overview(log, period),
-            ))
-            .push(crate::widgets::group(
-                text(if self.form.editing.is_some() {
-                    "Ret udgift"
-                } else {
-                    "Ny udgift"
-                })
-                .size(16),
-                self.form(),
-            ))
-            .push(crate::widgets::group(
-                text(format!("Udgifter · {}", period.label())).size(16),
-                self.list(log, period),
-            ))
-            .push(self.guide(today));
-        page.into()
+            .padding(iced::Padding::ZERO.right(16))
+            .into()
     }
 
-    fn form(&self) -> Column<'_, Message> {
-        let labelled =
-            |label: &'static str, input: Element<'static, Message>| -> Element<'static, Message> {
-                column![text(label).size(13), input].spacing(4).into()
-            };
-        let fields = row![
-            labelled(
-                "Dato",
-                text_input("dd.mm.åååå", &self.form.date)
-                    .on_input(Message::Date)
-                    .on_submit(Message::Save)
-                    .padding(8)
-                    .width(Length::Fixed(130.0))
-                    .into(),
-            ),
-            labelled(
-                "Kategori",
-                pick_list(Category::ALL, self.form.category, Message::Category)
-                    .placeholder("Vælg fra positivlisten")
-                    .padding(8)
-                    .width(Length::Fixed(240.0))
-                    .into(),
-            ),
-            labelled(
-                "Beløb i kr.",
-                text_input("Fx 350", &self.form.amount)
-                    .on_input(Message::Amount)
-                    .on_submit(Message::Save)
-                    .padding(8)
-                    .width(Length::Fixed(130.0))
-                    .into(),
-            ),
-        ]
-        .spacing(12);
-        let note = labelled(
-            "Note (valgfri)",
-            text_input("Fx Taxa til genoptræning", &self.form.note)
-                .on_input(Message::Note)
-                .on_submit(Message::Save)
-                .padding(8)
-                .into(),
-        );
-        let choose = Some(Message::ChooseBilag);
-        let bilag = match &self.form.bilag {
-            FormBilag::None => row![
-                text("Intet bilag. Udgiften tæller som sandsynliggjort.").size(14),
-                quiet("Vælg bilag", choose),
-            ],
-            FormBilag::Saved(bilag) => row![
-                text(format!("Bilag: {}", bilag.name)).size(14),
-                quiet("Skift bilag", choose),
-                quiet("Fjern bilag", Some(Message::RemoveBilag)),
-            ],
-            FormBilag::Chosen(path) => row![
-                text(format!(
-                    "Bilag: {}",
-                    path.file_name()
-                        .map(|name| name.to_string_lossy().into_owned())
-                        .unwrap_or_default()
-                ))
-                .size(14),
-                quiet("Skift bilag", choose),
-                quiet("Fjern bilag", Some(Message::RemoveBilag)),
-            ],
+    fn expenses<'a>(&'a self, log: &'a Log) -> Column<'a, Message> {
+        if log.expenses.is_empty() {
+            return column![text("Ingen udgifter endnu.")];
         }
-        .spacing(10)
-        .align_y(iced::alignment::Vertical::Center);
-        let save = (!self.busy).then_some(Message::Save);
-        let actions = if self.form.editing.is_some() {
-            row![
-                primary("Gem ændring", save),
-                quiet("Fortryd", Some(Message::CancelEdit))
-            ]
-        } else {
-            row![primary("Tilføj udgift", save)]
-        }
-        .spacing(8);
-        column![fields, note, bilag, actions].spacing(12)
-    }
-
-    fn list<'a>(&'a self, log: &'a Log, period: Period) -> Column<'a, Message> {
-        let mut expenses: Vec<_> = log
-            .expenses
-            .iter()
-            .filter(|e| period.contains(e.entry.date))
-            .collect();
-        expenses.sort_by_key(|e| std::cmp::Reverse((e.entry.date, e.id)));
-        let mut list = column![].spacing(10);
-        if expenses.is_empty() {
-            return list.push(text("Der er ingen udgifter i perioden endnu."));
-        }
-        for expense in expenses {
+        by_month(newest_first(&log.expenses), |expense| {
             let entry = &expense.entry;
-            let mut details = column![text(expense_label(entry))]
-                .spacing(2)
-                .width(Length::Fill);
-            if !entry.note.is_empty() {
-                details = details.push(text(&entry.note).size(13));
-            }
-            details = details.push(
-                text(match &expense.bilag {
-                    Some(bilag) => format!("Bilag: {}", bilag.name),
-                    None => "Uden bilag (sandsynliggjort)".into(),
-                })
+            let mut lines = column![text(format!(
+                "{} · {}",
+                entry.kind.label(),
+                format_kr(entry.pris.into())
+            ))]
+            .spacing(2)
+            .width(Length::Fill);
+            lines = lines.push(
+                text(format!(
+                    "{} · {}",
+                    format_date(entry.date),
+                    entry.beskrivelse
+                ))
                 .size(13),
             );
+            if let Some(route) = &entry.route {
+                lines = lines.push(text(route_line(route)).size(13));
+            }
+            if !entry.andet.is_empty() {
+                lines = lines.push(text(&entry.andet).size(13));
+            }
+            if let Some(bilag) = &expense.bilag {
+                lines = lines.push(text(format!("Bilag: {}", bilag.name)).size(13));
+            }
             let actions = if self.confirm_delete == Some(expense.id) {
                 row![
-                    text("Slet udgiften og dens bilag?").size(14),
                     quiet("Ja, slet", Some(Message::ConfirmDelete)),
                     quiet("Fortryd", Some(Message::CancelDelete)),
                 ]
@@ -697,108 +750,318 @@ impl CompensationUi {
                     quiet("Ret", Some(Message::Edit(expense.id))),
                     quiet("Slet", Some(Message::Delete(expense.id))),
                 ]
+            };
+            row![lines, actions.spacing(8)]
+                .spacing(12)
+                .align_y(iced::alignment::Vertical::Center)
+                .into()
+        })
+    }
+
+    fn driving<'a>(&'a self, log: &'a Log) -> Column<'a, Message> {
+        let trips: Vec<&Expense> = newest_first(&log.expenses)
+            .into_iter()
+            .filter(|e| e.entry.route.is_some())
+            .collect();
+        if trips.is_empty() {
+            return column![text("Ingen kørsel endnu.")];
+        }
+        by_month(trips, |expense| {
+            let entry = &expense.entry;
+            let mut lines = column![text(format!(
+                "{} · {}",
+                format_date(entry.date),
+                format_kr(entry.pris.into())
+            ))]
+            .spacing(2)
+            .width(Length::Fill);
+            if let Some(route) = &entry.route {
+                lines = lines.push(text(route_line(route)).size(13));
             }
-            .spacing(8)
-            .align_y(iced::alignment::Vertical::Center);
-            list = list.push(
-                row![details, actions]
-                    .spacing(12)
-                    .align_y(iced::alignment::Vertical::Center),
+            lines = lines.push(text(&entry.beskrivelse).size(13));
+            row![lines, quiet("Kopiér", Some(Message::Copy(expense.id)))]
+                .spacing(12)
+                .align_y(iced::alignment::Vertical::Center)
+                .into()
+        })
+    }
+
+    fn form<'a>(&'a self, log: &'a Log) -> Column<'a, Message> {
+        let form = &self.form;
+        let labelled = |label: &'static str, input: Element<'a, Message>| -> Element<'a, Message> {
+            column![text(label).size(13), input].spacing(4).into()
+        };
+        let input = |placeholder: &'static str, value: &'a str, on: fn(String) -> Message| {
+            text_input(placeholder, value)
+                .on_input(on)
+                .on_submit(Message::Save)
+                .padding(8)
+        };
+        let mut fields = column![row![
+            labelled(
+                "Type",
+                pick_list(ExpenseType::ALL, form.kind, Message::Kind)
+                    .placeholder("Vælg type")
+                    .padding(8)
+                    .width(Length::Fixed(240.0))
+                    .into(),
+            ),
+            labelled(
+                "Dato",
+                crate::widgets::date_picker(
+                    form.date,
+                    form.calendar,
+                    Message::ToggleCalendar,
+                    Message::CalendarMonth,
+                    Message::PickDate,
+                ),
+            ),
+        ]
+        .spacing(12)]
+        .spacing(12);
+        fields = fields.push(labelled(
+            "Beskrivelse",
+            input("", &form.beskrivelse, Message::Beskrivelse).into(),
+        ));
+        if form.kind == Some(ExpenseType::Driving) {
+            for (field, label, value) in [
+                (AddressField::Fra, "Fra", &form.fra),
+                (AddressField::Til, "Til", &form.til),
+            ] {
+                let mut address = column![text_input("", value)
+                    .on_input(move |value| Message::Address(field, value))
+                    .padding(8)]
+                .spacing(4);
+                if form.suggest == Some(field) {
+                    for suggestion in address_suggestions(log, value) {
+                        address = address.push(
+                            button(text(suggestion.label).size(13))
+                                .style(iced::widget::button::text)
+                                .on_press(Message::Suggested(field, suggestion.value)),
+                        );
+                    }
+                }
+                fields = fields.push(labelled(label, address.into()));
+            }
+            fields = fields.push(
+                row![
+                    quiet("Byt Fra/Til", Some(Message::Swap)),
+                    labelled(
+                        "Km",
+                        input("", &form.km, Message::Km)
+                            .width(Length::Fixed(100.0))
+                            .into()
+                    ),
+                ]
+                .spacing(12)
+                .align_y(iced::alignment::Vertical::Bottom),
             );
         }
-        list
-    }
-
-    /// The rules in short Danish sentences, with the year's amounts.
-    fn guide(&self, today: NaiveDate) -> Element<'_, Message> {
-        let rates = rates(today.year()).unwrap_or_else(latest_rates);
-        let level = format!("({}-niveau)", rates.year);
-        let lines = [
-            "Kompensationsydelse efter servicelovens § 100 dækker nødvendige merudgifter ved en varigt nedsat funktionsevne. Den gælder fra du er 18 år, til du når folkepensionsalderen.".to_owned(),
-            "Får du førtidspension efter reglerne fra før 2003, kan du kun få ydelsen, hvis du også har BPA efter § 95 eller § 96.".to_owned(),
-            "Udgiften skal stå på positivlisten: kost og diætpræparater, medicin, befordring, forhøjet husleje, fritidsaktiviteter, handicaprettede kurser, beklædning, el, vand og varme samt øvrige udgifter. Andre slags udgifter kan kun dækkes, hvis hver slags er over 1.250 kr. om måneden (2025-niveau).".to_owned(),
-            format!(
-                "Gruppe I: Du sandsynliggør udgifter på mindst {}/md. og får et standardbeløb på {}/md. {level}.",
-                format_kr(rates.minimum.into()),
-                format_kr(rates.group_one.into())
-            ),
-            format!(
-                "Gruppe II: Du dokumenterer udgifter på mindst {}/md. og får dine faktiske udgifter dækket plus {}/md. {level}.",
-                format_kr(rates.group_two_limit.into()),
-                format_kr(rates.group_two_standard.into())
-            ),
-            "Det er gennemsnittet over året, der tæller, så udgifterne må gerne svinge fra måned til måned. Ydelsen er skattefri og afhænger ikke af din indkomst.".to_owned(),
-            "Du søger hos din kommune via selvbetjeningen på borger.dk. Der er en ansøgning for hver gruppe. Vedhæft eksporten herfra som dokumentation.".to_owned(),
-            "Udgifter, som Sygeforsikringen danmark eller en anden forsikring dækker, eller som er egenbetaling efter anden sociallovgivning, kan ikke dækkes.".to_owned(),
-            "Fortæl kommunen, hvis dine udgifter ændrer sig, fx hvis de falder under grænsen.".to_owned(),
-            "Får du afslag eller nedsat ydelse, kan du klage til kommunen inden 4 uger. Fastholder kommunen afgørelsen, sender den klagen videre til Ankestyrelsen.".to_owned(),
-        ];
-        let mut guide = column![].spacing(8);
-        for line in lines {
-            guide = guide.push(text(line));
-        }
-        guide = guide.push(
-            row![
-                quiet("Gå til borger.dk", Some(Message::OpenLink(BORGER_URL))),
-                quiet(
-                    "Læs DUKH's lovguide",
-                    Some(Message::OpenLink(DUKH_GUIDE_URL))
-                ),
+        let placeholder = if form.kind == Some(ExpenseType::Driving) && log.price_per_km.is_none() {
+            "Pris pr. km sættes i Indstillinger"
+        } else {
+            ""
+        };
+        fields = fields
+            .push(labelled(
+                "Beløb",
+                input(placeholder, &form.pris, Message::Pris)
+                    .width(Length::Fixed(240.0))
+                    .into(),
+            ))
+            .push(labelled(
+                "Andet",
+                input("", &form.andet, Message::Andet).into(),
+            ));
+        let bilag_name = match &form.bilag {
+            FormBilag::None => None,
+            FormBilag::Saved(bilag) => Some(bilag.name.clone()),
+            FormBilag::Chosen(path) => path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned()),
+        };
+        fields = fields.push(match bilag_name {
+            None => row![quiet("Vælg bilag", Some(Message::ChooseBilag))],
+            Some(name) => row![
+                text(format!("Bilag: {name}")).size(14),
+                quiet("Skift", Some(Message::ChooseBilag)),
+                quiet("Fjern", Some(Message::RemoveBilag)),
             ]
-            .spacing(8),
+            .spacing(10)
+            .align_y(iced::alignment::Vertical::Center),
+        });
+        let save = (!self.saving).then_some(Message::Save);
+        fields.push(if form.editing.is_some() {
+            row![
+                primary("Gem ændring", save),
+                quiet("Fortryd", Some(Message::CancelEdit))
+            ]
+            .spacing(8)
+        } else {
+            row![primary("Gem udgift", save)]
+        })
+    }
+
+    fn report<'a>(&'a self, log: &'a Log) -> Column<'a, Message> {
+        let mut report = column![row![
+            primary(
+                "Eksportér rapport",
+                (!self.exporting).then_some(Message::Export)
+            ),
+            text(format!("{} udgifter", log.expenses.len())),
+        ]
+        .spacing(12)
+        .align_y(iced::alignment::Vertical::Center)]
+        .spacing(10);
+        if let Some(missing) = &self.export_missing {
+            let mut names = column![text("Disse bilag findes ikke længere:")].spacing(2);
+            for name in missing {
+                names = names.push(text(name.clone()).size(13));
+            }
+            report = report.push(names).push(
+                row![
+                    quiet(
+                        "Eksportér alligevel",
+                        (!self.exporting).then_some(Message::ExportAnyway)
+                    ),
+                    quiet("Fortryd", Some(Message::CancelExport)),
+                ]
+                .spacing(8),
+            );
+        }
+        if let Some(estimate) = MonthlyEstimate::new(&log.expenses) {
+            report = report.push(
+                text(format!(
+                    "Estimeret pr. måned: {}",
+                    format_kr(estimate.total)
+                ))
+                .size(18),
+            );
+            for (kind, amount) in &estimate.by_type {
+                report =
+                    report.push(text(format!("{}: {}", kind.label(), format_kr(*amount))).size(13));
+            }
+            report = report.push(
+                text(format!(
+                    "Ud fra {} dages registrering.",
+                    estimate.covered_days
+                ))
+                .size(13),
+            );
+        }
+        report
+    }
+
+    /// Indstillinger → Kompensation: the app's settings, the reminder and the
+    /// one-time import.
+    pub fn settings_view(&self) -> Element<'_, Message> {
+        let ready = self.log().is_some();
+        let mut settings = column![toggler(self.reminds())
+            .label("Påmind om udgifter, når en uge er overført")
+            .on_toggle_maybe(ready.then_some(Message::Remind))]
+        .spacing(12);
+        if let Loading::Failed(error) = &self.log {
+            settings = settings.push(text(error.clone()).size(13));
+        }
+        settings = settings.push(
+            row![
+                text("Pris pr. km"),
+                text_input("Fx 3,79", &self.price_draft)
+                    .on_input(Message::PriceDraft)
+                    .on_submit(Message::SavePrice)
+                    .padding(8)
+                    .width(Length::Fixed(150.0)),
+                quiet("Gem pris pr. km", ready.then_some(Message::SavePrice)),
+            ]
+            .spacing(8)
+            .align_y(iced::alignment::Vertical::Center),
         );
-        crate::widgets::group(text("Sådan søger du").size(16), guide)
+        let mut addresses = column![
+            text("Hyppige adresser").size(16),
+            row![
+                text_input("Kaldenavn, fx Hjem", &self.nickname_draft)
+                    .on_input(Message::NicknameDraft)
+                    .padding(8)
+                    .width(Length::Fixed(180.0)),
+                text_input("Adresse", &self.address_draft)
+                    .on_input(Message::AddressDraft)
+                    .on_submit(Message::AddAddress)
+                    .padding(8),
+                quiet("Tilføj", ready.then_some(Message::AddAddress)),
+            ]
+            .spacing(8)
+            .align_y(iced::alignment::Vertical::Center),
+        ]
+        .spacing(8);
+        for address in self
+            .log()
+            .map(|log| log.addresses.as_slice())
+            .unwrap_or_default()
+        {
+            addresses = addresses.push(
+                row![
+                    text(format!("{}: {}", address.nickname, address.address)),
+                    space::horizontal(),
+                    quiet(
+                        "Fjern",
+                        Some(Message::RemoveAddress(address.nickname.clone()))
+                    ),
+                ]
+                .align_y(iced::alignment::Vertical::Center),
+            );
+        }
+        settings = settings.push(addresses).push(quiet(
+            "Importér fra kompensationsydelsesapp",
+            (ready && !self.importing).then_some(Message::Import),
+        ));
+        if let Some(report) = &self.import_report {
+            settings = settings.push(text(report.clone()).size(13));
+        }
+        settings.into()
     }
 }
 
-/// Totals, the monthly average and where it points, for the chosen period.
-fn overview<'a>(log: &Log, period: Period) -> Column<'a, Message> {
-    let summary = Summary::new(&log.expenses, period, |e| e.bilag.is_some());
-    let mut lines = column![text(format!(
-        "{}: {} i alt. Gennemsnit {}/md., heraf {} dokumenteret.",
-        period.label(),
-        format_kr(summary.total),
-        format_kr(summary.average()),
-        format_kr(summary.documented_average())
-    ))]
-    .spacing(6);
-    for (category, total) in &summary.totals {
-        lines = lines.push(text(format!("{}: {}", category.label(), format_kr(*total))).size(13));
+/// Cards under a heading per month, like the app's list.
+fn by_month<'a>(
+    expenses: Vec<&'a Expense>,
+    card: impl Fn(&'a Expense) -> Element<'a, Message>,
+) -> Column<'a, Message> {
+    let mut list = column![].spacing(8);
+    let mut month = None;
+    for expense in expenses {
+        let label = month_label(expense.entry.date);
+        if month.as_ref() != Some(&label) {
+            list = list.push(text(label.clone()).size(16));
+            month = Some(label);
+        }
+        list = list.push(crate::widgets::card(card(expense)));
     }
-    let estimate = match Estimate::new(&summary) {
-        Estimate::UnknownRates { year } => format!(
-            "Satserne for {year} kendes ikke i denne version af appen. Opdatér appen for at se et overslag."
-        ),
-        Estimate::BelowMinimum { rates } => format!(
-            "Under grænsen på {}/md. for gruppe I ({}-niveau).",
-            format_kr(rates.minimum.into()),
-            rates.year
-        ),
-        Estimate::GroupOne { rates } => format!(
-            "Peger mod gruppe I: {}/md. ({}-niveau).",
-            format_kr(rates.group_one.into()),
-            rates.year
-        ),
-        Estimate::GroupTwo { rates, payment } => format!(
-            "Peger mod gruppe II: dine dokumenterede udgifter plus {}, i alt {}/md. ({}-niveau).",
-            format_kr(rates.group_two_standard.into()),
-            format_kr(payment),
-            rates.year
-        ),
-    };
-    lines
-        .push(text(estimate).size(16))
-        .push(text("Overslaget er vejledende. Kommunen træffer afgørelsen.").size(13))
+    list
 }
 
-/// »22.09.2026 · Befordring · 350 kr.«
-fn expense_label(entry: &Entry) -> String {
-    format!(
-        "{} · {} · {}",
-        format_date(entry.date),
-        entry.category.label(),
-        format_kr(entry.amount.into())
-    )
+/// »Hjemvej 1 → Hallen 2 · 12,4 km«
+fn route_line(route: &Route) -> String {
+    match route.km {
+        Some(km) => format!("{} → {} · {} km", route.fra, route.til, format_km(km)),
+        None => format!("{} → {}", route.fra, route.til),
+    }
+}
+
+fn import_report(imported: &Imported) -> String {
+    let mut parts = vec![format!(
+        "Importerede {} udgifter og {} bilag.",
+        imported.expenses, imported.bilag
+    )];
+    if imported.skipped > 0 {
+        parts.push(format!("{} fandtes allerede.", imported.skipped));
+    }
+    if imported.unreadable > 0 {
+        parts.push(format!("{} rækker kunne ikke læses.", imported.unreadable));
+    }
+    if !imported.unmatched.is_empty() {
+        parts.push(format!("Tilføj selv: {}.", imported.unmatched.join(", ")));
+    }
+    parts.join(" ")
 }
 
 fn quiet<'a>(label: &'a str, message: Option<Message>) -> iced::widget::Button<'a, Message> {
@@ -832,28 +1095,56 @@ mod tests {
     #[test]
     fn an_invalid_or_failed_save_keeps_what_was_typed() {
         let mut ui = CompensationUi::loaded(Log::default());
-        let _ = ui.update(Message::Category(Category::Transport));
-        let _ = ui.update(Message::Amount("abc".into()));
+        let _ = ui.update(Message::Kind(ExpenseType::Medicine));
+        let _ = ui.update(Message::Beskrivelse("Piller".into()));
+        let _ = ui.update(Message::Pris("abc".into()));
         assert_eq!(ui.update(Message::Save).units(), 0);
         assert!(ui.take_notice().is_some());
-        assert_eq!(ui.form.amount, "abc");
+        assert_eq!(ui.form.pris, "abc");
 
-        let _ = ui.update(Message::Amount("350".into()));
+        let _ = ui.update(Message::Pris("350".into()));
         assert!(ui.update(Message::Save).units() > 0);
-        // A second press while saving does nothing.
-        assert_eq!(ui.update(Message::Save).units(), 0);
         // Another change finishing meanwhile leaves the form save running.
         let _ = ui.update(Message::Saved(Ok(Log::default())));
         assert_eq!(ui.update(Message::Save).units(), 0);
-        let _ = ui.update(Message::FormSaved(Err(
-            "Udgiftslisten kunne ikke gemmes.".into()
-        )));
-        assert_eq!(ui.form.amount, "350");
+        let _ = ui.update(Message::FormSaved(Err("Kunne ikke gemmes.".into())));
+        assert_eq!(ui.form.pris, "350");
         assert!(ui.take_notice().is_some());
 
         let _ = ui.update(Message::Save);
         let _ = ui.update(Message::FormSaved(Ok(Log::default())));
-        assert!(ui.form.amount.is_empty());
-        assert_eq!(ui.form.category, Some(Category::Transport));
+        assert!(ui.form.pris.is_empty());
+        assert_eq!(ui.view, View::Expenses);
+    }
+
+    #[test]
+    fn a_route_driven_before_fills_in_km_and_price() {
+        let mut log = Log::default();
+        log.price_per_km = Some(3.79);
+        log.expenses.push(Expense {
+            id: 1,
+            entry: Entry {
+                date: "2026-09-01".parse().unwrap(),
+                kind: ExpenseType::Driving,
+                beskrivelse: "Træning".into(),
+                route: Some(Route {
+                    fra: "Hjemvej 1".into(),
+                    til: "Hallen 2".into(),
+                    km: Some(12.4),
+                }),
+                pris: 47,
+                andet: String::new(),
+            },
+            bilag: None,
+        });
+        let mut ui = CompensationUi::loaded(log);
+        let _ = ui.update(Message::Kind(ExpenseType::Driving));
+        let _ = ui.update(Message::Address(AddressField::Fra, "Hallen 2".into()));
+        let _ = ui.update(Message::Suggested(AddressField::Til, "Hjemvej 1".into()));
+        assert_eq!(ui.form.km, "12,4");
+        assert_eq!(ui.form.pris, "47");
+        let _ = ui.update(Message::Km("20".into()));
+        assert_eq!(ui.form.pris, "76");
+        let _ = ui.view();
     }
 }

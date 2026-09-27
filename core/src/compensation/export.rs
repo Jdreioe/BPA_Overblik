@@ -1,8 +1,8 @@
-//! The zip the person attaches to an application: `Udgiftsoversigt.pdf`,
-//! `Bilagsliste.pdf` and the numbered bilag in `Bilag/`.
+//! The report zip: `Udgiftsoversigt.pdf`, `Bilagsliste.pdf` and the numbered
+//! bilag in `Bilag/`. Like the app's report, it holds every expense.
 
 use super::store::{extension, write_atomically};
-use super::{pdf, Bilag, CompensationError, Expense, Log, Period, Store, Summary};
+use super::{pdf, Bilag, CompensationError, Expense, Log, Store};
 use std::io::Write;
 use std::path::Path;
 
@@ -16,31 +16,22 @@ pub struct BilagNumber {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Documentation {
     Bilag(BilagNumber),
-    /// The expense had a bilag, but its file is gone. It counts as
-    /// sandsynliggjort and gets no number.
+    /// The expense had a bilag, but its file is gone. It gets no number.
     Missing,
-    /// No bilag: sandsynliggjort.
     None,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ExportRow {
     pub expense: Expense,
     pub documentation: Documentation,
 }
 
-/// The period's expenses in date order, with bilag numbered in that order so
-/// both documents and the folder agree. `present` says whether a bilag's
-/// file can still be read.
-pub fn export_rows(
-    expenses: &[Expense],
-    period: Period,
-    present: impl Fn(&Bilag) -> bool,
-) -> Vec<ExportRow> {
-    let mut chosen: Vec<&Expense> = expenses
-        .iter()
-        .filter(|e| period.contains(e.entry.date))
-        .collect();
+/// Every expense in date order, with bilag numbered in that order so both
+/// documents and the folder agree. `present` says whether a bilag's file
+/// can still be read.
+pub fn export_rows(expenses: &[Expense], present: impl Fn(&Bilag) -> bool) -> Vec<ExportRow> {
+    let mut chosen: Vec<&Expense> = expenses.iter().collect();
     chosen.sort_by_key(|e| (e.entry.date, e.id));
     let count = chosen
         .iter()
@@ -63,7 +54,8 @@ pub fn export_rows(
                         file_name: format!(
                             "Bilag {number:0width$} - {} - {}{suffix}",
                             expense.entry.date,
-                            expense.entry.category.label()
+                            // `El/vand/varme` must not become folders.
+                            expense.entry.kind.label().replace('/', "-")
                         ),
                     })
                 }
@@ -77,22 +69,17 @@ pub fn export_rows(
         .collect()
 }
 
-/// Write the period's export to `target`. Blocking. The zip is written
-/// beside `target` first, so a failure never leaves half a zip.
+/// Write the report to `target`. Blocking. The zip is written beside
+/// `target` first, so a failure never leaves half a zip.
 pub fn write_export(
     store: &Store,
     log: &Log,
-    period: Period,
     created: chrono::NaiveDate,
     target: &Path,
 ) -> Result<(), CompensationError> {
-    let present = |bilag: &Bilag| store.bilag_path(bilag).is_file();
-    let rows = export_rows(&log.expenses, period, present);
-    let summary = Summary::new(&log.expenses, period, |expense| {
-        expense.bilag.as_ref().is_some_and(present)
-    });
-    let overview = pdf::overview(&rows, &summary, created);
-    let list = pdf::bilagsliste(&rows, period, created);
+    let rows = export_rows(&log.expenses, |bilag| store.bilag_path(bilag).is_file());
+    let overview = pdf::overview(&rows, created);
+    let list = pdf::bilagsliste(&rows, created);
     write_atomically(target, |file| {
         let mut zip = zip::ZipWriter::new(file);
         let options = zip::write::SimpleFileOptions::default()
@@ -113,24 +100,26 @@ pub fn write_export(
         Ok(())
     })
     .map_err(|_| {
-        CompensationError("Eksporten kunne ikke gemmes. Vælg en anden mappe, og prøv igen.")
+        CompensationError("Rapporten kunne ikke gemmes. Vælg en anden mappe, og prøv igen.")
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compensation::{BilagChange, Category, Change, Entry};
+    use crate::compensation::{BilagChange, Change, Entry, ExpenseType};
 
-    fn save(store: &Store, date: &str, category: Category, bilag: Option<&Path>) -> Log {
+    fn save(store: &Store, date: &str, kind: ExpenseType, bilag: Option<&Path>) -> Log {
         store
             .apply(Change::Save {
                 id: None,
                 entry: Entry {
                     date: date.parse().unwrap(),
-                    category,
-                    amount: 250,
-                    note: "Taxa til træning".into(),
+                    kind,
+                    beskrivelse: "Taxa til træning".into(),
+                    route: None,
+                    pris: 250,
+                    andet: String::new(),
                 },
                 bilag: bilag.map_or(BilagChange::Keep, |path| BilagChange::Replace(path.into())),
             })
@@ -143,23 +132,21 @@ mod tests {
         let receipt = dir.path().join("kvittering.pdf");
         std::fs::write(&receipt, b"%PDF receipt").unwrap();
         let store = Store::new(&dir.path().join("data"));
-        save(&store, "2026-09-20", Category::Medicine, Some(&receipt));
-        save(&store, "2026-09-02", Category::Transport, Some(&receipt));
-        save(&store, "2026-09-10", Category::Diet, None);
-        let log = save(&store, "2026-09-15", Category::Leisure, Some(&receipt));
+        save(&store, "2026-09-20", ExpenseType::Medicine, Some(&receipt));
+        save(&store, "2026-09-02", ExpenseType::Driving, Some(&receipt));
+        save(&store, "2026-09-10", ExpenseType::Diet, None);
+        let log = save(&store, "2026-09-15", ExpenseType::Leisure, Some(&receipt));
         let gone = log.expenses[3].bilag.clone().unwrap();
         std::fs::remove_file(store.bilag_path(&gone)).unwrap();
 
-        let rows = export_rows(&log.expenses, Period::year(2026), |b| {
-            store.bilag_path(b).is_file()
-        });
+        let rows = export_rows(&log.expenses, |b| store.bilag_path(b).is_file());
         let documentation: Vec<_> = rows.iter().map(|r| r.documentation.clone()).collect();
         assert_eq!(
             documentation,
             [
                 Documentation::Bilag(BilagNumber {
                     number: 1,
-                    file_name: "Bilag 01 - 2026-09-02 - Befordring.pdf".into()
+                    file_name: "Bilag 01 - 2026-09-02 - Kørsel.pdf".into()
                 }),
                 Documentation::None,
                 Documentation::Missing,
@@ -177,39 +164,22 @@ mod tests {
         let receipt = dir.path().join("kvittering.png");
         std::fs::write(&receipt, b"png bytes").unwrap();
         let store = Store::new(&dir.path().join("data"));
-        save(&store, "2026-03-04", Category::Utilities, Some(&receipt));
-        save(&store, "2025-03-04", Category::Utilities, Some(&receipt));
-        let log = save(&store, "2026-05-06", Category::Clothing, None);
-        let target = dir.path().join("eksport.zip");
+        save(&store, "2026-03-04", ExpenseType::Utilities, Some(&receipt));
+        let log = save(&store, "2026-05-06", ExpenseType::Clothing, None);
+        let target = dir.path().join("rapport.zip");
 
-        write_export(
-            &store,
-            &log,
-            Period::year(2026),
-            "2026-09-27".parse().unwrap(),
-            &target,
-        )
-        .unwrap();
+        write_export(&store, &log, "2026-09-27".parse().unwrap(), &target).unwrap();
 
         let mut zip = zip::ZipArchive::new(std::fs::File::open(&target).unwrap()).unwrap();
         let mut names: Vec<String> = zip.file_names().map(str::to_owned).collect();
         names.sort();
+        let bilag_name = "Bilag/Bilag 01 - 2026-03-04 - El-vand-varme.png";
         assert_eq!(
             names,
-            [
-                "Bilag/Bilag 01 - 2026-03-04 - El, vand og varme.png",
-                "Bilagsliste.pdf",
-                "Udgiftsoversigt.pdf",
-            ]
+            [bilag_name, "Bilagsliste.pdf", "Udgiftsoversigt.pdf"]
         );
         let mut bilag = Vec::new();
-        std::io::Read::read_to_end(
-            &mut zip
-                .by_name("Bilag/Bilag 01 - 2026-03-04 - El, vand og varme.png")
-                .unwrap(),
-            &mut bilag,
-        )
-        .unwrap();
+        std::io::Read::read_to_end(&mut zip.by_name(bilag_name).unwrap(), &mut bilag).unwrap();
         assert_eq!(bilag, b"png bytes");
         let mut overview = Vec::new();
         std::io::Read::read_to_end(

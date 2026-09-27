@@ -1,19 +1,19 @@
-//! Kompensationsydelse (servicelovens § 100): the person's own log of
-//! disability-related expenses, the yearly rates and a guiding estimate of
-//! which group the expenses point to.
+//! Kompensationsydelse: a port of kompensationsydelsesapp. The person logs
+//! expenses, with the route for Kørsel, attaches bilag and exports a report.
 //!
-//! The municipality decides. Everything here only helps the person gather and
-//! document their expenses. Expenses such as medicine and diet are health
-//! information, so nothing in this module logs or reports them.
+//! Expenses such as medicine and diet are health information, and routes are
+//! places the person goes, so nothing here logs, reports or sends them.
 
 mod export;
+mod import;
 mod pdf;
 mod store;
 
 pub use export::{export_rows, write_export, BilagNumber, Documentation, ExportRow};
-pub use store::{BilagChange, Change, Log, Store};
+pub use import::Imported;
+pub use store::{BilagChange, Change, FrequentAddress, Log, Store};
 
-use chrono::{Datelike, Months, NaiveDate};
+use chrono::{Datelike, NaiveDate};
 use serde::{Deserialize, Serialize};
 
 /// A Danish message for the person, never containing a path or expense data.
@@ -26,13 +26,13 @@ impl std::fmt::Display for CompensationError {
     }
 }
 
-/// Positivlisten: the exhaustive list of expense kinds the ydelse covers.
+/// The expense types of kompensationsydelsesapp.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Category {
-    Diet,
+pub enum ExpenseType {
+    Driving,
     Medicine,
-    Transport,
+    Diet,
     Rent,
     Leisure,
     Courses,
@@ -41,49 +41,75 @@ pub enum Category {
     Other,
 }
 
-impl Category {
-    pub const ALL: [Category; 9] = [
-        Category::Diet,
-        Category::Medicine,
-        Category::Transport,
-        Category::Rent,
-        Category::Leisure,
-        Category::Courses,
-        Category::Clothing,
-        Category::Utilities,
-        Category::Other,
+impl ExpenseType {
+    pub const ALL: [ExpenseType; 9] = [
+        ExpenseType::Driving,
+        ExpenseType::Medicine,
+        ExpenseType::Diet,
+        ExpenseType::Rent,
+        ExpenseType::Leisure,
+        ExpenseType::Courses,
+        ExpenseType::Clothing,
+        ExpenseType::Utilities,
+        ExpenseType::Other,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
-            Category::Diet => "Kost og diætpræparater",
-            Category::Medicine => "Medicin",
-            Category::Transport => "Befordring",
-            Category::Rent => "Forhøjet husleje",
-            Category::Leisure => "Fritidsaktiviteter",
-            Category::Courses => "Handicaprettede kurser",
-            Category::Clothing => "Beklædning",
-            Category::Utilities => "El, vand og varme",
-            Category::Other => "Øvrige udgifter",
+            ExpenseType::Driving => "Kørsel",
+            ExpenseType::Medicine => "Medicin",
+            ExpenseType::Diet => "Kost",
+            ExpenseType::Rent => "Forhøjet husleje",
+            ExpenseType::Leisure => "Fritidsaktiviteter",
+            ExpenseType::Courses => "Handicaprelaterede kurser",
+            ExpenseType::Clothing => "Beklædning",
+            ExpenseType::Utilities => "El/vand/varme",
+            ExpenseType::Other => "Andet",
         }
+    }
+
+    /// The type a label from kompensationsydelsesapp names. That app spelled
+    /// Kost as `Kosrt`; anything unknown becomes Andet.
+    pub fn from_label(label: &str) -> Self {
+        let label = label.trim().to_lowercase();
+        if label == "kosrt" {
+            return ExpenseType::Diet;
+        }
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.label().to_lowercase() == label)
+            .unwrap_or(ExpenseType::Other)
     }
 }
 
-impl std::fmt::Display for Category {
+impl std::fmt::Display for ExpenseType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.label())
     }
 }
 
+/// Where a Kørsel went.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Route {
+    pub fra: String,
+    pub til: String,
+    /// Imported trips may lack it.
+    pub km: Option<f64>,
+}
+
 /// What the person typed for one expense.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
     pub date: NaiveDate,
-    pub category: Category,
-    /// Whole kroner. Øre are rounded when the amount is entered.
-    pub amount: u32,
+    pub kind: ExpenseType,
+    pub beskrivelse: String,
+    /// Set exactly for Kørsel.
     #[serde(default)]
-    pub note: String,
+    pub route: Option<Route>,
+    /// Whole kroner.
+    pub pris: u32,
+    #[serde(default)]
+    pub andet: String,
 }
 
 /// A receipt copied into the log's own folder, so it is still there when the
@@ -96,7 +122,7 @@ pub struct Bilag {
     pub name: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Expense {
     pub id: u64,
     #[serde(flatten)]
@@ -105,205 +131,112 @@ pub struct Expense {
     pub bilag: Option<Bilag>,
 }
 
-/// The amounts for one year (Social- og Boligstyrelsen's satser), per month.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Rates {
-    pub year: i32,
-    /// Group I needs at least this, sandsynliggjort.
-    pub minimum: u32,
-    /// Group I pays this.
-    pub group_one: u32,
-    /// Group II needs at least this, dokumenteret.
-    pub group_two_limit: u32,
-    /// Group II pays the documented expenses plus this.
-    pub group_two_standard: u32,
+/// Newest first, as the app lists them.
+pub fn newest_first(expenses: &[Expense]) -> Vec<&Expense> {
+    let mut sorted: Vec<&Expense> = expenses.iter().collect();
+    sorted.sort_by_key(|e| std::cmp::Reverse((e.entry.date, e.id)));
+    sorted
 }
 
-/// The rates for `year`, when this version of the app knows them. They change
-/// every year, so a new year's rates must be added here.
-pub fn rates(year: i32) -> Option<Rates> {
-    let (minimum, group_one, group_two_limit, group_two_standard) = match year {
-        2025 => (555, 1_105, 2_000, 500),
-        2026 => (580, 1_155, 2_090, 523),
-        _ => return None,
-    };
-    Some(Rates {
-        year,
-        minimum,
-        group_one,
-        group_two_limit,
-        group_two_standard,
+/// The app's monthly estimate: everything registered, spread over the days
+/// from the first to the last expense, scaled to an average month.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MonthlyEstimate {
+    pub covered_days: i64,
+    pub total: u64,
+    /// Largest first.
+    pub by_type: Vec<(ExpenseType, u64)>,
+}
+
+impl MonthlyEstimate {
+    pub fn new(expenses: &[Expense]) -> Option<Self> {
+        let first = expenses.iter().map(|e| e.entry.date).min()?;
+        let last = expenses.iter().map(|e| e.entry.date).max()?;
+        let covered_days = (last - first).num_days() + 1;
+        let per_month = |sum: u64| (sum as f64 * 30.4375 / covered_days as f64).round() as u64;
+        let mut sums = std::collections::BTreeMap::new();
+        for expense in expenses {
+            *sums.entry(expense.entry.kind).or_insert(0u64) += u64::from(expense.entry.pris);
+        }
+        let total = per_month(sums.values().sum());
+        let mut by_type: Vec<(ExpenseType, u64)> = sums
+            .into_iter()
+            .map(|(kind, sum)| (kind, per_month(sum)))
+            .collect();
+        by_type.sort_by_key(|(kind, amount)| (std::cmp::Reverse(*amount), *kind));
+        Some(Self {
+            covered_days,
+            total,
+            by_type,
+        })
+    }
+}
+
+/// The km of the latest Kørsel between the same two addresses, either way.
+/// This replaces the app's online route lookup: no address leaves the device.
+pub fn remembered_km(expenses: &[Expense], fra: &str, til: &str) -> Option<f64> {
+    let (fra, til) = (same_place(fra), same_place(til));
+    if fra.is_empty() || til.is_empty() {
+        return None;
+    }
+    newest_first(expenses).into_iter().find_map(|expense| {
+        let route = expense.entry.route.as_ref()?;
+        let (a, b) = (same_place(&route.fra), same_place(&route.til));
+        ((a == fra && b == til) || (a == til && b == fra))
+            .then_some(route.km)
+            .flatten()
     })
 }
 
-/// The newest rates this version knows, for describing the rules.
-pub fn latest_rates() -> Rates {
-    rates(2026).expect("2026 rates are known")
+fn same_place(address: &str) -> String {
+    address.trim().to_lowercase()
 }
 
-/// Whole calendar months, from the first day of `first` for `months` months.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Period {
-    first: NaiveDate,
-    months: u32,
-}
-
-impl Period {
-    /// The twelve months ending with the month `today` is in.
-    pub fn last_twelve_months(today: NaiveDate) -> Self {
-        let this_month = today.with_day(1).expect("first of month");
-        Self {
-            first: this_month - Months::new(11),
-            months: 12,
-        }
-    }
-    pub fn year(year: i32) -> Self {
-        Self {
-            first: NaiveDate::from_ymd_opt(year, 1, 1).expect("valid year"),
-            months: 12,
-        }
-    }
-    pub fn months(self) -> u32 {
-        self.months
-    }
-    /// The first day of the period's last month.
-    pub fn last_month(self) -> NaiveDate {
-        self.first + Months::new(self.months - 1)
-    }
-    pub fn contains(self, date: NaiveDate) -> bool {
-        date >= self.first && date < self.first + Months::new(self.months)
-    }
-    /// For example »oktober 2025 – september 2026«.
-    pub fn label(self) -> String {
-        let last = self.last_month();
-        format!(
-            "{} {} – {} {}",
-            month_da(self.first.month()),
-            self.first.year(),
-            month_da(last.month()),
-            last.year()
-        )
-    }
-    /// For file names, for example `2025-10 til 2026-09`.
-    pub fn file_label(self) -> String {
-        let last = self.last_month();
-        format!(
-            "{}-{:02} til {}-{:02}",
-            self.first.year(),
-            self.first.month(),
-            last.year(),
-            last.month()
-        )
-    }
-}
-
-pub fn month_da(month: u32) -> &'static str {
-    [
-        "januar",
-        "februar",
-        "marts",
-        "april",
-        "maj",
-        "juni",
-        "juli",
-        "august",
-        "september",
-        "oktober",
-        "november",
-        "december",
-    ][(month as usize).saturating_sub(1).min(11)]
-}
-
-/// Sums for one period. Only documented expenses can reach group II.
+/// A suggestion for a Fra or Til field.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Summary {
-    pub period: Period,
-    /// Categories with expenses, in positivlisten's order.
-    pub totals: Vec<(Category, u64)>,
-    pub total: u64,
-    pub documented: u64,
+pub struct Suggestion {
+    /// `Hjem: Hjemvej 1` for a frequent address, else the address itself.
+    pub label: String,
+    pub value: String,
 }
 
-impl Summary {
-    /// `documented` says whether an expense's bilag can be shown. An export
-    /// counts a bilag whose file has gone missing as sandsynliggjort.
-    pub fn new(
-        expenses: &[Expense],
-        period: Period,
-        documented: impl Fn(&Expense) -> bool,
-    ) -> Self {
-        let mut totals = std::collections::BTreeMap::new();
-        let (mut total, mut documented_total) = (0, 0);
-        for expense in expenses.iter().filter(|e| period.contains(e.entry.date)) {
-            let amount = u64::from(expense.entry.amount);
-            *totals.entry(expense.entry.category).or_insert(0) += amount;
-            total += amount;
-            if documented(expense) {
-                documented_total += amount;
-            }
-        }
-        Self {
-            period,
-            totals: totals.into_iter().collect(),
-            total,
-            documented: documented_total,
-        }
-    }
-    /// The monthly average, rounded to whole kroner.
-    pub fn average(&self) -> u64 {
-        per_month(self.total, self.period.months)
-    }
-    pub fn documented_average(&self) -> u64 {
-        per_month(self.documented, self.period.months)
-    }
+/// Frequent addresses matching `query` (all of them for an empty query),
+/// then addresses used before, at most eight and never twice.
+pub fn address_suggestions(log: &Log, query: &str) -> Vec<Suggestion> {
+    let query = same_place(query);
+    let frequent = log
+        .addresses
+        .iter()
+        .filter(|a| {
+            query.is_empty()
+                || a.nickname.to_lowercase().contains(&query)
+                || a.address.to_lowercase().contains(&query)
+        })
+        .map(|a| Suggestion {
+            label: format!("{}: {}", a.nickname, a.address),
+            value: a.address.clone(),
+        });
+    let used = log
+        .expenses
+        .iter()
+        .filter_map(|e| e.entry.route.as_ref())
+        .flat_map(|route| [&route.fra, &route.til])
+        .filter(|address| query.chars().count() >= 2 && address.to_lowercase().contains(&query))
+        .map(|address| Suggestion {
+            label: address.clone(),
+            value: address.clone(),
+        });
+    let mut seen = std::collections::BTreeSet::new();
+    frequent
+        .chain(used)
+        .filter(|s| seen.insert(same_place(&s.value)))
+        .take(8)
+        .collect()
 }
 
-fn per_month(total: u64, months: u32) -> u64 {
-    let months = u64::from(months.max(1));
-    (total + months / 2) / months
-}
-
-/// Which group a period's expenses point to, at the rates of the year its
-/// last month is in. Only a guide: the municipality decides.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Estimate {
-    /// This version of the app does not know that year's rates.
-    UnknownRates {
-        year: i32,
-    },
-    BelowMinimum {
-        rates: Rates,
-    },
-    GroupOne {
-        rates: Rates,
-    },
-    /// Pays the documented monthly average plus the group II standard amount.
-    GroupTwo {
-        rates: Rates,
-        payment: u64,
-    },
-}
-
-impl Estimate {
-    pub fn new(summary: &Summary) -> Self {
-        let year = summary.period.last_month().year();
-        let Some(rates) = rates(year) else {
-            return Estimate::UnknownRates { year };
-        };
-        // Compare totals, not rounded averages, so 6.954 kr. over a year
-        // stays below a 580 kr. monthly minimum.
-        let months = u64::from(summary.period.months);
-        if summary.documented >= u64::from(rates.group_two_limit) * months {
-            Estimate::GroupTwo {
-                rates,
-                payment: summary.documented_average() + u64::from(rates.group_two_standard),
-            }
-        } else if summary.total >= u64::from(rates.minimum) * months {
-            Estimate::GroupOne { rates }
-        } else {
-            Estimate::BelowMinimum { rates }
-        }
-    }
+/// km × pris/km, rounded to whole kroner.
+pub fn driving_price(km: f64, price_per_km: f64) -> u32 {
+    (km * price_per_km).round().clamp(0.0, u32::MAX as f64) as u32
 }
 
 /// Danish kroner with thousands separators, for example `1.250 kr.`.
@@ -317,6 +250,26 @@ pub fn format_kr(amount: u64) -> String {
         grouped.push(digit);
     }
     format!("{grouped} kr.")
+}
+
+/// `12,4`, with at most one decimal.
+pub fn format_km(km: f64) -> String {
+    let rounded = (km * 10.0).round() / 10.0;
+    if rounded.fract() == 0.0 {
+        format!("{rounded:.0}")
+    } else {
+        format!("{rounded:.1}").replace('.', ",")
+    }
+}
+
+/// A positive decimal number written with a comma or a dot, like km or pris/km.
+pub fn parse_decimal(input: &str) -> Option<f64> {
+    input
+        .trim()
+        .replace(',', ".")
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite() && *value > 0.0)
 }
 
 /// Read an amount the way people write it in Danish (`350`, `1.250`,
@@ -377,108 +330,129 @@ fn ungroup(whole: &str) -> Option<String> {
     Some(plain)
 }
 
-/// Read a date written as `22.09.2026`, `22-9-2026`, `22/09/2026` or
-/// `2026-09-22`.
-pub fn parse_date(input: &str) -> Result<NaiveDate, CompensationError> {
-    const INVALID: CompensationError =
-        CompensationError("Skriv datoen som dag.måned.år, fx 22.09.2026.");
-    let parts: Vec<&str> = input.trim().split(['.', '-', '/']).collect();
-    let [a, b, c] = parts[..] else {
-        return Err(INVALID);
-    };
-    let number = |part: &str| part.parse::<u32>().map_err(|_| INVALID);
-    let (year, month, day) = if a.len() == 4 {
-        (number(a)?, number(b)?, number(c)?)
-    } else if c.len() == 4 {
-        (number(c)?, number(b)?, number(a)?)
-    } else {
-        return Err(INVALID);
-    };
-    NaiveDate::from_ymd_opt(year as i32, month, day).ok_or(INVALID)
-}
-
-/// `22.09.2026`, the form `parse_date` reads back.
+/// `22.09.2026`.
 pub fn format_date(date: NaiveDate) -> String {
     date.format("%d.%m.%Y").to_string()
+}
+
+/// `September 2026`, the heading the app groups expenses under.
+pub fn month_label(date: NaiveDate) -> String {
+    let name = month_da(date.month());
+    let mut chars = name.chars();
+    let capitalized: String = chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default();
+    format!("{capitalized} {}", date.year())
+}
+
+pub fn month_da(month: u32) -> &'static str {
+    [
+        "januar",
+        "februar",
+        "marts",
+        "april",
+        "maj",
+        "juni",
+        "juli",
+        "august",
+        "september",
+        "oktober",
+        "november",
+        "december",
+    ][(month as usize).saturating_sub(1).min(11)]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn expense(id: u64, date: &str, amount: u32, documented: bool) -> Expense {
+    fn expense(id: u64, date: &str, kind: ExpenseType, pris: u32) -> Expense {
         Expense {
             id,
             entry: Entry {
                 date: date.parse().unwrap(),
-                category: Category::Transport,
-                amount,
-                note: String::new(),
+                kind,
+                beskrivelse: "Test".into(),
+                route: None,
+                pris,
+                andet: String::new(),
             },
-            bilag: documented.then(|| Bilag {
-                file: format!("{id}.jpg"),
-                name: "kvittering.jpg".into(),
-            }),
+            bilag: None,
         }
     }
 
-    fn estimate(expenses: &[Expense]) -> Estimate {
-        let summary = Summary::new(expenses, Period::year(2026), |e| e.bilag.is_some());
-        Estimate::new(&summary)
+    fn trip(id: u64, date: &str, fra: &str, til: &str, km: f64) -> Expense {
+        let mut trip = expense(id, date, ExpenseType::Driving, 100);
+        trip.entry.route = Some(Route {
+            fra: fra.into(),
+            til: til.into(),
+            km: Some(km),
+        });
+        trip
     }
 
     #[test]
-    fn the_group_i_minimum_is_the_monthly_rate_over_the_whole_period() {
-        let rates = rates(2026).unwrap();
+    fn the_monthly_estimate_spreads_everything_over_the_covered_days() {
+        assert_eq!(MonthlyEstimate::new(&[]), None);
+        // 61 days from 1 August to 30 September.
+        let estimate = MonthlyEstimate::new(&[
+            expense(1, "2026-08-01", ExpenseType::Medicine, 600),
+            expense(2, "2026-09-30", ExpenseType::Diet, 1_200),
+            expense(3, "2026-09-10", ExpenseType::Medicine, 600),
+        ])
+        .unwrap();
+        assert_eq!(estimate.covered_days, 61);
+        assert_eq!(estimate.total, 1_198); // 2.400 × 30,4375 / 61
         assert_eq!(
-            estimate(&[expense(1, "2026-03-01", 579 * 12, false)]),
-            Estimate::BelowMinimum { rates }
-        );
-        assert_eq!(
-            estimate(&[expense(1, "2026-03-01", 580 * 12, false)]),
-            Estimate::GroupOne { rates }
-        );
-        // Rounds to a 580 kr. average, but the yearly total is still short.
-        assert_eq!(
-            estimate(&[expense(1, "2026-03-01", 6_954, false)]),
-            Estimate::BelowMinimum { rates }
-        );
-    }
-
-    #[test]
-    fn only_documented_expenses_reach_group_ii() {
-        let rates = rates(2026).unwrap();
-        assert_eq!(
-            estimate(&[expense(1, "2026-05-10", 2_090 * 12, true)]),
-            Estimate::GroupTwo {
-                rates,
-                payment: 2_090 + 523
-            }
-        );
-        assert_eq!(
-            estimate(&[expense(1, "2026-05-10", 2_090 * 12, false)]),
-            Estimate::GroupOne { rates }
+            estimate.by_type,
+            [(ExpenseType::Medicine, 599), (ExpenseType::Diet, 599)]
         );
     }
 
     #[test]
-    fn a_year_without_known_rates_is_not_guessed() {
-        let summary = Summary::new(&[], Period::year(2027), |_| true);
+    fn a_route_driven_before_fills_in_its_km_either_way() {
+        let expenses = [
+            trip(1, "2026-09-01", "Hjemvej 1", "Træning 2", 12.0),
+            trip(2, "2026-09-08", "Hjemvej 1", "Træning 2", 12.4),
+        ];
         assert_eq!(
-            Estimate::new(&summary),
-            Estimate::UnknownRates { year: 2027 }
+            remembered_km(&expenses, " hjemvej 1", "Træning 2"),
+            Some(12.4)
         );
+        assert_eq!(
+            remembered_km(&expenses, "Træning 2", "Hjemvej 1"),
+            Some(12.4)
+        );
+        assert_eq!(remembered_km(&expenses, "Hjemvej 1", "Andetsteds"), None);
     }
 
     #[test]
-    fn the_last_twelve_months_end_with_this_month() {
-        let period = Period::last_twelve_months("2026-09-27".parse().unwrap());
-        assert!(period.contains("2025-10-01".parse().unwrap()));
-        assert!(period.contains("2026-09-30".parse().unwrap()));
-        assert!(!period.contains("2025-09-30".parse().unwrap()));
-        assert!(!period.contains("2026-10-01".parse().unwrap()));
-        assert_eq!(period.label(), "oktober 2025 – september 2026");
-        assert_eq!(period.file_label(), "2025-10 til 2026-09");
+    fn suggestions_put_frequent_addresses_first_and_never_twice() {
+        let mut log = Log::default();
+        log.addresses.push(FrequentAddress {
+            nickname: "Hjem".into(),
+            address: "Hjemvej 1".into(),
+        });
+        log.expenses
+            .push(trip(1, "2026-09-01", "Hjemvej 1", "Hjemmeplejen 3", 4.0));
+        let labels: Vec<String> = address_suggestions(&log, "hjem")
+            .into_iter()
+            .map(|s| s.label)
+            .collect();
+        assert_eq!(labels, ["Hjem: Hjemvej 1", "Hjemmeplejen 3"]);
+        assert_eq!(address_suggestions(&log, "").len(), 1);
+    }
+
+    #[test]
+    fn app_labels_map_to_types() {
+        assert_eq!(ExpenseType::from_label("Kosrt"), ExpenseType::Diet);
+        assert_eq!(
+            ExpenseType::from_label("forhøjet husleje"),
+            ExpenseType::Rent
+        );
+        assert_eq!(ExpenseType::from_label("Kørsel"), ExpenseType::Driving);
+        assert_eq!(ExpenseType::from_label("Noget nyt"), ExpenseType::Other);
     }
 
     #[test]
@@ -496,18 +470,11 @@ mod tests {
         for input in ["", "abc", "0", "0,20", "1.2.3,4", "-5"] {
             assert!(parse_amount(input).is_err(), "{input}");
         }
-        assert_eq!(format_kr(1_250), "1.250 kr.");
         assert_eq!(format_kr(1_234_567), "1.234.567 kr.");
-    }
-
-    #[test]
-    fn dates_read_in_danish_and_iso_order() {
-        let date: NaiveDate = "2026-09-22".parse().unwrap();
-        for input in ["22.09.2026", "22-9-2026", "22/09/2026", "2026-09-22"] {
-            assert_eq!(parse_date(input), Ok(date), "{input}");
-        }
-        assert!(parse_date("31.02.2026").is_err());
-        assert!(parse_date("22.09.26").is_err());
-        assert_eq!(format_date(date), "22.09.2026");
+        assert_eq!(parse_decimal("3,79"), Some(3.79));
+        assert_eq!(parse_decimal("0"), None);
+        assert_eq!(format_km(12.44), "12,4");
+        assert_eq!(format_km(12.0), "12");
+        assert_eq!(driving_price(12.4, 3.79), 47);
     }
 }

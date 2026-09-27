@@ -2329,13 +2329,8 @@ impl NativeApp {
         Task::none()
     }
     fn compensation_message(&mut self, message: compensation::Message) -> Task<Message> {
-        match message {
-            compensation::Message::OpenLink(url) => {
-                open_in_browser(url);
-                return Task::none();
-            }
-            compensation::Message::EnterForWeek(_) => self.screen = Screen::Compensation,
-            _ => {}
+        if matches!(message, compensation::Message::EnterForWeek(_)) {
+            self.screen = Screen::Compensation;
         }
         let task = self.compensation.update(message).map(Message::Compensation);
         if let Some(notice) = self.compensation.take_notice() {
@@ -2573,14 +2568,8 @@ impl NativeApp {
                     super::widgets::notice_card::<Message>(
                         Notice::new(
                             Tone::Info,
-                            format!(
-                                "Har du haft udgifter i uge {}?",
-                                monday.iso_week().week()
-                            ),
-                            format!(
-                                "Ugen {} er overført. Indtast udgifterne til din kompensationsydelse, mens du kan huske dem.",
-                                super::widgets::format_week_da(monday, monday + Duration::days(6))
-                            ),
+                            format!("Udgifter i uge {}?", monday.iso_week().week()),
+                            "",
                         ),
                         None,
                     ),
@@ -2892,20 +2881,13 @@ impl NativeApp {
             SettingsSection::Integrations => self.providers(),
             SettingsSection::Compensation => column![
                 text("Kompensationsydelse").size(20),
-                iced::widget::toggler(self.compensation.reminds())
-                    .label("Påmind mig om at indtaste dokumentation, når en uge er overført")
-                    .on_toggle_maybe(self.compensation.is_loaded().then_some(|on| {
-                        Message::Compensation(compensation::Message::Remind(on))
-                    })),
-                text(if self.compensation.load_failed() {
-                    "Udgiftslisten kunne ikke læses, så påmindelsen kan ikke ændres. Se fanen Kompensationsydelse."
-                } else {
-                    "Påmindelsen står på Vagtplan, når Godkend ændringer er færdig, og bliver, til du svarer på den."
-                })
-                .size(13),
-                self.quiet("Åbn Kompensationsydelse", Message::Open(Screen::Compensation)),
+                self.compensation.settings_view().map(Message::Compensation),
+                self.quiet(
+                    "Åbn Kompensationsydelse",
+                    Message::Open(Screen::Compensation)
+                ),
             ]
-            .spacing(12),
+            .spacing(16),
         };
         row![
             container(sidebar).width(Length::Fixed(210.0)),
@@ -3346,16 +3328,18 @@ mod tests {
     }
     #[test]
     fn switching_tabs_keeps_the_approval_and_works_during_a_transfer() {
-        use teamup_shift_sync_core::compensation::{Category, Entry, Expense, Log};
+        use teamup_shift_sync_core::compensation::{Entry, Expense, ExpenseType, Log};
         let mut app = app();
         let mut log = Log::default();
         log.expenses.push(Expense {
             id: 1,
             entry: Entry {
                 date: app.monday,
-                category: Category::Transport,
-                amount: 350,
-                note: "Taxa".into(),
+                kind: ExpenseType::Medicine,
+                beskrivelse: "Piller".into(),
+                route: None,
+                pris: 350,
+                andet: String::new(),
             },
             bilag: None,
         });

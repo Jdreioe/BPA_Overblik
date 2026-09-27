@@ -4,7 +4,7 @@
 //! reader has, so no font file is embedded. Text is WinAnsi-encoded, which
 //! covers Danish; anything else prints as `?`.
 
-use super::{format_date, format_kr, per_month, Documentation, ExportRow, Period, Summary};
+use super::{format_date, format_km, format_kr, Documentation, ExportRow, MonthlyEstimate};
 use chrono::NaiveDate;
 use pdf_writer::{Content, Name, Pdf, Rect, Ref, Str, TextStr};
 
@@ -17,70 +17,76 @@ const LEADING: f32 = 12.0;
 const REGULAR: Name = Name(b"F1");
 const BOLD: Name = Name(b"F2");
 
-/// Expenses, then totals, for `Udgiftsoversigt.pdf`.
-pub(super) fn overview(rows: &[ExportRow], summary: &Summary, created: NaiveDate) -> Vec<u8> {
+/// Every expense, then totals and the monthly estimate, for
+/// `Udgiftsoversigt.pdf`.
+pub(super) fn overview(rows: &[ExportRow], created: NaiveDate) -> Vec<u8> {
     let mut document = Document::new("Udgiftsoversigt – kompensationsydelse");
     document.paragraph(&format!(
-        "Periode: {}. Udarbejdet {}.",
-        summary.period.label(),
+        "Udarbejdet {}. Bilag henviser til Bilagsliste.pdf og mappen Bilag.",
         format_date(created)
     ));
-    document.paragraph(
-        "Bilag henviser til nummeret i Bilagsliste.pdf og i mappen Bilag. Udgifter uden bilag er sandsynliggjort.",
-    );
     if rows.is_empty() {
-        document.paragraph("Der er ingen udgifter i perioden.");
-    } else {
-        let columns = [
-            Column::left("Dato", 62.0),
-            Column::left("Kategori", 118.0),
-            Column::right("Beløb", 66.0),
-            Column::left("Bilag", 70.0),
-            Column::left("Note", TEXT_WIDTH - 316.0),
-        ];
-        let cells: Vec<Vec<String>> = rows
-            .iter()
-            .map(|row| {
-                let entry = &row.expense.entry;
-                vec![
-                    format_date(entry.date),
-                    entry.category.label().to_owned(),
-                    format_kr(entry.amount.into()),
-                    match &row.documentation {
-                        Documentation::Bilag(bilag) => format!("Nr. {:02}", bilag.number),
-                        Documentation::Missing => "Bilag mangler".into(),
-                        Documentation::None => "Uden bilag".into(),
-                    },
-                    entry.note.clone(),
-                ]
-            })
-            .collect();
-        document.table(&columns, &cells);
+        document.paragraph("Der er ingen udgifter.");
+        return document.finish();
     }
-    document.heading("Samlet");
-    let mut totals: Vec<Vec<String>> = summary
-        .totals
+    let columns = [
+        Column::left("Dato", 58.0),
+        Column::left("Type", 92.0),
+        Column::left("Beskrivelse", TEXT_WIDTH - 270.0),
+        Column::right("Beløb", 62.0),
+        Column::left("Bilag", 58.0),
+    ];
+    let cells: Vec<Vec<String>> = rows
         .iter()
-        .map(|(category, total)| vec![category.label().to_owned(), format_kr(*total)])
+        .map(|row| {
+            let entry = &row.expense.entry;
+            let mut beskrivelse = entry.beskrivelse.clone();
+            if let Some(route) = &entry.route {
+                beskrivelse.push_str(&format!(" · {} – {}", route.fra, route.til));
+                if let Some(km) = route.km {
+                    beskrivelse.push_str(&format!(", {} km", format_km(km)));
+                }
+            }
+            if !entry.andet.is_empty() {
+                beskrivelse.push_str(&format!(" · {}", entry.andet));
+            }
+            vec![
+                format_date(entry.date),
+                entry.kind.label().to_owned(),
+                beskrivelse,
+                format_kr(entry.pris.into()),
+                match &row.documentation {
+                    Documentation::Bilag(bilag) => format!("Nr. {:02}", bilag.number),
+                    Documentation::Missing => "Mangler".into(),
+                    Documentation::None => "–".into(),
+                },
+            ]
+        })
         .collect();
-    let months = summary.period.months();
-    totals.extend([
-        vec!["I alt".into(), format_kr(summary.total)],
-        vec![
-            format!("Gennemsnit pr. måned ({months} måneder)"),
-            format_kr(summary.average()),
-        ],
-        vec![
-            "heraf dokumenteret".into(),
-            format_kr(summary.documented_average()),
-        ],
-        vec![
-            "heraf sandsynliggjort".into(),
-            format_kr(per_month(summary.total - summary.documented, months)),
-        ],
-    ]);
+    document.table(&columns, &cells);
+
+    document.heading("Samlet");
+    let expenses: Vec<_> = rows.iter().map(|row| row.expense.clone()).collect();
+    let mut sums = std::collections::BTreeMap::new();
+    for expense in &expenses {
+        *sums.entry(expense.entry.kind).or_insert(0u64) += u64::from(expense.entry.pris);
+    }
+    let mut totals: Vec<Vec<String>> = sums
+        .iter()
+        .map(|(kind, sum)| vec![kind.label().to_owned(), format_kr(*sum)])
+        .collect();
+    totals.push(vec!["I alt".into(), format_kr(sums.values().sum())]);
+    if let Some(estimate) = MonthlyEstimate::new(&expenses) {
+        totals.push(vec![
+            format!(
+                "Estimeret pr. måned ({} dages registrering)",
+                estimate.covered_days
+            ),
+            format_kr(estimate.total),
+        ]);
+    }
     document.table(
-        &[Column::left("", 250.0), Column::right("Beløb", 100.0)],
+        &[Column::left("", 280.0), Column::right("Beløb", 100.0)],
         &totals,
     );
     document.finish()
@@ -88,13 +94,9 @@ pub(super) fn overview(rows: &[ExportRow], summary: &Summary, created: NaiveDate
 
 /// One row per bilag, for `Bilagsliste.pdf`. A missing bilag is listed
 /// without a number, so the person can see what to find.
-pub(super) fn bilagsliste(rows: &[ExportRow], period: Period, created: NaiveDate) -> Vec<u8> {
+pub(super) fn bilagsliste(rows: &[ExportRow], created: NaiveDate) -> Vec<u8> {
     let mut document = Document::new("Bilagsliste");
-    document.paragraph(&format!(
-        "Periode: {}. Udarbejdet {}.",
-        period.label(),
-        format_date(created)
-    ));
+    document.paragraph(&format!("Udarbejdet {}.", format_date(created)));
     let cells: Vec<Vec<String>> = rows
         .iter()
         .filter_map(|row| {
@@ -109,22 +111,22 @@ pub(super) fn bilagsliste(rows: &[ExportRow], period: Period, created: NaiveDate
             Some(vec![
                 number,
                 format_date(entry.date),
-                entry.category.label().to_owned(),
-                format_kr(entry.amount.into()),
+                entry.kind.label().to_owned(),
+                format_kr(entry.pris.into()),
                 file,
             ])
         })
         .collect();
     if cells.is_empty() {
-        document.paragraph("Der er ingen bilag i perioden.");
+        document.paragraph("Der er ingen bilag.");
     } else {
         document.table(
             &[
                 Column::left("Nr.", 34.0),
-                Column::left("Dato", 62.0),
-                Column::left("Kategori", 118.0),
-                Column::right("Beløb", 66.0),
-                Column::left("Fil i mappen Bilag", TEXT_WIDTH - 280.0),
+                Column::left("Dato", 58.0),
+                Column::left("Type", 92.0),
+                Column::right("Beløb", 62.0),
+                Column::left("Fil i mappen Bilag", TEXT_WIDTH - 246.0),
             ],
             &cells,
         );
