@@ -2826,109 +2826,58 @@ impl NativeApp {
             .into()
     }
 
+    /// Back, the title, Support and updates on top; one chip per section
+    /// below; the section's page under both.
     fn settings(&self) -> Element<'_, Message> {
-        let mut header = row![text("Indstillinger").size(20), space::horizontal()]
-            .spacing(8)
-            .align_y(iced::alignment::Vertical::Center);
-        // Without a confirmed setup there is no week to go back to. The
-        // button still answers, with a notice saying what is missing.
-        header = header.push(tooltip(
-            self.circular_icon("⌂", Message::Open(Screen::Home)),
-            "Tilbage til ugen",
-            tooltip::Position::Bottom,
-        ));
-        let mut sidebar = column![header].spacing(10);
-        for (section, icon, label) in [
-            (SettingsSection::Helpers, "👥", "Hjælpere"),
-            (SettingsSection::StandardTimes, "◷", "Standardtider"),
-            (SettingsSection::Markers, "⚑", "Markeringer"),
-            (SettingsSection::Absences, "✚", "Fravær"),
-            (SettingsSection::Integrations, "⇄", "Udbydere"),
-            (SettingsSection::Compensation, "kr", "Kompensation"),
+        let header = row![
+            // Without a confirmed setup there is no week to go back to. The
+            // button still answers, with a notice saying what is missing.
+            self.quiet("‹ Tilbage", Message::Open(Screen::Home)),
+            text("Indstillinger").size(20),
+            space::horizontal(),
+            tooltip(
+                self.circular_icon("?", Message::Open(Screen::Help)),
+                "Support",
+                tooltip::Position::Bottom,
+            ),
+            self.update_control(),
+        ]
+        .spacing(12)
+        .align_y(iced::alignment::Vertical::Center);
+        let mut sections = row![].spacing(8);
+        for (section, label) in [
+            (SettingsSection::Helpers, "Hjælpere"),
+            (SettingsSection::StandardTimes, "Standardtider"),
+            (SettingsSection::Markers, "Markeringer"),
+            (SettingsSection::Absences, "Fravær"),
+            (SettingsSection::Integrations, "Udbydere"),
+            (SettingsSection::Compensation, "Kompensation"),
         ] {
-            let selected = self.settings_section == section;
-            let mut entry = row![text(icon).size(18), text(label).size(14)]
-                .spacing(10)
-                .align_y(iced::alignment::Vertical::Center);
             // Blocked helper choices keep the whole setup from confirming, so
             // the mark shows from every section, not only on Hjælpere.
-            if section == SettingsSection::Helpers && self.helpers_blocked() {
-                entry = entry
-                    .push(space::horizontal())
-                    .push(text("! Ret").size(13).font(iced::Font {
-                        weight: iced::font::Weight::Bold,
-                        ..iced::Font::DEFAULT
-                    }));
-            }
-            sidebar = sidebar.push(
-                button(entry)
-                    .style(move |theme, status| {
-                        if selected {
-                            iced::widget::button::primary(theme, status)
-                        } else {
-                            super::widgets::outlined(theme, status)
-                        }
-                    })
-                    .padding([10, 12])
-                    .width(Length::Fill)
+            let label = if section == SettingsSection::Helpers && self.helpers_blocked() {
+                "! Hjælpere"
+            } else {
+                label
+            };
+            sections = sections.push(
+                button(text(label).size(14))
+                    .style(super::widgets::chosen(
+                        self.settings_section == section,
+                        super::widgets::CHIP,
+                    ))
+                    .padding([7, 14])
                     .on_press(Message::SelectSettings(section)),
             );
         }
-        let (icon, label, action) = if let Some(ready) = &self.update_ready {
-            match ready {
-                update::ApplyOutcome::Restart(_) => {
-                    ("↻", "Genstart for at opdatere", Message::RestartUpdate)
-                }
-                update::ApplyOutcome::OpenInstaller(_) => {
-                    ("↻", "Åbn installationsprogram", Message::RestartUpdate)
-                }
-            }
-        } else if self.activity == Activity::Update {
-            const FRAMES: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
-            (
-                FRAMES[self.update_frame],
-                "Henter opdatering …",
-                Message::UpdateTick,
-            )
-        } else if self.update_offer.is_some() {
-            ("⇩", "Hent opdatering", Message::InstallUpdate)
-        } else {
-            ("⟳", "Søg efter opdateringer", Message::CheckUpdates)
-        };
-        let update_control = tooltip(
-            self.circular_icon(icon, action),
-            text(if let Some(offer) = &self.update_offer {
-                format!("{label}: version {}", offer.version)
-            } else {
-                label.to_owned()
-            }),
-            tooltip::Position::Right,
-        );
-        sidebar = sidebar.push(space().height(Length::Fill)).push(
-            row![
-                tooltip(
-                    self.circular_icon("?", Message::Open(Screen::Help)),
-                    "Support",
-                    tooltip::Position::Top,
-                ),
-                update_control,
-            ]
-            .spacing(8),
-        );
         let content = match self.settings_section {
             SettingsSection::Helpers => column![
                 row![
                     text("Hjælpere").size(20),
-                    tooltip(
-                        self.circular_icon(
-                            "⟳",
-                            Message::Setup(setup::Message::Action(
-                                "discover",
-                                serde_json::json!({})
-                            ))
-                        ),
-                        "Opdatér hjælpere",
-                        tooltip::Position::Bottom,
+                    space::horizontal(),
+                    self.quiet(
+                        "⟳ Hent navne igen",
+                        Message::Setup(setup::Message::Action("discover", serde_json::json!({})))
                     ),
                 ]
                 .spacing(12)
@@ -2956,13 +2905,48 @@ impl NativeApp {
             ]
             .spacing(16),
         };
-        row![
-            container(sidebar).width(Length::Fixed(210.0)),
+        column![
+            header,
+            sections,
             scrollable(content).height(Length::Fill).width(Length::Fill),
         ]
-        .spacing(20)
+        .spacing(16)
         .height(Length::Fill)
         .into()
+    }
+
+    /// Checking for, fetching and installing an update, as one labelled
+    /// button whose text says which of those it does now.
+    fn update_control(&self) -> iced::widget::Button<'_, Message> {
+        let (label, action) = if let Some(ready) = &self.update_ready {
+            match ready {
+                update::ApplyOutcome::Restart(_) => (
+                    "↻ Genstart for at opdatere".to_owned(),
+                    Message::RestartUpdate,
+                ),
+                update::ApplyOutcome::OpenInstaller(_) => (
+                    "↻ Åbn installationsprogram".to_owned(),
+                    Message::RestartUpdate,
+                ),
+            }
+        } else if self.activity == Activity::Update {
+            const FRAMES: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
+            (
+                format!("{} Henter opdatering …", FRAMES[self.update_frame]),
+                Message::UpdateTick,
+            )
+        } else if let Some(offer) = &self.update_offer {
+            (
+                format!("⇩ Hent opdatering {}", offer.version),
+                Message::InstallUpdate,
+            )
+        } else {
+            ("⟳ Søg efter opdateringer".to_owned(), Message::CheckUpdates)
+        };
+        button(text(label).size(14))
+            .style(super::widgets::outlined)
+            .padding([7, 12])
+            .on_press_maybe(self.enabled(&action).then_some(action))
     }
 
     fn circular_icon<'a>(
