@@ -286,8 +286,9 @@ cargo run -p teamup-shift-sync-gui
 ```
 
 `--self-check` builds the representative fixture preview headlessly and prints
-its digest. CI runs it against every packaged bundle on Windows, macOS and
-Linux. See `docs/desktop-validation.md` for the package and accessibility checks.
+its digest. CI runs it against the portable bundles on `main` and against every
+release installer on Windows, macOS and Linux. See
+`docs/desktop-validation.md` for the checks and accessibility pass.
 
 Release installers contain the desktop app, the CLI and `fixtures/`, and are
 built by `scripts/package-*` from a dated tag. For a plain local build, use
