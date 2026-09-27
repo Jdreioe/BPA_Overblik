@@ -65,6 +65,29 @@ pub fn outlined(theme: &iced::Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// An outlined choice: tabs, settings sections, list entries and choice
+/// cards. The selected one gets a thicker accent border and a tint, so the
+/// choice never depends on colour alone. Filled buttons stay for actions.
+pub fn chosen(
+    selected: bool,
+    radius: f32,
+) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        let mut style = outlined(theme, status);
+        style.border.radius = radius.into();
+        if selected {
+            let accent = theme.extended_palette().primary.base.color;
+            style.border.color = accent;
+            style.border.width = 2.0;
+            style.background = Some(accent.scale_alpha(0.2).into());
+        }
+        style
+    }
+}
+
+/// Corner radius that turns a [`chosen`] button into a round chip.
+pub const CHIP: f32 = 999.0;
+
 /// A compact notification: tone icon, short plain outcome, an optional
 /// detail line and a visible dismiss button. Every status and action result
 /// uses this one shape, so the page body never repeats it as prose.

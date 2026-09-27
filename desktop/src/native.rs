@@ -2483,23 +2483,6 @@ impl NativeApp {
         if self.activity == Activity::Apply {
             page = self.apply_status(page);
         }
-        if matches!(screen, Screen::Home | Screen::Compensation) {
-            page = page.push(
-                row![
-                    tooltip(
-                        self.circular_icon("⚙", Message::Open(Screen::Settings)),
-                        "Indstillinger",
-                        tooltip::Position::Top,
-                    ),
-                    tooltip(
-                        self.circular_icon("?", Message::Open(Screen::Help)),
-                        "Support",
-                        tooltip::Position::Top,
-                    ),
-                ]
-                .spacing(8),
-            );
-        }
         let base = container(page)
             .center_x(Length::Fill)
             .width(Length::Fill)
@@ -2533,29 +2516,37 @@ impl NativeApp {
         .into()
     }
 
-    /// Vagtplan and Kompensationsydelse. Switching only changes what is
-    /// shown, so it never revokes an approval.
+    /// Vagtplan and Kompensationsydelse as chips, with Support and
+    /// Indstillinger top-right. Switching only changes what is shown, so it
+    /// never revokes an approval.
     fn tabs(&self, shown: Screen) -> Element<'_, Message> {
-        let mut tabs = row![].spacing(8);
+        let mut tabs = row![].spacing(8).align_y(iced::alignment::Vertical::Center);
         for (screen, label) in [
             (Screen::Home, "Vagtplan"),
             (Screen::Compensation, "Kompensationsydelse"),
         ] {
-            let selected = shown == screen;
             tabs = tabs.push(
                 button(text(label).size(15))
-                    .style(move |theme, status| {
-                        if selected {
-                            iced::widget::button::primary(theme, status)
-                        } else {
-                            super::widgets::outlined(theme, status)
-                        }
-                    })
-                    .padding([10, 16])
+                    .style(super::widgets::chosen(
+                        shown == screen,
+                        super::widgets::CHIP,
+                    ))
+                    .padding([8, 16])
                     .on_press(Message::Open(screen)),
             );
         }
-        tabs.into()
+        tabs.push(space::horizontal())
+            .push(tooltip(
+                self.circular_icon("?", Message::Open(Screen::Help)),
+                "Support",
+                tooltip::Position::Bottom,
+            ))
+            .push(tooltip(
+                self.circular_icon("⚙", Message::Open(Screen::Settings)),
+                "Indstillinger",
+                tooltip::Position::Bottom,
+            ))
+            .into()
     }
 
     /// One card per transferred week still waiting for its expenses. Unlike
