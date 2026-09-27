@@ -1,5 +1,5 @@
 use iced::widget::{
-    button, column, image, pick_list, radio, row, space, text, text_input, toggler,
+    button, column, container, image, pick_list, radio, row, space, text, text_input, toggler,
 };
 use iced::{Element, Length};
 use serde::{Deserialize, Serialize};
@@ -120,7 +120,8 @@ pub enum Message {
     OpenTeamupKeys,
     CopyOrganization,
     CopyPurpose,
-    ToggleEdit(String),
+    /// Show this calendar's mapping on Hjælpere.
+    SelectHelper(String),
     /// Expand or collapse one provider's settings on the providers tab.
     ToggleProvider(String),
     /// Provider login actions. The app maps these onto its own engine
@@ -197,11 +198,9 @@ pub struct SetupUi {
     /// Each absence reason's words as typed, comma separated, in
     /// [`AbsenceReason::ALL`] order. Saved on Enter or **Gem ord**.
     pub absence_words: [String; 4],
-    /// Calendars the person reopened for editing. A row shows dropdowns
-    /// while it is ambiguous (no match yet) or reopened here; a unique
-    /// suggestion otherwise renders as plain text. Nothing is confirmed
-    /// until the joint confirmation below.
-    pub editing: std::collections::BTreeSet<String>,
+    /// The calendar picked in the Hjælpere list. Without one, or when it is
+    /// gone, the page shows [`shown_mapping`]'s choice.
+    pub selected_helper: Option<String>,
     /// Providers collapsed on the providers tab. Everything starts open.
     pub collapsed: std::collections::BTreeSet<String>,
     /// iCal links being entered. Like `link`, only kept until stored.
@@ -562,35 +561,172 @@ impl SetupUi {
         }
         let mut content = content;
         if state.mappings.is_empty() {
-            content = content.push(text(
-                "Hjælperne hentes automatisk, når forbindelserne er klar.",
-            ));
-        } else {
-            let mut header = row![
-                text(match state.source.as_str() {
-                    "sheets" => "Regneark",
-                    "ical" => "Kalender",
-                    _ => "TeamUp",
-                })
-                .width(Length::FillPortion(2)),
-                text("MitHF").width(Length::FillPortion(2)),
-            ]
-            .spacing(8);
-            if state.duos_enabled {
-                header = header.push(text("DUOS").width(Length::FillPortion(2)));
-            }
-            if let Some(blocked) = state.blocked.as_ref().filter(|_| !self.blocked_hidden) {
-                content = content.push(crate::widgets::notice_card(
-                    Notice::from_message(Tone::Warning, blocked),
-                    None,
-                ));
-            }
-            content = content.push(header);
-            for mapping in &state.mappings {
-                content = content.push(self.mapping_row(state, mapping));
-            }
+            return content
+                .push(text(
+                    "Hjælperne hentes automatisk, når forbindelserne er klar.",
+                ))
+                .into();
         }
-        content.into()
+        if let Some(blocked) = state.blocked.as_ref().filter(|_| !self.blocked_hidden) {
+            content = content.push(crate::widgets::notice_card(
+                Notice::from_message(Tone::Warning, blocked),
+                None,
+            ));
+        }
+        let shown = shown_mapping(state, self.selected_helper.as_deref());
+        let mut list = column![text("Vælg hjælper").size(13)].spacing(6);
+        // Excluded calendars last: they are not helpers.
+        let (kept, excluded): (Vec<&Mapping>, Vec<&Mapping>) =
+            state.mappings.iter().partition(|m| !m.excluded);
+        for mapping in kept.into_iter().chain(excluded) {
+            list = list.push(self.helper_entry(state, mapping, shown));
+        }
+        let mut page = row![list.width(Length::Fixed(260.0))].spacing(24);
+        if let Some(mapping) = shown {
+            page = page.push(self.helper_detail(state, mapping));
+        }
+        content.push(page).into()
+    }
+
+    /// One calendar in the Hjælpere list: its name, its group when the
+    /// TeamUp name has one (»Deltid > Anna«), and whether it is ready, in
+    /// words beside the colour.
+    fn helper_entry<'a>(
+        &'a self,
+        state: &'a SetupState,
+        mapping: &'a Mapping,
+        shown: Option<&Mapping>,
+    ) -> Element<'a, Message> {
+        let (group, name) = split_calendar(calendar_name(state, mapping));
+        let mut label = column![text(name).size(15)].width(Length::Fill);
+        if let Some(group) = group {
+            label = label.push(text(group).size(12));
+        }
+        let mark = if mapping.excluded {
+            "Udeladt"
+        } else if needs_choice(state, mapping) {
+            "! Vælg"
+        } else {
+            "✓"
+        };
+        let selected = shown.is_some_and(|shown| shown.source == mapping.source);
+        button(
+            row![label, text(mark).size(13)]
+                .spacing(8)
+                .align_y(iced::alignment::Vertical::Center),
+        )
+        .style(crate::widgets::chosen(selected, 6.0))
+        .padding([8, 12])
+        .width(Length::Fill)
+        .on_press(Message::SelectHelper(mapping.source.clone()))
+        .into()
+    }
+
+    /// The shown calendar's mapping: TeamUp → MitHF → DUOS in one row, what
+    /// that means, and excluding or including the calendar. A choice saves
+    /// as soon as it is picked, as it always has.
+    fn helper_detail<'a>(
+        &'a self,
+        state: &'a SetupState,
+        mapping: &'a Mapping,
+    ) -> Element<'a, Message> {
+        let calendar = calendar_name(state, mapping);
+        let source_id = mapping.source.clone();
+        let heading = text(split_calendar(calendar).1).size(18);
+        if mapping.excluded {
+            return column![
+                heading,
+                text("Kalenderen er udeladt, så dens vagter overføres ikke."),
+                row![quiet_button(
+                    "Medtag igen",
+                    Message::Action("edit", json!({"source": source_id, "excluded": false})),
+                )],
+            ]
+            .spacing(12)
+            .width(Length::Fill)
+            .into();
+        }
+        let field = |label: &'a str, value: Element<'a, Message>| {
+            column![text(label).size(13), value]
+                .spacing(4)
+                .width(Length::FillPortion(1))
+        };
+        // Level with the fields' middle, under their labels.
+        let arrow = || container(text("→").size(16)).padding(iced::Padding::ZERO.bottom(10));
+        let source_label = match state.source.as_str() {
+            "sheets" => "Regneark",
+            "ical" => "Kalender",
+            _ => "TeamUp",
+        };
+        let mut flow = row![
+            field(
+                source_label,
+                crate::widgets::card(text(calendar).wrapping(text::Wrapping::None)),
+            ),
+            arrow(),
+            field(
+                "MitHF",
+                self.choice(
+                    &state.mithf,
+                    &mapping.mithf,
+                    &mapping.source,
+                    "mithf",
+                    "Vælg hjælper"
+                ),
+            ),
+        ]
+        .spacing(8)
+        .align_y(iced::alignment::Vertical::Bottom);
+        if state.duos_enabled {
+            flow = flow.push(arrow()).push(field(
+                "DUOS",
+                self.choice(
+                    &state.duos,
+                    &mapping.duos,
+                    &mapping.source,
+                    "duos",
+                    "Vælg aktiv hjælper",
+                ),
+            ));
+        }
+        column![
+            heading,
+            flow,
+            text(format!(
+                "Vagter i »{calendar}« overføres til disse personer. Vælg en anden, hvis et navn er forkert."
+            ))
+            .size(13),
+            row![quiet_button(
+                "Udelad kalenderen",
+                Message::Action("edit", json!({"source": source_id, "excluded": true})),
+            )],
+        ]
+        .spacing(12)
+        .width(Length::Fill)
+        .into()
+    }
+
+    /// A MitHF or DUOS person for one calendar. Picking saves at once.
+    fn choice<'a>(
+        &'a self,
+        choices: &'a [Choice],
+        selected: &str,
+        source: &str,
+        service: &'static str,
+        placeholder: &'static str,
+    ) -> Element<'a, Message> {
+        let options = disambiguate(choices);
+        let current = find(&options, selected);
+        let source_id = source.to_owned();
+        pick_list(options, current, move |c: Choice| {
+            let mut params = json!({"source": source_id});
+            params[service] = json!(c.id);
+            Message::Action("edit", params)
+        })
+        .placeholder(placeholder)
+        .padding(10)
+        .width(Length::Fill)
+        .into()
     }
 
     /// The providers tab: one group per side. The shift source is
@@ -912,110 +1048,6 @@ impl SetupUi {
         content.into()
     }
 
-    /// One calendar as one table row. Column headers appear once above, so
-    /// the row itself carries no per-cell labels.
-    fn mapping_row<'a>(
-        &'a self,
-        state: &'a SetupState,
-        mapping: &'a Mapping,
-    ) -> Element<'a, Message> {
-        let name = state
-            .calendars
-            .iter()
-            .find(|c| c.id == mapping.source)
-            .map_or("Ukendt kalender", |c| c.name.as_str());
-        if mapping.excluded {
-            let source_id = mapping.source.clone();
-            return row![
-                text(name).width(Length::FillPortion(2)),
-                text("Udeladt").size(13).width(Length::FillPortion(2)),
-                row![quiet_button(
-                    "Fortryd",
-                    Message::Action("edit", json!({"source": source_id, "excluded": false})),
-                )]
-                .width(Length::FillPortion(2)),
-            ]
-            .spacing(8)
-            .into();
-        }
-        let source_id = mapping.source.clone();
-        let teamup = column![
-            text(name),
-            quiet_button(
-                "Udelad",
-                Message::Action("edit", json!({"source": source_id, "excluded": true})),
-            ),
-        ]
-        .spacing(4)
-        .width(Length::FillPortion(2));
-        let mut cells = row![
-            teamup,
-            self.choice_cell(
-                &state.mithf,
-                &mapping.mithf,
-                &mapping.source,
-                "mithf",
-                "Vælg hjælper"
-            ),
-        ]
-        .spacing(8);
-        if state.duos_enabled {
-            cells = cells.push(self.choice_cell(
-                &state.duos,
-                &mapping.duos,
-                &mapping.source,
-                "duos",
-                "Vælg aktiv hjælper",
-            ));
-        }
-        cells.into()
-    }
-
-    /// A MitHF/DUOS cell: plain text with a ret affordance for a unique
-    /// suggestion, an open dropdown for ambiguous or unmapped rows.
-    fn choice_cell<'a>(
-        &'a self,
-        choices: &'a [Choice],
-        selected: &str,
-        source: &str,
-        service: &'static str,
-        placeholder: &'static str,
-    ) -> Element<'a, Message> {
-        let options = disambiguate(choices);
-        if needs_dropdown(&options, selected, &self.editing, source) {
-            let source_id = source.to_owned();
-            return pick_list(options, find(choices, selected), move |c: Choice| {
-                let mut params = json!({"source":source_id});
-                params[service] = json!(c.id);
-                Message::Action("edit", params)
-            })
-            .placeholder(placeholder)
-            .padding(12)
-            .width(Length::FillPortion(2))
-            .into();
-        }
-        let label =
-            find(choices, selected).map_or_else(|| "Ukendt valg".to_owned(), |choice| choice.name);
-        let reopen = if self.editing.contains(source) {
-            "Færdig"
-        } else {
-            "Ret"
-        };
-        row![
-            text(label).size(13).width(Length::Fill),
-            quiet_button(reopen, Message::ToggleEdit(source.to_owned())),
-        ]
-        .spacing(8)
-        .width(Length::FillPortion(2))
-        .into()
-    }
-
-    pub fn toggle_edit(&mut self, source: &str) {
-        if !self.editing.remove(source) {
-            self.editing.insert(source.to_owned());
-        }
-    }
-
     pub fn toggle_provider(&mut self, id: &str) {
         if !self.collapsed.remove(id) {
             self.collapsed.insert(id.to_owned());
@@ -1097,15 +1129,39 @@ fn find(choices: &[Choice], id: &str) -> Option<Choice> {
     choices.iter().find(|c| c.id == id).cloned()
 }
 
-/// Whether a MitHF/DUOS cell shows an open dropdown. A unique suggestion
-/// renders as text until reopened; anything ambiguous or unmapped stays open.
-fn needs_dropdown(
-    choices: &[Choice],
-    selected: &str,
-    editing: &std::collections::BTreeSet<String>,
-    source: &str,
-) -> bool {
-    find(choices, selected).is_none() || editing.contains(source)
+fn calendar_name<'a>(state: &'a SetupState, mapping: &Mapping) -> &'a str {
+    state
+        .calendars
+        .iter()
+        .find(|c| c.id == mapping.source)
+        .map_or("Ukendt kalender", |c| c.name.as_str())
+}
+
+/// »Deltid > Anna« as its group and the helper's name, for the list. A name
+/// without a group is only a name.
+fn split_calendar(name: &str) -> (Option<&str>, &str) {
+    match name.rsplit_once(" > ") {
+        Some((group, helper)) => (Some(group), helper),
+        None => (None, name),
+    }
+}
+
+/// A kept calendar without a known MitHF person, or DUOS person when DUOS
+/// is on, still needs someone chosen.
+fn needs_choice(state: &SetupState, mapping: &Mapping) -> bool {
+    !mapping.excluded
+        && (find(&state.mithf, &mapping.mithf).is_none()
+            || (state.duos_enabled && find(&state.duos, &mapping.duos).is_none()))
+}
+
+/// The mapping Hjælpere shows: the picked one while it exists, otherwise the
+/// first that still needs a choice, otherwise the first.
+fn shown_mapping<'a>(state: &'a SetupState, picked: Option<&str>) -> Option<&'a Mapping> {
+    let mappings = &state.mappings;
+    picked
+        .and_then(|picked| mappings.iter().find(|m| m.source == picked))
+        .or_else(|| mappings.iter().find(|m| needs_choice(state, m)))
+        .or_else(|| mappings.first())
 }
 
 fn disambiguate(choices: &[Choice]) -> Vec<Choice> {
@@ -1185,60 +1241,31 @@ mod tests {
         }
     }
 
+    /// Hjælpere opens on what still needs a choice, keeps a picked calendar
+    /// while it exists, and falls back when it is gone.
     #[test]
-    fn only_ambiguous_or_reopened_rows_show_dropdowns() {
+    fn helpers_show_the_picked_calendar_or_the_first_needing_a_choice() {
         let state = confirmation_state();
-        let ui = SetupUi {
-            state: Some(state),
-            ..SetupUi::default()
-        };
-        // Unique suggestions render as text.
-        assert!(!needs_dropdown(
-            &ui.state.as_ref().unwrap().mithf,
-            "m1",
-            &ui.editing,
-            "cal-ft"
-        ));
-        // Ambiguous and unmapped rows stay open.
-        assert!(needs_dropdown(
-            &ui.state.as_ref().unwrap().mithf,
-            "",
-            &ui.editing,
-            "cal-vikar"
-        ));
-        assert!(needs_dropdown(
-            &ui.state.as_ref().unwrap().duos,
-            "gone",
-            &ui.editing,
-            "cal-ft"
-        ));
-        // Reopening a suggestion shows its dropdowns until closed again.
-        let mut ui = ui;
-        ui.toggle_edit("cal-ft");
-        assert!(needs_dropdown(
-            &ui.state.as_ref().unwrap().mithf,
-            "m1",
-            &ui.editing,
-            "cal-ft"
-        ));
-        ui.toggle_edit("cal-ft");
-        assert!(!needs_dropdown(
-            &ui.state.as_ref().unwrap().mithf,
-            "m1",
-            &ui.editing,
-            "cal-ft"
-        ));
+        let shown = |picked| shown_mapping(&state, picked).map(|m| m.source.as_str());
+        assert_eq!(shown(None), Some("cal-vikar"));
+        assert_eq!(shown(Some("cal-møde")), Some("cal-møde"));
+        assert_eq!(shown(Some("gone")), Some("cal-vikar"));
+        assert!(!needs_choice(&state, &state.mappings[0]));
+        assert!(!needs_choice(&state, &state.mappings[2]), "excluded");
+        assert_eq!(split_calendar("FT > Zain"), (Some("FT"), "Zain"));
+        assert_eq!(split_calendar("Vikar"), (None, "Vikar"));
     }
 
     #[test]
-    fn table_renders_suggested_ambiguous_and_excluded_rows() {
+    fn helpers_render_the_list_and_each_kind_of_detail() {
         let mut ui = SetupUi {
             state: Some(confirmation_state()),
             ..SetupUi::default()
         };
-        let _ = ui.view(Section::Helpers);
-        ui.toggle_edit("cal-ft");
-        let _ = ui.view(Section::Helpers);
+        for picked in [None, Some("cal-ft"), Some("cal-møde")] {
+            ui.selected_helper = picked.map(str::to_owned);
+            let _ = ui.view(Section::Helpers);
+        }
     }
 
     #[test]

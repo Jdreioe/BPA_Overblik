@@ -1478,6 +1478,12 @@ impl NativeApp {
             }
             return Task::none();
         }
+        // Picking a calendar only changes which one Hjælpere shows, so it
+        // also works while the helpers are being fetched.
+        if let Message::Setup(setup::Message::SelectHelper(source)) = message {
+            self.setup.selected_helper = Some(source);
+            return Task::none();
+        }
         if let Message::StepShift(by) = message {
             if let Some(preview) = &mut self.preview {
                 preview.selected = step_shift(&preview.week, preview.selected, by);
@@ -1689,8 +1695,8 @@ impl NativeApp {
             Message::Setup(setup::Message::Template(message)) => {
                 self.setup.template.update(message);
             }
-            Message::Setup(setup::Message::ToggleEdit(source)) => {
-                self.setup.toggle_edit(&source);
+            Message::Setup(setup::Message::SelectHelper(_)) => {
+                // Already handled before the busy guard; kept for exhaustiveness.
             }
             Message::Setup(setup::Message::ToggleProvider(id)) => {
                 self.setup.toggle_provider(&id);
