@@ -1194,7 +1194,7 @@ const PANEL_WIDTH: f32 = 280.0;
 const HELP: [&str; 5] = [
     "1. Log ind i MitHF og eventuelt DUOS under Udbydere. Login holder, indtil tjenesten selv logger dig ud.",
     "2. Vælg ugen på forsiden, og vælg Se vagtplan.",
-    "3. Løs først advarslerne over ugen. Rettelser laves i kilden eller i tjenesten, ikke i appen.",
+    "3. Løs først advarslerne ved siden af ugen. Vælg en vagt for at se, hvad der sker med den. Rettelser laves i kilden eller i tjenesten, ikke i appen.",
     "4. Vælg Godkend ændringer. Hver ændring læses tilbage og bekræftes, før den næste begynder.",
     "Appen sletter aldrig noget i MitHF eller DUOS, og den godkender ikke registreringer for hjælperen.",
 ];
