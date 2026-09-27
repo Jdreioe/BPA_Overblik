@@ -241,25 +241,31 @@ impl Document {
                     }
                 })
                 .collect();
-            let height = lines.iter().map(Vec::len).max().unwrap_or(1) as f32 * LEADING;
-            if self.reserve(height + 4.0) {
+            let count = lines.iter().map(Vec::len).max().unwrap_or(1);
+            // A short row stays on one page. A taller one continues on the
+            // next, so a long note never runs past the footer.
+            if self.reserve(count.min(4) as f32 * LEADING + 4.0) {
                 self.table_header(columns);
             }
-            let top = self.y;
-            let mut x = MARGIN;
-            for (column, cell) in columns.iter().zip(&lines) {
-                for (index, line) in cell.iter().enumerate() {
-                    let y = top - LEADING * (index as f32 + 1.0);
-                    let left = if column.right {
-                        x + column.width - 6.0 - text_width(line, SIZE)
-                    } else {
-                        x
-                    };
-                    self.show(left, y, REGULAR, SIZE, line);
+            for index in 0..count {
+                if self.reserve(LEADING) {
+                    self.table_header(columns);
                 }
-                x += column.width;
+                self.y -= LEADING;
+                let mut x = MARGIN;
+                for (column, cell) in columns.iter().zip(&lines) {
+                    if let Some(line) = cell.get(index) {
+                        let left = if column.right {
+                            x + column.width - 6.0 - text_width(line, SIZE)
+                        } else {
+                            x
+                        };
+                        self.show(left, self.y, REGULAR, SIZE, line);
+                    }
+                    x += column.width;
+                }
             }
-            self.y = top - height - 4.0;
+            self.y -= 4.0;
         }
         self.y -= 8.0;
     }
@@ -428,6 +434,16 @@ mod tests {
         let broken = wrap(&"x".repeat(60), SIZE, 50.0);
         assert!(broken.iter().all(|line| text_width(line, SIZE) <= 50.0));
         assert_eq!(broken.concat(), "x".repeat(60));
+    }
+
+    #[test]
+    fn a_row_taller_than_a_page_continues_on_the_next() {
+        let mut document = Document::new("Test");
+        let columns = [Column::left("Note", 60.0)];
+        let note = "ord ".repeat(400);
+        document.table(&columns, &[vec![note], vec!["næste".into()]]);
+        assert!(document.pages.len() > 1);
+        assert!(document.y > MARGIN);
     }
 
     #[test]

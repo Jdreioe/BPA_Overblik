@@ -30,6 +30,14 @@ pub struct Log {
     /// Mondays of transferred weeks whose reminder is not answered yet.
     pub reminders: BTreeSet<NaiveDate>,
     next_id: u64,
+    /// Counts saved changes, so a view can tell a newer log from an older one.
+    revision: u64,
+}
+
+impl Log {
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
 }
 
 impl Default for Log {
@@ -40,6 +48,7 @@ impl Default for Log {
             remind: false,
             reminders: BTreeSet::new(),
             next_id: 0,
+            revision: 0,
         }
     }
 }
@@ -176,6 +185,7 @@ impl Store {
                 }
             }
         }
+        log.revision += 1;
         if let Err(error) = self.write(&log) {
             self.remove(copied.as_ref());
             return Err(error);

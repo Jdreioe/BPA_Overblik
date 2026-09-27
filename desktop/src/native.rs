@@ -2205,8 +2205,10 @@ impl NativeApp {
                     }
                 }
                 self.apply_stopping = false;
+                // Closing waits for the reminder to be saved: the app ends
+                // with its last window.
                 if let Some(id) = self.close_after_apply.take() {
-                    return Task::batch([reminder, iced::window::close(id)]);
+                    return reminder.chain(iced::window::close(id));
                 }
                 return reminder;
             }
@@ -2892,8 +2894,15 @@ impl NativeApp {
                 text("Kompensationsydelse").size(20),
                 iced::widget::toggler(self.compensation.reminds())
                     .label("Påmind mig om at indtaste dokumentation, når en uge er overført")
-                    .on_toggle(|on| Message::Compensation(compensation::Message::Remind(on))),
-                text("Påmindelsen står på Vagtplan, når Godkend ændringer er færdig, og bliver, til du svarer på den.").size(13),
+                    .on_toggle_maybe(self.compensation.is_loaded().then_some(|on| {
+                        Message::Compensation(compensation::Message::Remind(on))
+                    })),
+                text(if self.compensation.load_failed() {
+                    "Udgiftslisten kunne ikke læses, så påmindelsen kan ikke ændres. Se fanen Kompensationsydelse."
+                } else {
+                    "Påmindelsen står på Vagtplan, når Godkend ændringer er færdig, og bliver, til du svarer på den."
+                })
+                .size(13),
                 self.quiet("Åbn Kompensationsydelse", Message::Open(Screen::Compensation)),
             ]
             .spacing(12),

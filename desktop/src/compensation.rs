@@ -23,7 +23,10 @@ pub const BORGER_URL: &str = "https://www.borger.dk/handicap/Hjaelp-i-hverdagen/
 #[derive(Clone)]
 pub enum Message {
     Loaded(Result<Log, String>),
+    /// Any other change's result.
     Saved(Result<Log, String>),
+    /// The form's own save. Only it clears the form.
+    FormSaved(Result<Log, String>),
     Date(String),
     Category(Category),
     Amount(String),
@@ -129,9 +132,6 @@ pub struct CompensationUi {
     /// nothing until it finishes. File dialogs do not count: one that never
     /// answers must not lock the tab.
     busy: bool,
-    /// The running change is the form's, so a success clears the form. A
-    /// failure keeps what the person typed.
-    saving_form: bool,
     notice: Option<Notice>,
 }
 
@@ -164,7 +164,6 @@ impl CompensationUi {
             confirm_delete: None,
             export_missing: None,
             busy: false,
-            saving_form: false,
             notice: None,
         }
     }
@@ -201,11 +200,39 @@ impl CompensationUi {
     }
 
     fn change(&self, change: Change) -> Task<Message> {
+        self.change_then(change, Message::Saved)
+    }
+
+    fn change_then(
+        &self,
+        change: Change,
+        done: fn(Result<Log, String>) -> Message,
+    ) -> Task<Message> {
         let store = self.store.clone();
         blocking(
             move || store.apply(change).map_err(|e| e.0.to_owned()),
-            Message::Saved,
+            done,
         )
+    }
+
+    /// Show `log` unless a newer one is already shown. Results of changes
+    /// can arrive out of order.
+    fn accept(&mut self, log: Log) {
+        if self
+            .log()
+            .is_none_or(|shown| shown.revision() <= log.revision())
+        {
+            self.log = Loading::Ready(log);
+        }
+    }
+
+    /// The log has loaded, so its settings can change.
+    pub fn is_loaded(&self) -> bool {
+        self.log().is_some()
+    }
+
+    pub fn load_failed(&self) -> bool {
+        matches!(self.log, Loading::Failed(_))
     }
 
     fn error(&mut self, message: &str) {
@@ -220,20 +247,22 @@ impl CompensationUi {
                     Err(error) => Loading::Failed(error),
                 }
             }
-            Message::Saved(result) => {
-                let form = std::mem::take(&mut self.saving_form);
+            Message::Saved(result) => match result {
+                Ok(log) => self.accept(log),
+                Err(error) => self.error(&error),
+            },
+            // A failure keeps what the person typed.
+            Message::FormSaved(result) => {
                 self.busy = false;
                 match result {
                     Ok(log) => {
-                        self.log = Loading::Ready(log);
-                        if form {
-                            // Keep the date and category: receipts often come in
-                            // batches from the same day or kind.
-                            self.form.editing = None;
-                            self.form.amount.clear();
-                            self.form.note.clear();
-                            self.form.bilag = FormBilag::None;
-                        }
+                        self.accept(log);
+                        // Keep the date and category: receipts often come in
+                        // batches from the same day or kind.
+                        self.form.editing = None;
+                        self.form.amount.clear();
+                        self.form.note.clear();
+                        self.form.bilag = FormBilag::None;
                     }
                     Err(error) => self.error(&error),
                 }
@@ -285,12 +314,14 @@ impl CompensationUi {
                     FormBilag::None => BilagChange::Remove,
                 };
                 self.busy = true;
-                self.saving_form = true;
-                return self.change(Change::Save {
-                    id: self.form.editing,
-                    entry,
-                    bilag,
-                });
+                return self.change_then(
+                    Change::Save {
+                        id: self.form.editing,
+                        entry,
+                        bilag,
+                    },
+                    Message::FormSaved,
+                );
             }
             Message::Edit(id) => {
                 let Some(expense) = self
@@ -811,14 +842,17 @@ mod tests {
         assert!(ui.update(Message::Save).units() > 0);
         // A second press while saving does nothing.
         assert_eq!(ui.update(Message::Save).units(), 0);
-        let _ = ui.update(Message::Saved(Err(
+        // Another change finishing meanwhile leaves the form save running.
+        let _ = ui.update(Message::Saved(Ok(Log::default())));
+        assert_eq!(ui.update(Message::Save).units(), 0);
+        let _ = ui.update(Message::FormSaved(Err(
             "Udgiftslisten kunne ikke gemmes.".into()
         )));
         assert_eq!(ui.form.amount, "350");
         assert!(ui.take_notice().is_some());
 
         let _ = ui.update(Message::Save);
-        let _ = ui.update(Message::Saved(Ok(Log::default())));
+        let _ = ui.update(Message::FormSaved(Ok(Log::default())));
         assert!(ui.form.amount.is_empty());
         assert_eq!(ui.form.category, Some(Category::Transport));
     }
