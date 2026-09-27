@@ -236,7 +236,8 @@ fn app_file_name(beskrivelse: &str) -> String {
     }
 }
 
-/// `Taxa` from `Bilag: Taxa.pdf` or `Bilag: Taxa (2).pdf`.
+/// `Taxa` from `Bilag: Taxa.pdf`, `Bilag: Taxa (2).pdf`, or the app's second
+/// write of that, `Bilag: Taxa (2) (2).pdf`.
 fn bilag_base(file_name: &str) -> Option<String> {
     let rest = file_name.strip_prefix("Bilag: ")?;
     let stem = rest
@@ -244,16 +245,16 @@ fn bilag_base(file_name: &str) -> Option<String> {
         .checked_sub(4)
         .filter(|&end| rest.is_char_boundary(end) && rest[end..].eq_ignore_ascii_case(".pdf"))
         .map(|end| &rest[..end])?;
-    let base = match stem.rsplit_once(" (") {
-        Some((base, number))
-            if number
-                .strip_suffix(')')
-                .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())) =>
+    let mut base = stem;
+    while let Some((before, number)) = base.rsplit_once(" (") {
+        if !number
+            .strip_suffix(')')
+            .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
         {
-            base
+            break;
         }
-        _ => stem,
-    };
+        base = before;
+    }
     Some(base.to_owned())
 }
 
@@ -368,6 +369,22 @@ mod tests {
         assert_eq!((imported.expenses, imported.bilag), (4, 2));
         let (_, again) = store.import_rapport(&path).unwrap();
         assert_eq!((again.expenses, again.skipped), (0, 4));
+    }
+
+    #[test]
+    fn every_numbered_copy_names_the_same_bilag() {
+        for name in [
+            "Bilag: Taxa.pdf",
+            "Bilag: Taxa (2).pdf",
+            "Bilag: Taxa (2) (2).pdf",
+        ] {
+            assert_eq!(bilag_base(name).as_deref(), Some("Taxa"), "{name}");
+        }
+        assert_eq!(
+            bilag_base("Bilag: Tur (Aarhus).pdf").as_deref(),
+            Some("Tur (Aarhus)")
+        );
+        assert_eq!(bilag_base("kvittering.pdf"), None);
     }
 
     #[test]
