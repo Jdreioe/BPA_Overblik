@@ -113,6 +113,8 @@ struct Form {
     fra: String,
     til: String,
     km: String,
+    /// The person typed the km, so a changed address keeps them.
+    km_typed: bool,
     pris: String,
     andet: String,
     bilag: FormBilag,
@@ -131,6 +133,7 @@ impl Form {
             fra: String::new(),
             til: String::new(),
             km: String::new(),
+            km_typed: false,
             pris: String::new(),
             andet: String::new(),
             bilag: FormBilag::None,
@@ -150,6 +153,7 @@ impl Form {
             fra: route.map(|r| r.fra.clone()).unwrap_or_default(),
             til: route.map(|r| r.til.clone()).unwrap_or_default(),
             km: route.and_then(|r| r.km).map(format_km).unwrap_or_default(),
+            km_typed: false,
             pris: entry.pris.to_string(),
             andet: entry.andet.clone(),
             bilag: match (&expense.bilag, editing) {
@@ -284,14 +288,24 @@ impl CompensationUi {
         self.notice = Some(Notice::from_message(Tone::Error, message));
     }
 
-    /// Fill in the km of a route driven before, and its price.
+    /// Fill in the km of a route driven before, and its price. For a route
+    /// not driven before, km that belonged to the previous route are cleared
+    /// with their price, unless the person typed them.
     fn fill_km(&mut self) {
-        if let Some(km) = self
+        match self
             .log()
             .and_then(|log| remembered_km(&log.expenses, &self.form.fra, &self.form.til))
         {
-            self.form.km = format_km(km);
-            self.fill_price();
+            Some(km) => {
+                self.form.km = format_km(km);
+                self.form.km_typed = false;
+                self.fill_price();
+            }
+            None if !self.form.km_typed && !self.form.km.is_empty() => {
+                self.form.km.clear();
+                self.form.pris.clear();
+            }
+            None => {}
         }
     }
 
@@ -383,6 +397,7 @@ impl CompensationUi {
             }
             Message::Km(value) => {
                 self.form.km = value;
+                self.form.km_typed = true;
                 self.fill_price();
             }
             Message::Pris(value) => self.form.pris = value,
@@ -1143,8 +1158,13 @@ mod tests {
         let _ = ui.update(Message::Suggested(AddressField::Til, "Hjemvej 1".into()));
         assert_eq!(ui.form.km, "12,4");
         assert_eq!(ui.form.pris, "47");
+        // Typing on towards another address leaves no stale km or price.
+        let _ = ui.update(Message::Address(AddressField::Til, "Hjemvej 12".into()));
+        assert_eq!((ui.form.km.as_str(), ui.form.pris.as_str()), ("", ""));
         let _ = ui.update(Message::Km("20".into()));
         assert_eq!(ui.form.pris, "76");
+        let _ = ui.update(Message::Address(AddressField::Til, "Hjemvej 13".into()));
+        assert_eq!(ui.form.km, "20");
         let _ = ui.view();
     }
 }

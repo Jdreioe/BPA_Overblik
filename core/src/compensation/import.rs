@@ -36,28 +36,52 @@ impl Store {
     pub fn import_rapport(&self, path: &Path) -> Result<(Log, Imported), CompensationError> {
         let file = std::fs::File::open(path).map_err(|_| NOT_A_REPORT)?;
         let mut archive = zip::ZipArchive::new(file).map_err(|_| NOT_A_REPORT)?;
-        let mut csv = None;
+        // The report may have been unpacked and zipped again inside a folder,
+        // so its bilag are read from beside its CSV. macOS adds `__MACOSX/`
+        // copies of every file, which are not the report.
+        let names: Vec<String> = archive
+            .file_names()
+            .filter(|name| !name.starts_with("__MACOSX/"))
+            .map(str::to_owned)
+            .collect();
+        let csv_name = names
+            .iter()
+            .find(|name| name.rsplit('/').next() == Some("udgifter.csv"))
+            .ok_or(NOT_A_REPORT)?
+            .clone();
+        let folder = format!(
+            "{}bilag/",
+            &csv_name[..csv_name.len() - "udgifter.csv".len()]
+        );
+        let mut read = |name: &str| -> Result<Vec<u8>, CompensationError> {
+            let mut bytes = Vec::new();
+            archive
+                .by_name(name)
+                .map_err(|_| NOT_A_REPORT)?
+                .read_to_end(&mut bytes)
+                .map_err(|_| NOT_A_REPORT)?;
+            Ok(bytes)
+        };
+        let csv = read(&csv_name)?;
         let mut files: Vec<(String, Vec<u8>)> = Vec::new();
-        // The app writes each bilag twice when it is both in its folder and
-        // referenced, the second time with a ` (2)` name. Keep the first.
+        // The app writes a bilag twice when it is both in its folder and
+        // referenced, the second time with a ` (2)` name. Keep the first. A
+        // different expense's identical receipt has another name and stays.
         let mut seen = BTreeSet::new();
-        for index in 0..archive.len() {
-            let mut entry = archive.by_index(index).map_err(|_| NOT_A_REPORT)?;
-            if entry.is_dir() {
+        for name in &names {
+            let Some(file_name) = name.strip_prefix(&folder) else {
+                continue;
+            };
+            if file_name.is_empty() || file_name.contains('/') {
                 continue;
             }
-            let name = entry.name().to_owned();
-            let mut bytes = Vec::new();
-            entry.read_to_end(&mut bytes).map_err(|_| NOT_A_REPORT)?;
-            let lower = name.to_lowercase();
-            if lower.ends_with("udgifter.csv") {
-                csv = Some(bytes);
-            } else if lower.starts_with("bilag/") && seen.insert(Sha256::digest(&bytes)) {
-                let file_name = name.rsplit('/').next().unwrap_or(&name).to_owned();
-                files.push((file_name, bytes));
+            let bytes = read(name)?;
+            let base = bilag_base(file_name).unwrap_or_else(|| file_name.to_owned());
+            if seen.insert((base, Sha256::digest(&bytes))) {
+                files.push((file_name.to_owned(), bytes));
             }
         }
-        let (rows, unreadable) = parse_csv(&csv.ok_or(NOT_A_REPORT)?)?;
+        let (rows, unreadable) = parse_csv(&csv)?;
         let (links, unmatched) = match_bilag(&rows, &files);
 
         let _guard = self.locked();
@@ -68,8 +92,17 @@ impl Store {
             ..Imported::default()
         };
         let mut created = Vec::new();
+        // Each expense already in the log accounts for one identical row, so
+        // two identical rows are both imported the first time and both
+        // skipped the next.
+        let mut existing: Vec<Option<Entry>> =
+            log.expenses.iter().map(|e| Some(e.entry.clone())).collect();
         for (entry, link) in rows.into_iter().zip(links) {
-            if log.expenses.iter().any(|e| e.entry == entry) {
+            if let Some(slot) = existing
+                .iter_mut()
+                .find(|slot| slot.as_ref() == Some(&entry))
+            {
+                *slot = None;
                 imported.skipped += 1;
                 continue;
             }
@@ -301,6 +334,40 @@ mod tests {
         assert_eq!(imported.expenses, 0);
         assert_eq!(imported.skipped, 4);
         assert_eq!(again.expenses.len(), 4);
+    }
+
+    #[test]
+    fn identical_rows_and_receipts_all_import() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Rapport.zip");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        let options = zip::write::SimpleFileOptions::default();
+        // Unpacked and zipped again on a Mac.
+        zip.start_file("__MACOSX/Rapport/._udgifter.csv", options)
+            .unwrap();
+        zip.write_all(b"junk").unwrap();
+        zip.start_file("Rapport/udgifter.csv", options).unwrap();
+        zip.write_all(
+            "Date,TYPE,BESKRIVELSE,FRA,TIL,Km,PRIS,ANDET\n\
+             \"2026-03-02\",\"Andet\",\"Parkering\",\"\",\"\",\"\",\"20\",\"\"\n\
+             \"2026-03-02\",\"Andet\",\"Parkering\",\"\",\"\",\"\",\"20\",\"\"\n\
+             \"2026-03-03\",\"Andet\",\"Taxa A\",\"\",\"\",\"\",\"90\",\"\"\n\
+             \"2026-03-04\",\"Andet\",\"Taxa B\",\"\",\"\",\"\",\"90\",\"\"\n"
+                .as_bytes(),
+        )
+        .unwrap();
+        for name in ["Bilag: Taxa A.pdf", "Bilag: Taxa B.pdf"] {
+            zip.start_file(format!("Rapport/bilag/{name}"), options)
+                .unwrap();
+            zip.write_all(b"same receipt").unwrap();
+        }
+        zip.finish().unwrap();
+        let store = Store::new(&dir.path().join("data"));
+
+        let (_, imported) = store.import_rapport(&path).unwrap();
+        assert_eq!((imported.expenses, imported.bilag), (4, 2));
+        let (_, again) = store.import_rapport(&path).unwrap();
+        assert_eq!((again.expenses, again.skipped), (0, 4));
     }
 
     #[test]
