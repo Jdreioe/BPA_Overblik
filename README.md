@@ -1,5 +1,4 @@
-# TeamUp shift sync
-
+# BPA Overblik
 A local, manually triggered weekly importer for planning helper shifts from
 TeamUp, a spreadsheet or any calendar's iCal feed in MitHF. SPS
 registration in DUOS is optional.
