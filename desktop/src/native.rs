@@ -1,6 +1,6 @@
 //! Native Iced workflow using the Rust core and app-owned browser sessions.
 //! Setup editing remains in the existing application during migration.
-use crate::{setup, template, update};
+use crate::{compensation, setup, template, update};
 use chrono::{DateTime, Datelike, Duration, FixedOffset, NaiveDate, TimeZone, Timelike, Utc};
 use iced::widget::{
     button, column, container, progress_bar, row, scrollable, space, text, tooltip, Column,
@@ -1129,6 +1129,7 @@ enum Message {
     PreviewLoaded(Result<Box<Preview>>),
     /// Open the settings page that fixes an attention item.
     FixInSettings(SettingsLink),
+    Compensation(compensation::Message),
     Apply,
     StopApply,
     ApplyTick,
@@ -1171,7 +1172,10 @@ const HELP: [&str; 5] = [
 /// The screen in view. Everything technical lives away from the week.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Screen {
+    /// The Vagtplan tab: the week and its transfer.
     Home,
+    /// The Kompensationsydelse tab. It needs no shift setup.
+    Compensation,
     Settings,
     Help,
 }
@@ -1183,6 +1187,7 @@ enum SettingsSection {
     Markers,
     Absences,
     Integrations,
+    Compensation,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1207,6 +1212,7 @@ struct NativeApp {
     standard_saved_revision: u64,
     account: Option<Arc<LiveConfig>>,
     setup: setup::SetupUi,
+    compensation: compensation::CompensationUi,
     monday: NaiveDate,
     preview: Option<Preview>,
     activity: Activity,
@@ -1258,6 +1264,7 @@ impl NativeApp {
             standard_saved_revision: 0,
             account: None,
             setup: setup::SetupUi::default(),
+            compensation: compensation::CompensationUi::new(&app_data_dir()),
             monday: Utc::now().date_naive(),
             preview: None,
             activity: Activity::Idle,
@@ -1288,10 +1295,12 @@ impl NativeApp {
         };
         update::cleanup_replaced_backup();
         let reload = app.update(Message::Reload);
+        let expenses = app.compensation.load().map(Message::Compensation);
         (
             app,
             Task::batch([
                 reload,
+                expenses,
                 Task::perform(update::check_latest(), Message::UpdateChecked),
             ]),
         )
@@ -1439,6 +1448,11 @@ impl NativeApp {
         if matches!(message, Message::Setup(setup::Message::OpenTeamupKeys)) {
             open_in_browser(setup::TEAMUP_KEYS_URL);
             return Task::none();
+        }
+        // The expense log touches neither the setup nor the services, so it
+        // stays usable during any operation, including a transfer.
+        if let Message::Compensation(message) = message {
+            return self.compensation_message(message);
         }
         // Dismissing only hides text, so it is safe at any time.
         if matches!(message, Message::DismissStatus) {
@@ -2100,6 +2114,9 @@ impl NativeApp {
                     Err(e) => self.status = Some(Notice::from_message(Tone::Error, &e)),
                 }
             }
+            Message::Compensation(_) => {
+                // Already handled before the busy guard; kept for exhaustiveness.
+            }
             Message::FixInSettings(link) => {
                 let task = self.update(Message::Open(Screen::Settings));
                 if self.screen == Screen::Settings {
@@ -2158,6 +2175,7 @@ impl NativeApp {
                 // Consume approval on success and failure. A retry requires a
                 // fresh preview, which can reconcile uncertain persisted steps.
                 self.preview = None;
+                let mut reminder = Task::none();
                 match result {
                     Ok(done) => {
                         self.apply_verified = done.mithf + done.duos;
@@ -2174,6 +2192,11 @@ impl NativeApp {
                         } else {
                             self.last_verified = done.verified_label.clone();
                             self.status = Some(completion_notice(&done));
+                            // Navigation waits for the transfer, so the shown
+                            // week is the one transferred.
+                            reminder = self.compensation_message(
+                                compensation::Message::Transferred(self.monday),
+                            );
                         }
                     }
                     Err(failure) => {
@@ -2182,9 +2205,12 @@ impl NativeApp {
                     }
                 }
                 self.apply_stopping = false;
+                // Closing waits for the reminder to be saved: the app ends
+                // with its last window.
                 if let Some(id) = self.close_after_apply.take() {
-                    return iced::window::close(id);
+                    return reminder.chain(iced::window::close(id));
                 }
+                return reminder;
             }
             Message::StopApply
             | Message::ApplyTick
@@ -2301,6 +2327,23 @@ impl NativeApp {
             }
         }
         Task::none()
+    }
+    fn compensation_message(&mut self, message: compensation::Message) -> Task<Message> {
+        if matches!(message, compensation::Message::PriceSettings) {
+            let task = self.update(Message::Open(Screen::Settings));
+            if self.screen == Screen::Settings {
+                self.settings_section = SettingsSection::Compensation;
+            }
+            return task;
+        }
+        if matches!(message, compensation::Message::EnterForWeek(_)) {
+            self.screen = Screen::Compensation;
+        }
+        let task = self.compensation.update(message).map(Message::Compensation);
+        if let Some(notice) = self.compensation.take_notice() {
+            self.status = Some(notice);
+        }
+        task
     }
     fn invalidate(&mut self) {
         self.preview = None;
@@ -2419,8 +2462,17 @@ impl NativeApp {
             .width(Length::Fill)
             .height(Length::Fill)
             .max_width(1100);
-        page = match self.visible_screen() {
+        let screen = self.visible_screen();
+        if matches!(screen, Screen::Home | Screen::Compensation) {
+            page = page.push(self.tabs(screen));
+        }
+        page = match screen {
             Screen::Home => self.home(page),
+            Screen::Compensation => page.push(
+                scrollable(self.compensation.view().map(Message::Compensation))
+                    .height(Length::Fill)
+                    .width(Length::Fill),
+            ),
             Screen::Settings => page.push(self.settings()),
             Screen::Help => page.push(
                 scrollable(self.help(column![].spacing(12)))
@@ -2431,7 +2483,7 @@ impl NativeApp {
         if self.activity == Activity::Apply {
             page = self.apply_status(page);
         }
-        if self.visible_screen() == Screen::Home {
+        if matches!(screen, Screen::Home | Screen::Compensation) {
             page = page.push(
                 row![
                     tooltip(
@@ -2479,6 +2531,69 @@ impl NativeApp {
                 .padding(20),
         ]
         .into()
+    }
+
+    /// Vagtplan and Kompensationsydelse. Switching only changes what is
+    /// shown, so it never revokes an approval.
+    fn tabs(&self, shown: Screen) -> Element<'_, Message> {
+        let mut tabs = row![].spacing(8);
+        for (screen, label) in [
+            (Screen::Home, "Vagtplan"),
+            (Screen::Compensation, "Kompensationsydelse"),
+        ] {
+            let selected = shown == screen;
+            tabs = tabs.push(
+                button(text(label).size(15))
+                    .style(move |theme, status| {
+                        if selected {
+                            iced::widget::button::primary(theme, status)
+                        } else {
+                            super::widgets::outlined(theme, status)
+                        }
+                    })
+                    .padding([10, 16])
+                    .on_press(Message::Open(screen)),
+            );
+        }
+        tabs.into()
+    }
+
+    /// One card per transferred week still waiting for its expenses. Unlike
+    /// notices they stay until answered: some people need longer than a
+    /// notice lasts to read and act.
+    fn reminder_cards(&self) -> Column<'_, Message> {
+        let answer = |label, message| {
+            button(text(label))
+                .style(iced::widget::button::secondary)
+                .padding([8, 12])
+                .on_press(Message::Compensation(message))
+        };
+        let mut cards = column![].spacing(12);
+        for monday in self.compensation.reminders() {
+            cards = cards.push(
+                column![
+                    super::widgets::notice_card::<Message>(
+                        Notice::new(
+                            Tone::Info,
+                            format!("Udgifter i uge {}?", monday.iso_week().week()),
+                            "",
+                        ),
+                        None,
+                    ),
+                    // Always pressable: answering touches only the expense log.
+                    row![
+                        answer(
+                            "Indtast udgifter",
+                            compensation::Message::EnterForWeek(monday)
+                        ),
+                        answer("Ingen udgifter", compensation::Message::NoExpenses(monday)),
+                    ]
+                    .spacing(8),
+                ]
+                .spacing(6),
+            );
+        }
+        cards
     }
 
     fn apply_status<'a>(&'a self, mut page: Column<'a, Message>) -> Column<'a, Message> {
@@ -2590,7 +2705,9 @@ impl NativeApp {
         if let Some(fetch) = &self.fetch {
             content = content.push(moving_bar(fetch.bar(), FETCH_STAGES, fetch.line()));
         }
-        let mut body = column![].spacing(12).width(Length::Fill);
+        let mut body = column![self.reminder_cards()]
+            .spacing(12)
+            .width(Length::Fill);
         if let Some(preview) = &self.preview {
             let week = &preview.week;
             // The week's status floats with the other notices (see `view`).
@@ -2667,6 +2784,7 @@ impl NativeApp {
             (SettingsSection::Markers, "⚑", "Markeringer"),
             (SettingsSection::Absences, "✚", "Fravær"),
             (SettingsSection::Integrations, "⇄", "Udbydere"),
+            (SettingsSection::Compensation, "kr", "Kompensation"),
         ] {
             let selected = self.settings_section == section;
             let mut entry = row![text(icon).size(18), text(label).size(14)]
@@ -2768,6 +2886,15 @@ impl NativeApp {
                 column![self.setup.absences_view().map(Message::Setup)].spacing(12)
             }
             SettingsSection::Integrations => self.providers(),
+            SettingsSection::Compensation => column![
+                text("Kompensationsydelse").size(20),
+                self.compensation.settings_view().map(Message::Compensation),
+                self.quiet(
+                    "Åbn Kompensationsydelse",
+                    Message::Open(Screen::Compensation)
+                ),
+            ]
+            .spacing(16),
         };
         row![
             container(sidebar).width(Length::Fixed(210.0)),
@@ -3012,6 +3139,7 @@ mod tests {
             standard_saved_revision: 0,
             account: None,
             setup: setup::SetupUi::default(),
+            compensation: compensation::CompensationUi::loaded(Default::default()),
             monday: NaiveDate::from_ymd_opt(2026, 9, 14).unwrap(),
             preview: None,
             activity: Activity::Idle,
@@ -3204,6 +3332,73 @@ mod tests {
         let _ = app.update(Message::Navigate(7));
         assert_eq!(app.monday, monday);
         assert_eq!(app.activity, Activity::Setup);
+    }
+    #[test]
+    fn switching_tabs_keeps_the_approval_and_works_during_a_transfer() {
+        use teamup_shift_sync_core::compensation::{Entry, Expense, ExpenseType, Log};
+        let mut app = app();
+        let mut log = Log::default();
+        log.expenses.push(Expense {
+            id: 1,
+            entry: Entry {
+                date: app.monday,
+                kind: ExpenseType::Medicine,
+                beskrivelse: "Piller".into(),
+                route: None,
+                pris: 350,
+                andet: String::new(),
+            },
+            bilag: None,
+        });
+        app.compensation = compensation::CompensationUi::loaded(log);
+        app.preview = Some(preview(&app, true));
+        let _ = app.update(Message::Open(Screen::Compensation));
+        assert_eq!(app.visible_screen(), Screen::Compensation);
+        let _ = app.view();
+        let _ = app.update(Message::Open(Screen::Home));
+        assert!(app.preview.is_some());
+
+        let _ = app.update(Message::Apply);
+        let _ = app.update(Message::Open(Screen::Compensation));
+        assert_eq!(app.screen, Screen::Compensation);
+        assert_eq!(app.activity, Activity::Apply);
+    }
+    #[test]
+    fn only_a_completed_transfer_with_reminders_on_asks_for_the_week() {
+        for (remind, stopped, asks) in [
+            (false, false, false),
+            (true, true, false),
+            (true, false, true),
+        ] {
+            let mut app = app();
+            let mut log = teamup_shift_sync_core::compensation::Log::default();
+            log.remind = remind;
+            app.compensation = compensation::CompensationUi::loaded(log);
+            app.preview = Some(preview(&app, true));
+            let _ = app.update(Message::Apply);
+            let task = app.update(Message::Applied(Ok(ApplyDone { stopped, ..done() })));
+            assert_eq!(task.units() > 0, asks, "remind {remind}, stopped {stopped}");
+        }
+    }
+    #[test]
+    fn a_week_reminder_outlasts_notices_and_opens_the_tab() {
+        let mut app = app();
+        let monday = app.monday;
+        let mut log = teamup_shift_sync_core::compensation::Log::default();
+        log.remind = true;
+        log.reminders.insert(monday);
+        app.compensation = compensation::CompensationUi::loaded(log);
+        let _ = app.update(Message::NoticeTick(
+            std::time::Instant::now() + 2 * NativeApp::NOTICE_SECONDS,
+        ));
+        assert_eq!(app.compensation.reminders(), [monday]);
+        // Without an account `view` shows Settings, so draw the week directly.
+        let _ = app.home(iced::widget::column![]);
+        let task = app.update(Message::Compensation(compensation::Message::EnterForWeek(
+            monday,
+        )));
+        assert_eq!(app.screen, Screen::Compensation);
+        assert!(task.units() > 0);
     }
     #[test]
     fn settings_are_reachable_from_the_week_and_revoke_a_shown_approval() {
