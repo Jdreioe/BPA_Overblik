@@ -59,8 +59,9 @@ An unset weekday, a multi-day TeamUp or iCal all-day event, or a clock time inva
 on a daylight-saving transition requires correction before transfer.
 Marker titles (below) are never shifts. Ordinary timed shifts keep their own hours.
 Valid times save automatically. Changing the setting revokes approval of the
-currently shown week. **Indstillinger** opens on **Hjælpere**; use its sidebar
-for **Standardtider**, **Markeringer**, **Fravær** and **Udbydere**. Under **Udbydere**, the **Vagtplan**
+currently shown week. **Indstillinger** opens on **Hjælpere**, which lists each
+calendar beside the chosen one's MitHF and DUOS person; use the chips at the top
+for **Standardtider**, **Markeringer**, **Fravær**, **Udbydere** and **Kompensation**. Under **Udbydere**, the **Vagtplan**
 group holds the shift source (only one active at a time) and the **Løn** group
 the MitHF and DUOS services, each with its own login. DUOS registration always
 uses the ordinary shift type.

@@ -827,7 +827,7 @@ impl CompensationUi {
                 .align_x(iced::alignment::Horizontal::Center);
                 line = line.push(
                     button(container(tile).center(Length::Fill))
-                        .style(chosen(self.form.kind == Some(kind), 8.0))
+                        .style(crate::widgets::chosen(self.form.kind == Some(kind), 8.0))
                         .padding([8, 4])
                         .width(Length::Fill)
                         .height(Length::Fixed(88.0))
@@ -907,7 +907,7 @@ impl CompensationUi {
                     for frequent in &log.addresses {
                         chips = chips.push(
                             button(text(&frequent.nickname).size(14))
-                                .style(chosen(*value == frequent.address, 16.0))
+                                .style(crate::widgets::chosen(*value == frequent.address, 16.0))
                                 .padding([6, 12])
                                 .on_press(Message::Suggested(field, frequent.address.clone())),
                         );
@@ -1163,25 +1163,6 @@ fn icon(kind: ExpenseType) -> &'static str {
         ExpenseType::Clothing => "👕",
         ExpenseType::Utilities => "💡",
         ExpenseType::Other => "…",
-    }
-}
-
-/// An outlined choice. The selected one gets a thicker accent border and a
-/// tint, so the choice does not depend on colour alone.
-fn chosen(
-    selected: bool,
-    radius: f32,
-) -> impl Fn(&iced::Theme, iced::widget::button::Status) -> iced::widget::button::Style {
-    move |theme, status| {
-        let mut style = crate::widgets::outlined(theme, status);
-        style.border.radius = radius.into();
-        if selected {
-            let accent = theme.extended_palette().primary.base.color;
-            style.border.color = accent;
-            style.border.width = 2.0;
-            style.background = Some(accent.scale_alpha(0.2).into());
-        }
-        style
     }
 }
 

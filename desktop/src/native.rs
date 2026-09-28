@@ -1,5 +1,6 @@
 //! Native Iced workflow using the Rust core and app-owned browser sessions.
 //! Setup editing remains in the existing application during migration.
+use crate::widgets::{shift, step_shift, ShiftRef};
 use crate::{compensation, setup, template, update};
 use chrono::{DateTime, Datelike, Duration, FixedOffset, NaiveDate, TimeZone, Timelike, Utc};
 use iced::widget::{
@@ -384,6 +385,8 @@ fn mark(stage: &StdMutex<FetchStage>, value: FetchStage) {
 
 /// A bar with its own explanation beside it. The bar keeps a fixed width so
 /// the label always has room: full-width bars pushed it off the screen edge.
+/// The bar with its line beside it, or under it where there is no room,
+/// as in the Vagtplan side panel.
 fn moving_bar<'a>(value: f32, end: f32, label: String) -> Element<'a, Message> {
     row![
         progress_bar(0.0..=end, value)
@@ -394,6 +397,8 @@ fn moving_bar<'a>(value: f32, end: f32, label: String) -> Element<'a, Message> {
     .spacing(12)
     .align_y(iced::alignment::Vertical::Center)
     .width(Length::Fill)
+    .wrap()
+    .vertical_spacing(6)
     .into()
 }
 
@@ -846,7 +851,7 @@ impl Engine {
                 .map_err(|_| "Ugens godkendelse kunne ikke beregnes.".to_owned())?;
             Ok(Preview {
                 week,
-                status_dismissed: false,
+                selected: None,
                 digest,
                 from,
                 state_path: account.state_path.clone(),
@@ -1088,8 +1093,9 @@ fn range(config: &LiveConfig, from: NaiveDate) -> Result<Bounds> {
 #[derive(Clone)]
 struct Preview {
     week: Week,
-    /// The week's status notice was dismissed. A new preview shows it again.
-    status_dismissed: bool,
+    /// The shift whose details the side panel shows. View state only: it
+    /// lives and dies with this preview and never touches the approval.
+    selected: Option<ShiftRef>,
     digest: String,
     from: NaiveDate,
     state_path: PathBuf,
@@ -1110,7 +1116,10 @@ enum Message {
     AccountUpdated(Result<Arc<LiveConfig>>),
     Open(Screen),
     DismissStatus,
-    DismissWeekStatus,
+    /// Show a shift's details in the side panel, or none.
+    SelectShift(Option<ShiftRef>),
+    /// Move the selection by this many shifts (arrow keys).
+    StepShift(isize),
     SelectSettings(SettingsSection),
     AutosaveStandard(u64),
     Navigate(i64),
@@ -1157,14 +1166,35 @@ fn is_navigation(message: &Message) -> bool {
     matches!(message, Message::Open(_) | Message::SelectSettings(_))
 }
 
+/// The shift-selection keys on the Vagtplan tab.
+fn shift_key(event: iced::keyboard::Event) -> Option<Message> {
+    use iced::keyboard::{key::Named, Event, Key};
+    let Event::KeyPressed {
+        key: Key::Named(named),
+        ..
+    } = event
+    else {
+        return None;
+    };
+    match named {
+        Named::ArrowRight | Named::ArrowDown => Some(Message::StepShift(1)),
+        Named::ArrowLeft | Named::ArrowUp => Some(Message::StepShift(-1)),
+        Named::Escape => Some(Message::SelectShift(None)),
+        _ => None,
+    }
+}
+
 /// Show the selected source's week and plan.
 const SHOW_WEEK: &str = "Se vagtplan";
+
+/// Width of the Vagtplan side panel. The grid takes the rest.
+const PANEL_WIDTH: f32 = 280.0;
 
 /// Short Danish guidance for the Support screen.
 const HELP: [&str; 5] = [
     "1. Log ind i MitHF og eventuelt DUOS under Udbydere. Login holder, indtil tjenesten selv logger dig ud.",
     "2. Vælg ugen på forsiden, og vælg Se vagtplan.",
-    "3. Løs først advarslerne over ugen. Rettelser laves i kilden eller i tjenesten, ikke i appen.",
+    "3. Løs først advarslerne ved siden af ugen. Vælg en vagt for at se, hvad der sker med den. Rettelser laves i kilden eller i tjenesten, ikke i appen.",
     "4. Vælg Godkend ændringer. Hver ændring læses tilbage og bekræftes, før den næste begynder.",
     "Appen sletter aldrig noget i MitHF eller DUOS, og den godkender ikke registreringer for hjælperen.",
 ];
@@ -1219,10 +1249,9 @@ struct NativeApp {
     /// The last action's result or error, until the next action, dismissal
     /// or `NOTICE_SECONDS`.
     status: Option<Notice>,
-    /// When `status`, the week's status notice and the blocked-helpers
-    /// notice last changed, so each hides a fixed time after it appears.
+    /// When `status` and the blocked-helpers notice last changed, so each
+    /// hides a fixed time after it appears.
     status_since: std::time::Instant,
-    week_status_since: std::time::Instant,
     blocked_since: std::time::Instant,
     last_verified: Option<String>,
     /// Why the confirmed setup could not be loaded, until a load succeeds.
@@ -1270,7 +1299,6 @@ impl NativeApp {
             activity: Activity::Idle,
             status: None,
             status_since: std::time::Instant::now(),
-            week_status_since: std::time::Instant::now(),
             blocked_since: std::time::Instant::now(),
             last_verified: None,
             week_error: None,
@@ -1342,29 +1370,17 @@ impl NativeApp {
     /// paths set `status`, so this is the one place that sees them all.
     fn update(&mut self, message: Message) -> Task<Message> {
         let status = self.status.clone();
-        let week = self.week_notice();
         let blocked = self.blocked_reason();
         let task = self.handle(message);
         let now = std::time::Instant::now();
         if self.status != status {
             self.status_since = now;
         }
-        if self.week_notice() != week {
-            self.week_status_since = now;
-        }
         if self.blocked_reason() != blocked {
             self.blocked_since = now;
             self.setup.blocked_hidden = false;
         }
         task
-    }
-    /// The week's status notice while shown, keyed by the preview it belongs
-    /// to so a new preview with the same text still counts as new.
-    fn week_notice(&self) -> Option<(NaiveDate, String, Notice)> {
-        self.preview
-            .as_ref()
-            .filter(|p| !p.status_dismissed)
-            .map(|p| (p.from, p.digest.clone(), p.week.status.clone()))
     }
     fn blocked_reason(&self) -> Option<String> {
         self.setup
@@ -1415,11 +1431,6 @@ impl NativeApp {
             if now.duration_since(self.blocked_since) >= Self::NOTICE_SECONDS {
                 self.setup.blocked_hidden = true;
             }
-            if now.duration_since(self.week_status_since) >= Self::NOTICE_SECONDS {
-                if let Some(preview) = &mut self.preview {
-                    preview.status_dismissed = true;
-                }
-            }
             return Task::none();
         }
         if matches!(message, Message::StopApply) {
@@ -1459,9 +1470,23 @@ impl NativeApp {
             self.status = None;
             return Task::none();
         }
-        if matches!(message, Message::DismissWeekStatus) {
+        // Selecting a shift only changes which details are shown, so it is
+        // safe at any time and never revokes the approval.
+        if let Message::SelectShift(at) = message {
             if let Some(preview) = &mut self.preview {
-                preview.status_dismissed = true;
+                preview.selected = at.filter(|&at| shift(&preview.week, at).is_some());
+            }
+            return Task::none();
+        }
+        // Picking a calendar only changes which one Hjælpere shows, so it
+        // also works while the helpers are being fetched.
+        if let Message::Setup(setup::Message::SelectHelper(source)) = message {
+            self.setup.selected_helper = Some(source);
+            return Task::none();
+        }
+        if let Message::StepShift(by) = message {
+            if let Some(preview) = &mut self.preview {
+                preview.selected = step_shift(&preview.week, preview.selected, by);
             }
             return Task::none();
         }
@@ -1670,8 +1695,8 @@ impl NativeApp {
             Message::Setup(setup::Message::Template(message)) => {
                 self.setup.template.update(message);
             }
-            Message::Setup(setup::Message::ToggleEdit(source)) => {
-                self.setup.toggle_edit(&source);
+            Message::Setup(setup::Message::SelectHelper(_)) => {
+                // Already handled before the busy guard; kept for exhaustiveness.
             }
             Message::Setup(setup::Message::ToggleProvider(id)) => {
                 self.setup.toggle_provider(&id);
@@ -1692,7 +1717,7 @@ impl NativeApp {
             Message::Setup(setup::Message::CopyOrganization) => {
                 // Already handled before the busy guard; kept for exhaustiveness.
             }
-            Message::DismissStatus | Message::DismissWeekStatus => {
+            Message::DismissStatus | Message::SelectShift(_) | Message::StepShift(_) => {
                 // Already handled before the busy guard; kept for exhaustiveness.
             }
             Message::Setup(setup::Message::CopyPurpose) => {
@@ -2407,7 +2432,6 @@ impl NativeApp {
                 Subscription::none()
             },
             if self.status.is_some()
-                || self.week_notice().is_some()
                 || (self.blocked_reason().is_some() && !self.setup.blocked_hidden)
             {
                 iced::time::every(std::time::Duration::from_secs(1)).map(Message::NoticeTick)
@@ -2415,6 +2439,13 @@ impl NativeApp {
                 Subscription::none()
             },
             iced::window::close_requests().map(Message::CloseRequested),
+            // Arrow keys move through the week's shifts. Only keys no widget
+            // took reach this, so typing in a field is never affected.
+            if self.visible_screen() == Screen::Home && self.preview.is_some() {
+                iced::keyboard::listen().filter_map(shift_key)
+            } else {
+                Subscription::none()
+            },
             iced::time::every(Self::UPDATE_CHECK_INTERVAL).map(|_| Message::PeriodicUpdateCheck),
         ])
     }
@@ -2446,13 +2477,6 @@ impl NativeApp {
             .padding([7, 12])
             .on_press_maybe(self.enabled(&message).then_some(message))
     }
-    /// The single filled action on a screen.
-    fn primary<'a>(&self, label: &'a str, message: Message) -> iced::widget::Button<'a, Message> {
-        button(text(label))
-            .style(iced::widget::button::primary)
-            .padding([8, 14])
-            .on_press_maybe(self.enabled(&message).then_some(message))
-    }
     fn view(&self) -> Element<'_, Message> {
         // No app-name headline here: the window title already says
         // BPA Overblik, and each screen brings its own heading.
@@ -2480,25 +2504,9 @@ impl NativeApp {
                     .width(Length::Fill),
             ),
         };
-        if self.activity == Activity::Apply {
+        // On Vagtplan the progress takes the side panel's place.
+        if self.activity == Activity::Apply && screen != Screen::Home {
             page = self.apply_status(page);
-        }
-        if matches!(screen, Screen::Home | Screen::Compensation) {
-            page = page.push(
-                row![
-                    tooltip(
-                        self.circular_icon("⚙", Message::Open(Screen::Settings)),
-                        "Indstillinger",
-                        tooltip::Position::Top,
-                    ),
-                    tooltip(
-                        self.circular_icon("?", Message::Open(Screen::Help)),
-                        "Support",
-                        tooltip::Position::Top,
-                    ),
-                ]
-                .spacing(8),
-            );
         }
         let base = container(page)
             .center_x(Length::Fill)
@@ -2509,14 +2517,6 @@ impl NativeApp {
         let mut notices = column![]
             .spacing(8)
             .align_x(iced::alignment::Horizontal::Right);
-        if self.visible_screen() == Screen::Home {
-            if let Some(preview) = self.preview.as_ref().filter(|p| !p.status_dismissed) {
-                notices = notices.push(super::widgets::notice_card(
-                    preview.week.status.clone(),
-                    Some(Message::DismissWeekStatus),
-                ));
-            }
-        }
         if let Some(status) = &self.status {
             notices = notices.push(super::widgets::notice_card(
                 status.clone(),
@@ -2533,29 +2533,37 @@ impl NativeApp {
         .into()
     }
 
-    /// Vagtplan and Kompensationsydelse. Switching only changes what is
-    /// shown, so it never revokes an approval.
+    /// Vagtplan and Kompensationsydelse as chips, with Support and
+    /// Indstillinger top-right. Switching only changes what is shown, so it
+    /// never revokes an approval.
     fn tabs(&self, shown: Screen) -> Element<'_, Message> {
-        let mut tabs = row![].spacing(8);
+        let mut tabs = row![].spacing(8).align_y(iced::alignment::Vertical::Center);
         for (screen, label) in [
             (Screen::Home, "Vagtplan"),
             (Screen::Compensation, "Kompensationsydelse"),
         ] {
-            let selected = shown == screen;
             tabs = tabs.push(
                 button(text(label).size(15))
-                    .style(move |theme, status| {
-                        if selected {
-                            iced::widget::button::primary(theme, status)
-                        } else {
-                            super::widgets::outlined(theme, status)
-                        }
-                    })
-                    .padding([10, 16])
+                    .style(super::widgets::chosen(
+                        shown == screen,
+                        super::widgets::CHIP,
+                    ))
+                    .padding([8, 16])
                     .on_press(Message::Open(screen)),
             );
         }
-        tabs.into()
+        tabs.push(space::horizontal())
+            .push(tooltip(
+                self.circular_icon("?", Message::Open(Screen::Help)),
+                "Support",
+                tooltip::Position::Bottom,
+            ))
+            .push(tooltip(
+                self.circular_icon("⚙", Message::Open(Screen::Settings)),
+                "Indstillinger",
+                tooltip::Position::Bottom,
+            ))
+            .into()
     }
 
     /// One card per transferred week still waiting for its expenses. Unlike
@@ -2627,7 +2635,9 @@ impl NativeApp {
                     text("Det er også sikkert at lukke appen.").size(13),
                 ]
                 .spacing(12)
-                .align_y(iced::alignment::Vertical::Center),
+                .align_y(iced::alignment::Vertical::Center)
+                .wrap()
+                .vertical_spacing(6),
             )
         }
     }
@@ -2665,38 +2675,31 @@ impl NativeApp {
         }
     }
 
-    /// Week title on the left, the one primary action fixed on the right.
-    /// The grid scrolls under that chrome.
+    /// Week title and navigation on top; the grid on the left and a side
+    /// panel on the right with what needs doing, the selected shift, the
+    /// week's status and its actions.
     fn home<'a>(&'a self, mut content: Column<'a, Message>) -> Column<'a, Message> {
         let is_current = self.monday == self.monday();
-        content = content
-            .push(
-                row![
-                    text(super::widgets::format_week_da(
-                        self.monday,
-                        self.monday + Duration::days(6),
-                    ))
-                    .size(20),
-                    space::horizontal(),
-                    self.week_action(),
-                ]
-                .align_y(iced::alignment::Vertical::Center)
-                .width(Length::Fill),
-            )
-            .push(
-                row![
-                    self.quiet("‹ Forrige", Message::Navigate(-7)),
-                    // Same quiet button, additionally disabled on the week
-                    // that is already shown.
-                    self.quiet("Denne uge", Message::Current).on_press_maybe(
-                        (self.buttons_enabled() && !is_current).then_some(Message::Current),
-                    ),
-                    self.quiet("Næste ›", Message::Navigate(7)),
-                ]
-                .spacing(8)
-                .align_y(iced::alignment::Vertical::Center)
-                .width(Length::Fill),
-            );
+        content = content.push(
+            row![
+                text(super::widgets::format_week_da(
+                    self.monday,
+                    self.monday + Duration::days(6),
+                ))
+                .size(20),
+                space::horizontal(),
+                self.quiet("‹ Forrige", Message::Navigate(-7)),
+                // Same quiet button, additionally disabled on the week
+                // that is already shown.
+                self.quiet("Denne uge", Message::Current).on_press_maybe(
+                    (self.buttons_enabled() && !is_current).then_some(Message::Current),
+                ),
+                self.quiet("Næste ›", Message::Navigate(7)),
+            ]
+            .spacing(8)
+            .align_y(iced::alignment::Vertical::Center)
+            .width(Length::Fill),
+        );
         if self.activity != Activity::Apply {
             if let Some(stamp) = &self.last_verified {
                 content = content.push(text(format!("Seneste overførsel: {stamp}.")).size(12));
@@ -2705,16 +2708,45 @@ impl NativeApp {
         if let Some(fetch) = &self.fetch {
             content = content.push(moving_bar(fetch.bar(), FETCH_STAGES, fetch.line()));
         }
-        let mut body = column![self.reminder_cards()]
-            .spacing(12)
-            .width(Length::Fill);
+        let mut grid = column![].width(Length::Fill);
         if let Some(preview) = &self.preview {
             let week = &preview.week;
-            // The week's status floats with the other notices (see `view`).
-            // Dismissed, it stays gone for this preview only; what blocks a
-            // transfer is still listed here and marked in the grid.
+            if week
+                .days
+                .iter()
+                .any(|d| !d.blocks.is_empty() || !d.markers.is_empty())
+            {
+                grid = grid.push(super::widgets::week_grid(week, preview.selected, |at| {
+                    Message::SelectShift(Some(at))
+                }));
+            }
+        }
+        content.push(
+            row![
+                scrollable(grid).height(Length::Fill).width(Length::Fill),
+                scrollable(self.week_panel())
+                    .height(Length::Fill)
+                    .width(Length::Fixed(PANEL_WIDTH)),
+            ]
+            .spacing(16)
+            .height(Length::Fill),
+        )
+    }
+
+    /// The Vagtplan side panel, top to bottom: what blocks the transfer,
+    /// open expense reminders, the selected shift, the week's status and the
+    /// week's actions. Everything here stays until it is resolved. During a
+    /// transfer it shows the transfer's progress instead.
+    fn week_panel(&self) -> Column<'_, Message> {
+        let mut panel = column![].spacing(12).padding(iced::Padding::ZERO.right(12));
+        // A transfer consumed the preview, so its progress is all there is.
+        if self.activity == Activity::Apply {
+            return self.apply_status(panel);
+        }
+        if let Some(preview) = &self.preview {
+            let week = &preview.week;
             // Each item is a warning notice: what is wrong, then whose shift
-            // and what to do. Unlike status notices they stay until resolved.
+            // and what to do. They are also marked in the grid.
             for item in &week.attention {
                 let mut entry = column![super::widgets::notice_card::<Message>(
                     Notice::new(
@@ -2729,146 +2761,129 @@ impl NativeApp {
                     entry =
                         entry.push(self.action("Åbn indstillingen", Message::FixInSettings(link)));
                 }
-                body = body.push(entry);
-            }
-            if week
-                .days
-                .iter()
-                .any(|d| !d.blocks.is_empty() || !d.markers.is_empty())
-            {
-                body = body.push(super::widgets::week_grid(week));
+                panel = panel.push(entry);
             }
         }
-        content.push(scrollable(body).height(Length::Fill).width(Length::Fill))
+        if !self.compensation.reminders().is_empty() {
+            panel = panel.push(self.reminder_cards());
+        }
+        if let Some(preview) = &self.preview {
+            let selected = preview
+                .selected
+                .and_then(|at| shift(&preview.week, at).map(super::widgets::shift_details));
+            let has_shifts = preview.week.days.iter().any(|d| !d.blocks.is_empty());
+            if let Some(details) = selected {
+                panel = panel.push(super::widgets::card(
+                    column![text("Valgt vagt").size(12), details].spacing(4),
+                ));
+            } else if has_shifts {
+                panel = panel.push(
+                    text(
+                        "Vælg en vagt for at se, hvad der sker med den. Piletasterne skifter vagt.",
+                    )
+                    .size(13),
+                );
+            }
+            panel = panel.push(super::widgets::notice_card::<Message>(
+                preview.week.status.clone(),
+                None,
+            ));
+        }
+        panel.push(self.week_action())
     }
 
+    /// The week's actions, stacked to the panel's width: the one primary
+    /// action first, then fetching the week again. Once a week is shown,
+    /// fetching it is »Hent igen«.
     fn week_action<'a>(&'a self) -> Element<'a, Message> {
         let transferable = self
             .preview
             .as_ref()
             .is_some_and(|preview| preview.week.can_apply);
-        let mut actions = row![].spacing(8);
-        if transferable {
-            actions = actions.push(self.quiet(
-                if self.needs_recheck {
-                    "Kontrollér igen"
-                } else {
-                    SHOW_WEEK
-                },
-                Message::Preview,
-            ));
-            actions = actions.push(self.primary("Godkend ændringer", Message::Apply));
-        } else if self.needs_recheck {
-            actions = actions.push(self.primary("Kontrollér igen", Message::Preview));
+        let fetch_label = if self.needs_recheck {
+            "Kontrollér igen"
+        } else if self.preview.is_some() {
+            "⟳ Hent igen"
         } else {
-            actions = actions.push(self.primary(SHOW_WEEK, Message::Preview));
+            SHOW_WEEK
+        };
+        let wide = |label: &'a str, message: Message, filled: bool| {
+            let style: fn(&iced::Theme, button::Status) -> button::Style = if filled {
+                button::primary
+            } else {
+                super::widgets::outlined
+            };
+            button(
+                text(label)
+                    .width(Length::Fill)
+                    .align_x(iced::alignment::Horizontal::Center),
+            )
+            .style(style)
+            .padding([8, 14])
+            .width(Length::Fill)
+            .on_press_maybe(self.enabled(&message).then_some(message))
+        };
+        let mut actions = column![].spacing(8);
+        if transferable {
+            actions = actions.push(wide("Godkend ændringer", Message::Apply, true));
         }
-        actions.into()
+        actions
+            .push(wide(fetch_label, Message::Preview, !transferable))
+            .into()
     }
 
+    /// Back, the title, Support and updates on top; one chip per section
+    /// below; the section's page under both.
     fn settings(&self) -> Element<'_, Message> {
-        let mut header = row![text("Indstillinger").size(20), space::horizontal()]
-            .spacing(8)
-            .align_y(iced::alignment::Vertical::Center);
-        // Without a confirmed setup there is no week to go back to. The
-        // button still answers, with a notice saying what is missing.
-        header = header.push(tooltip(
-            self.circular_icon("⌂", Message::Open(Screen::Home)),
-            "Tilbage til ugen",
-            tooltip::Position::Bottom,
-        ));
-        let mut sidebar = column![header].spacing(10);
-        for (section, icon, label) in [
-            (SettingsSection::Helpers, "👥", "Hjælpere"),
-            (SettingsSection::StandardTimes, "◷", "Standardtider"),
-            (SettingsSection::Markers, "⚑", "Markeringer"),
-            (SettingsSection::Absences, "✚", "Fravær"),
-            (SettingsSection::Integrations, "⇄", "Udbydere"),
-            (SettingsSection::Compensation, "kr", "Kompensation"),
+        let header = row![
+            // Without a confirmed setup there is no week to go back to. The
+            // button still answers, with a notice saying what is missing.
+            self.quiet("‹ Tilbage", Message::Open(Screen::Home)),
+            text("Indstillinger").size(20),
+            space::horizontal(),
+            tooltip(
+                self.circular_icon("?", Message::Open(Screen::Help)),
+                "Support",
+                tooltip::Position::Bottom,
+            ),
+            self.update_control(),
+        ]
+        .spacing(12)
+        .align_y(iced::alignment::Vertical::Center);
+        let mut sections = row![].spacing(8);
+        for (section, label) in [
+            (SettingsSection::Helpers, "Hjælpere"),
+            (SettingsSection::StandardTimes, "Standardtider"),
+            (SettingsSection::Markers, "Markeringer"),
+            (SettingsSection::Absences, "Fravær"),
+            (SettingsSection::Integrations, "Udbydere"),
+            (SettingsSection::Compensation, "Kompensation"),
         ] {
-            let selected = self.settings_section == section;
-            let mut entry = row![text(icon).size(18), text(label).size(14)]
-                .spacing(10)
-                .align_y(iced::alignment::Vertical::Center);
             // Blocked helper choices keep the whole setup from confirming, so
             // the mark shows from every section, not only on Hjælpere.
-            if section == SettingsSection::Helpers && self.helpers_blocked() {
-                entry = entry
-                    .push(space::horizontal())
-                    .push(text("! Ret").size(13).font(iced::Font {
-                        weight: iced::font::Weight::Bold,
-                        ..iced::Font::DEFAULT
-                    }));
-            }
-            sidebar = sidebar.push(
-                button(entry)
-                    .style(move |theme, status| {
-                        if selected {
-                            iced::widget::button::primary(theme, status)
-                        } else {
-                            super::widgets::outlined(theme, status)
-                        }
-                    })
-                    .padding([10, 12])
-                    .width(Length::Fill)
+            let label = if section == SettingsSection::Helpers && self.helpers_blocked() {
+                "! Hjælpere"
+            } else {
+                label
+            };
+            sections = sections.push(
+                button(text(label).size(14))
+                    .style(super::widgets::chosen(
+                        self.settings_section == section,
+                        super::widgets::CHIP,
+                    ))
+                    .padding([7, 14])
                     .on_press(Message::SelectSettings(section)),
             );
         }
-        let (icon, label, action) = if let Some(ready) = &self.update_ready {
-            match ready {
-                update::ApplyOutcome::Restart(_) => {
-                    ("↻", "Genstart for at opdatere", Message::RestartUpdate)
-                }
-                update::ApplyOutcome::OpenInstaller(_) => {
-                    ("↻", "Åbn installationsprogram", Message::RestartUpdate)
-                }
-            }
-        } else if self.activity == Activity::Update {
-            const FRAMES: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
-            (
-                FRAMES[self.update_frame],
-                "Henter opdatering …",
-                Message::UpdateTick,
-            )
-        } else if self.update_offer.is_some() {
-            ("⇩", "Hent opdatering", Message::InstallUpdate)
-        } else {
-            ("⟳", "Søg efter opdateringer", Message::CheckUpdates)
-        };
-        let update_control = tooltip(
-            self.circular_icon(icon, action),
-            text(if let Some(offer) = &self.update_offer {
-                format!("{label}: version {}", offer.version)
-            } else {
-                label.to_owned()
-            }),
-            tooltip::Position::Right,
-        );
-        sidebar = sidebar.push(space().height(Length::Fill)).push(
-            row![
-                tooltip(
-                    self.circular_icon("?", Message::Open(Screen::Help)),
-                    "Support",
-                    tooltip::Position::Top,
-                ),
-                update_control,
-            ]
-            .spacing(8),
-        );
         let content = match self.settings_section {
             SettingsSection::Helpers => column![
                 row![
                     text("Hjælpere").size(20),
-                    tooltip(
-                        self.circular_icon(
-                            "⟳",
-                            Message::Setup(setup::Message::Action(
-                                "discover",
-                                serde_json::json!({})
-                            ))
-                        ),
-                        "Opdatér hjælpere",
-                        tooltip::Position::Bottom,
+                    space::horizontal(),
+                    self.quiet(
+                        "⟳ Hent navne igen",
+                        Message::Setup(setup::Message::Action("discover", serde_json::json!({})))
                     ),
                 ]
                 .spacing(12)
@@ -2896,13 +2911,48 @@ impl NativeApp {
             ]
             .spacing(16),
         };
-        row![
-            container(sidebar).width(Length::Fixed(210.0)),
+        column![
+            header,
+            sections,
             scrollable(content).height(Length::Fill).width(Length::Fill),
         ]
-        .spacing(20)
+        .spacing(16)
         .height(Length::Fill)
         .into()
+    }
+
+    /// Checking for, fetching and installing an update, as one labelled
+    /// button whose text says which of those it does now.
+    fn update_control(&self) -> iced::widget::Button<'_, Message> {
+        let (label, action) = if let Some(ready) = &self.update_ready {
+            match ready {
+                update::ApplyOutcome::Restart(_) => (
+                    "↻ Genstart for at opdatere".to_owned(),
+                    Message::RestartUpdate,
+                ),
+                update::ApplyOutcome::OpenInstaller(_) => (
+                    "↻ Åbn installationsprogram".to_owned(),
+                    Message::RestartUpdate,
+                ),
+            }
+        } else if self.activity == Activity::Update {
+            const FRAMES: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
+            (
+                format!("{} Henter opdatering …", FRAMES[self.update_frame]),
+                Message::UpdateTick,
+            )
+        } else if let Some(offer) = &self.update_offer {
+            (
+                format!("⇩ Hent opdatering {}", offer.version),
+                Message::InstallUpdate,
+            )
+        } else {
+            ("⟳ Søg efter opdateringer".to_owned(), Message::CheckUpdates)
+        };
+        button(text(label).size(14))
+            .style(super::widgets::outlined)
+            .padding([7, 12])
+            .on_press_maybe(self.enabled(&action).then_some(action))
     }
 
     fn circular_icon<'a>(
@@ -3145,7 +3195,6 @@ mod tests {
             activity: Activity::Idle,
             status: None,
             status_since: std::time::Instant::now(),
-            week_status_since: std::time::Instant::now(),
             blocked_since: std::time::Instant::now(),
             last_verified: None,
             week_error: None,
@@ -3193,7 +3242,7 @@ mod tests {
             state_path: "synthetic-account.sqlite3".into(),
             standard_times: Default::default(),
             markers: Vec::new(),
-            status_dismissed: false,
+            selected: None,
             items: vec![
                 write_item("s", "mithf.create_shift"),
                 write_item("s", "mithf.assign_helper"),
@@ -3735,18 +3784,43 @@ mod tests {
         );
         assert_eq!(title(0, 0), "Ingen ændringer overført");
     }
+    /// Selecting a shift is view state: it works while other work runs,
+    /// keeps the approval, ignores shifts the week does not have, and goes
+    /// with the preview when the week changes.
     #[test]
-    fn a_dismissed_week_status_stays_dismissed_until_the_next_preview() {
+    fn selecting_a_shift_keeps_the_approval_and_leaves_with_the_week() {
         let mut app = app();
-        app.preview = Some(preview(&app, true));
-        // Dismissing is only text, so it works while other work is running.
+        let mut shown = preview(&app, true);
+        shown.week = serde_json::from_value(json!({
+            "days": [{"date": "2026-09-14", "label": "man 14. sep", "blocks": [
+                {"helper": "Anna Hjælper", "status": "create", "status_label": "Oprettes",
+                 "minutes_from": 480, "minutes_to": 960, "time_label": "08:00–16:00",
+                 "sps_label": "", "part_label": "",
+                 "continues_before": false, "continues_after": false,
+                 "details": ["Vagten oprettes i MitHF."]}
+            ]}],
+            "can_apply": true,
+            "apply_summary": "Overfører 1 ny vagt til MitHF."
+        }))
+        .unwrap();
+        app.preview = Some(shown);
+        let first = ShiftRef { day: 0, block: 0 };
         app.activity = Activity::Login;
-        let _ = app.update(Message::DismissWeekStatus);
-        assert!(app.preview.as_ref().is_some_and(|p| p.status_dismissed));
-        app.activity = Activity::Preview;
-        let _ = app.update(Message::PreviewLoaded(Ok(Box::new(preview(&app, true)))));
-        assert!(app.preview.as_ref().is_some_and(|p| !p.status_dismissed));
+        let _ = app.update(Message::SelectShift(Some(first)));
+        assert_eq!(app.preview.as_ref().unwrap().selected, Some(first));
+        let _ = app.update(Message::SelectShift(Some(ShiftRef { day: 3, block: 0 })));
+        assert_eq!(app.preview.as_ref().unwrap().selected, None);
+        let _ = app.update(Message::StepShift(1));
+        assert_eq!(app.preview.as_ref().unwrap().selected, Some(first));
         let _ = app.view();
+        app.activity = Activity::Idle;
+        let _ = app.update(Message::Apply);
+        assert_eq!(app.activity, Activity::Apply, "the approval survived");
+        app.activity = Activity::Idle;
+        app.preview = Some(preview(&app, true));
+        app.preview.as_mut().unwrap().selected = Some(first);
+        let _ = app.update(Message::Navigate(7));
+        assert!(app.preview.is_none());
     }
     #[test]
     fn verification_time_uses_the_configured_timezone() {
@@ -3827,7 +3901,7 @@ mod tests {
             state_path: "synthetic-account.sqlite3".into(),
             standard_times: Default::default(),
             markers: Vec::new(),
-            status_dismissed: false,
+            selected: None,
             items: vec![],
         });
         let _ = app.view();

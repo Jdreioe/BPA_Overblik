@@ -57,9 +57,9 @@ geometry in minutes from local midnight, Danish status labels, detail lines and
 the attention list. The shell renders those fields and never parses summaries,
 step keys, digests or outcome names. The block fill is the helper's TeamUp colour,
 tinted towards white so dark text stays readable on Teamup's saturated
-palette; the outline carries status. Blocks also carry a text marker (`[NY]`,
-`[ÆNDRET]`, `[OK]`, `[!]`), so neither identity nor status depends on colour
-alone, and the grid is repeated as text below it for screen readers.
+palette; the outline carries status. Blocks also carry a small filled label in
+the outline's colour (`NY`, `ÆNDRET`, `OK`, `!`), so neither identity nor status
+depends on colour alone, and the grid is repeated as text below it for screen readers.
 
 Colour is appearance, not identity: it is kept out of the sub-calendar
 comparison in `Setup.revalidate`, so recolouring a calendar in TeamUp adopts

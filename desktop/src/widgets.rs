@@ -1,8 +1,8 @@
 //! Shared Danish week widgets: the hour grid and the quiet button style.
 //!
-//! The grid renders the [`Week`] the core-based preview builds. One status
-//! notice above it (in `native.rs`) carries the week's state, so neither the
-//! cells nor extra lists repeat it.
+//! The grid renders the [`Week`] the core-based preview builds. The side
+//! panel beside it (in `native.rs`) carries the week's state and the
+//! selected shift's details, so the cells stay short.
 
 use chrono::{Datelike, NaiveDate};
 use iced::widget::{button, column, container, row, space, text, tooltip};
@@ -64,6 +64,29 @@ pub fn outlined(theme: &iced::Theme, status: button::Status) -> button::Style {
         },
     }
 }
+
+/// An outlined choice: tabs, settings sections, list entries and choice
+/// cards. The selected one gets a thicker accent border and a tint, so the
+/// choice never depends on colour alone. Filled buttons stay for actions.
+pub fn chosen(
+    selected: bool,
+    radius: f32,
+) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        let mut style = outlined(theme, status);
+        style.border.radius = radius.into();
+        if selected {
+            let accent = theme.extended_palette().primary.base.color;
+            style.border.color = accent;
+            style.border.width = 2.0;
+            style.background = Some(accent.scale_alpha(0.2).into());
+        }
+        style
+    }
+}
+
+/// Corner radius that turns a [`chosen`] button into a round chip.
+pub const CHIP: f32 = 999.0;
 
 /// A compact notification: tone icon, short plain outcome, an optional
 /// detail line and a visible dismiss button. Every status and action result
@@ -157,22 +180,56 @@ fn tone_color(theme: &iced::Theme, tone: Tone) -> Color {
 }
 
 /// Vagtmøde participants share clock times, so overlapping blocks need
-/// separate lanes. Later shifts reuse the first available lane.
-fn grid_lanes(blocks: &[Block]) -> Vec<Vec<&Block>> {
-    let mut sorted: Vec<_> = blocks.iter().collect();
-    sorted.sort_by_key(|block| block.minutes_from);
-    let mut lanes: Vec<Vec<&Block>> = vec![Vec::new()];
-    for block in sorted {
+/// separate lanes. Later shifts reuse the first available lane. Each block
+/// keeps its index in `blocks`, so the grid can say which one was clicked.
+fn grid_lanes(blocks: &[Block]) -> Vec<Vec<(usize, &Block)>> {
+    let mut sorted: Vec<_> = blocks.iter().enumerate().collect();
+    sorted.sort_by_key(|(_, block)| block.minutes_from);
+    let mut lanes: Vec<Vec<(usize, &Block)>> = vec![Vec::new()];
+    for (index, block) in sorted {
         if let Some(lane) = lanes.iter_mut().find(|lane| {
             lane.last()
-                .is_none_or(|previous| previous.minutes_to <= block.minutes_from)
+                .is_none_or(|(_, previous)| previous.minutes_to <= block.minutes_from)
         }) {
-            lane.push(block);
+            lane.push((index, block));
         } else {
-            lanes.push(vec![block]);
+            lanes.push(vec![(index, block)]);
         }
     }
     lanes
+}
+
+/// One shift in a [`Week`]: its day and its index in that day's blocks. It
+/// is only a view selection and never part of what is approved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShiftRef {
+    pub day: usize,
+    pub block: usize,
+}
+
+/// The shift at `at`, if the week still has it.
+pub fn shift(week: &Week, at: ShiftRef) -> Option<&Block> {
+    week.days.get(at.day)?.blocks.get(at.block)
+}
+
+/// The shift `by` steps from `from` in reading order: day by day, and by
+/// start time within a day. Without a selection, a step forward picks the
+/// first shift and a step back the last. It stops at either end.
+pub fn step_shift(week: &Week, from: Option<ShiftRef>, by: isize) -> Option<ShiftRef> {
+    let mut order: Vec<(ShiftRef, u32)> = Vec::new();
+    for (day, shifts) in week.days.iter().enumerate() {
+        for (block, shift) in shifts.blocks.iter().enumerate() {
+            order.push((ShiftRef { day, block }, shift.minutes_from));
+        }
+    }
+    order.sort_by_key(|(at, minutes)| (at.day, *minutes, at.block));
+    let last = order.len().checked_sub(1)?;
+    let target = match from.and_then(|from| order.iter().position(|(at, _)| *at == from)) {
+        Some(index) => index.saturating_add_signed(by).min(last),
+        None if by < 0 => last,
+        None => 0,
+    };
+    Some(order[target].0)
 }
 
 /// One labelled settings block: a heading row above a bordered box holding
@@ -304,7 +361,15 @@ const MARKER_HEIGHT: f32 = 22.0;
 /// Seven day columns with each shift drawn over the hours it covers. Markers
 /// sit above the clock, never on it: they are not shifts. Every column gets
 /// the same marker area, so the hours stay aligned across the week.
-pub fn week_grid<'a, M: 'a>(week: &'a Week) -> Element<'a, M> {
+///
+/// Every block is a button: pressing it sends `on_select` with that shift,
+/// and the `selected` one gets a ring in the text colour around its status
+/// outline.
+pub fn week_grid<'a, M: Clone + 'a>(
+    week: &'a Week,
+    selected: Option<ShiftRef>,
+    on_select: impl Fn(ShiftRef) -> M,
+) -> Element<'a, M> {
     let marker_rows = week.days.iter().map(|d| d.markers.len()).max().unwrap_or(0);
     let marker_area = MARKER_HEIGHT * marker_rows as f32;
     let mut hours = column![].width(Length::Fixed(28.0));
@@ -322,12 +387,12 @@ pub fn week_grid<'a, M: 'a>(week: &'a Week) -> Element<'a, M> {
     ]
     .spacing(4)]
     .spacing(4);
-    for day in &week.days {
+    for (day_index, day) in week.days.iter().enumerate() {
         let mut lanes = row![].spacing(2).width(Length::Fill);
         for blocks in grid_lanes(&day.blocks) {
             let mut lane = column![].width(Length::Fill);
             let mut cursor = 0;
-            for block in blocks {
+            for (index, block) in blocks {
                 let from = block.minutes_from.min(1439);
                 let to = block.minutes_to.clamp(from + 1, 1440);
                 if from > cursor {
@@ -336,16 +401,26 @@ pub fn week_grid<'a, M: 'a>(week: &'a Week) -> Element<'a, M> {
                             .height(Length::Fixed(GRID_HEIGHT * (from - cursor) as f32 / 1440.0)),
                     );
                 }
-                lane = lane.push(tooltip(
-                    container(block_body(block))
-                        .height(Length::Fixed(GRID_HEIGHT * (to - from) as f32 / 1440.0))
-                        .width(Length::Fill)
-                        .padding(3)
-                        .clip(true)
-                        .style(block_style(&block.status, &block.helper_color)),
-                    block_details(block),
-                    tooltip::Position::FollowCursor,
-                ));
+                let at = ShiftRef {
+                    day: day_index,
+                    block: index,
+                };
+                let chosen = selected == Some(at);
+                lane = lane.push(
+                    button(
+                        container(block_body(block))
+                            .height(Length::Fill)
+                            .width(Length::Fill)
+                            .padding(3)
+                            .clip(true)
+                            .style(block_style(&block.status, &block.helper_color)),
+                    )
+                    .padding(2)
+                    .height(Length::Fixed(GRID_HEIGHT * (to - from) as f32 / 1440.0))
+                    .width(Length::Fill)
+                    .style(move |theme, status| selection_ring(theme, status, chosen))
+                    .on_press(on_select(at)),
+                );
                 cursor = to;
             }
             if cursor < 1440 {
@@ -431,9 +506,14 @@ fn block_body<'a, M: 'a>(block: &'a Block) -> Element<'a, M> {
     // The cell carries who and what-state. Time is the block's position on
     // the clock; continuation and SPS are marks. Their exact values are in
     // the block's tooltip.
-    let mut body =
-        column![text(format!("{} {}", status_marker(&block.status), block.helper)).size(11),]
-            .spacing(0);
+    // The name moves under the label when a narrow lane has no room beside it.
+    let mut body = column![
+        row![status_badge(&block.status), text(&block.helper).size(11)]
+            .spacing(3)
+            .wrap()
+            .vertical_spacing(1)
+    ]
+    .spacing(0);
     let mut marks: Vec<&str> = Vec::new();
     if block.continues_before {
         marks.push("▲");
@@ -459,9 +539,32 @@ fn block_body<'a, M: 'a>(block: &'a Block) -> Element<'a, M> {
     body.into()
 }
 
+/// Around a block: a ring in the text colour when it is the selected shift,
+/// a faint one on hover, nothing otherwise. The ring sits outside the status
+/// outline, so selecting never hides a shift's status.
+fn selection_ring(theme: &iced::Theme, status: button::Status, selected: bool) -> button::Style {
+    let ink = theme.extended_palette().background.base.text;
+    let color = if selected {
+        ink
+    } else if matches!(status, button::Status::Hovered | button::Status::Pressed) {
+        ink.scale_alpha(0.4)
+    } else {
+        Color::TRANSPARENT
+    };
+    button::Style {
+        border: iced::Border {
+            color,
+            width: 2.0,
+            radius: 6.0.into(),
+        },
+        ..button::Style::default()
+    }
+}
+
 /// Everything the small cell leaves out: the exact time, the status in words
-/// and each change the transfer makes to this shift.
-fn block_details<'a, M: 'a>(block: &'a Block) -> Element<'a, M> {
+/// and each change the transfer makes to this shift. The side panel shows it
+/// for the selected shift.
+pub fn shift_details<'a, M: 'a>(block: &'a Block) -> Element<'a, M> {
     let mut facts = vec![block.time_label.as_str(), block.status_label.as_str()];
     if !block.absence.is_empty() {
         facts.push(&block.absence);
@@ -473,35 +576,57 @@ fn block_details<'a, M: 'a>(block: &'a Block) -> Element<'a, M> {
         facts.push("standardtid");
     }
     let mut lines = column![
-        text(&block.helper).size(13).font(iced::Font {
+        text(&block.helper).size(16).font(iced::Font {
             weight: iced::font::Weight::Bold,
             ..iced::Font::DEFAULT
         }),
-        text(facts.join(" · ")).size(12),
+        text(facts.join(" · ")).size(13),
     ]
-    .spacing(2);
+    .spacing(4);
     if !block.sps_label.is_empty() {
-        lines = lines.push(text(format!("SPS {}", block.sps_label)).size(12));
+        lines = lines.push(text(format!("SPS {}", block.sps_label)).size(13));
     }
     for detail in &block.details {
-        lines = lines.push(text(detail).size(12));
+        lines = lines.push(text(detail).size(13));
     }
-    container(lines)
-        .padding(8)
-        .max_width(320)
-        .style(container::bordered_box)
-        .into()
+    lines.into()
 }
 
 /// Text cue beside every colour, so status never depends on colour alone.
 fn status_marker(status: &str) -> &'static str {
     match status {
-        "create" => "[NY]",
-        "update" => "[ÆNDRET]",
-        "matched" => "[OK]",
-        "attention" => "[!]",
-        _ => "[?]",
+        "create" => "NY",
+        "update" => "ÆNDRET",
+        "matched" => "OK",
+        "attention" => "!",
+        _ => "?",
     }
+}
+
+/// The status as a small filled label in the outline's colour. White on
+/// every status colour passes contrast, and the word itself carries the state.
+fn status_badge<'a, M: 'a>(status: &str) -> Element<'a, M> {
+    let color = status_color(status);
+    container(
+        text(status_marker(status))
+            .size(9)
+            .font(iced::Font {
+                weight: iced::font::Weight::Bold,
+                ..iced::Font::DEFAULT
+            })
+            .wrapping(text::Wrapping::None),
+    )
+    .padding([0, 3])
+    .style(move |_theme: &iced::Theme| container::Style {
+        background: Some(color.into()),
+        text_color: Some(Color::WHITE),
+        border: iced::Border {
+            radius: 3.0.into(),
+            ..iced::Border::default()
+        },
+        ..container::Style::default()
+    })
+    .into()
 }
 
 /// Fill the block with the helper's own Teamup colour, tinted so the text
@@ -625,9 +750,11 @@ mod tests {
     #[test]
     fn week_widgets_render_without_panicking() {
         let week = test_week();
-        let _ = week_grid::<()>(&week);
+        let _ = week_grid(&week, None, |_| ());
+        let _ = week_grid(&week, Some(ShiftRef { day: 0, block: 1 }), |_| ());
+        let _ = shift_details::<()>(&week.days[0].blocks[0]);
         let empty = Week::default();
-        let _ = week_grid::<()>(&empty);
+        let _ = week_grid(&empty, None, |_| ());
     }
 
     /// A helper colour tints the fill; anything unusable falls back to a
@@ -665,14 +792,32 @@ mod tests {
         let blocks = vec![first, second, later];
         let lanes = grid_lanes(&blocks);
         assert_eq!(lanes.len(), 2);
-        assert_eq!(lanes[0][0].minutes_from, lanes[1][0].minutes_from);
-        assert_eq!(lanes[0][0].minutes_to, lanes[1][0].minutes_to);
-        assert_eq!(lanes[0][1].minutes_from, 720);
+        assert_eq!(lanes[0][0].1.minutes_from, lanes[1][0].1.minutes_from);
+        assert_eq!(lanes[0][0].1.minutes_to, lanes[1][0].1.minutes_to);
+        assert_eq!(lanes[0][1].1.minutes_from, 720);
+        // Each block keeps its own index, so a click selects the right one.
+        assert_eq!((lanes[0][1].0, lanes[1][0].0), (2, 1));
         for lane in lanes {
             assert!(lane
                 .windows(2)
-                .all(|pair| pair[0].minutes_to <= pair[1].minutes_from));
+                .all(|pair| pair[0].1.minutes_to <= pair[1].1.minutes_from));
         }
+    }
+
+    /// Arrow keys walk the week in reading order, even when a day's blocks
+    /// are stored out of time order, and stop at either end.
+    #[test]
+    fn stepping_walks_shifts_day_by_day_and_by_start_time() {
+        let mut week = test_week();
+        week.days[0].blocks.reverse();
+        let at = |day, block| Some(ShiftRef { day, block });
+        assert_eq!(step_shift(&week, None, 1), at(0, 1));
+        assert_eq!(step_shift(&week, at(0, 1), 1), at(0, 0));
+        assert_eq!(step_shift(&week, at(0, 0), 1), at(1, 0));
+        assert_eq!(step_shift(&week, at(1, 0), 1), at(1, 0));
+        assert_eq!(step_shift(&week, at(0, 1), -1), at(0, 1));
+        assert_eq!(step_shift(&week, None, -1), at(1, 0));
+        assert_eq!(step_shift(&Week::default(), None, 1), None);
     }
 
     #[test]

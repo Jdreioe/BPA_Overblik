@@ -12,9 +12,12 @@ It uses the per-user application data directory, or `TEAMUP_SHIFT_SYNC_DATA_DIR`
 when set, for `setup.json`, browser profiles, sync history and the
 Kompensationsydelse log. Source credentials or a Google Sheets capability link are read from and written to the OS vault.
 
-The main window has two tabs. **Vagtplan** shows only the week, its changes
-and the two primary actions; **Kompensationsydelse** is described below.
-Everything technical lives on **Indstillinger** and **Support**. Setup runs on
+The main window has two tabs, shown as chips with **Support** (?) and
+**Indstillinger** (⚙) top-right on both. **Vagtplan** shows the week grid
+beside a side panel holding, top to bottom, what blocks the transfer, open
+expense reminders, the selected shift's details, the week's status and its
+actions; **Kompensationsydelse** is described below. Everything technical lives
+on **Indstillinger** and **Support**. Setup runs on
 Indstillinger: until a setup is confirmed that is the screen the app opens, and
 confirming revalidates both services and returns to the week. Importing a legacy
 TOML configuration is the one setup feature not carried over from the old engine.
@@ -27,7 +30,10 @@ TOML configuration is the one setup feature not carried over from the old engine
    services.
 2. Choose **Check forbindelse** in each pane, then return to the week and **Se vagtplan**.
 3. Review the split shifts, times, helper assignments, SPS and DUOS values.
-   Resolve the warning notices shown above the week before proceeding.
+   Resolve the warning notices in the side panel before proceeding. Click a
+   shift, or move with the arrow keys, to see in the panel what the transfer
+   does with it; Escape clears the selection. Selecting is view state on the
+   preview, so it never revokes the approval and goes when the week changes.
 4. **Godkend ændringer** approves exactly the displayed plan and submits it.
    The app reloads saved setup and the selected source, checks the account database scope,
    and invokes the core's locked destination revalidation and verified transfer.
@@ -83,7 +89,7 @@ service.
 
 The shift plan is the source of truth (see the README), so a MitHF shift or
 DUOS registration deleted or changed by hand is simply planned again. What the
-app cannot write is shown as a warning notice above the week. A setup problem,
+app cannot write is shown as a warning notice in the side panel. A setup problem,
 such as an unmapped helper or a missing DUOS arrangement, has an **Åbn
 indstillingen** button for the settings page that fixes it. A DUOS problem, and
 a DUOS write that failed during transfer, asks the user to check the shift on
@@ -137,9 +143,10 @@ Firefox and Safari do not speak this protocol. The diagnostics report names
 the browser found, never its path.
 
 On startup the app asks GitHub for the latest dated release, and while the
-window stays open it asks again every six hours. The circular icon in the
-settings sidebar checks again on click, changes to download when an update is
-available, animates during download, and changes to restart when ready. Windows
+window stays open it asks again every six hours. The labelled button at the
+top of Indstillinger says **Søg efter opdateringer** and checks again on click,
+changes to **Hent opdatering** when an update is available, animates during
+download, and changes to **Genstart for at opdatere** when ready. Windows
 and Linux replace the running file, then restart on click. macOS downloads the
 `.pkg` and opens it on click. A
 development build (`0.1.0`) never offers an update. Failures on the automatic
