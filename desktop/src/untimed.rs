@@ -41,14 +41,6 @@ pub struct Slot {
     pub end: bool,
 }
 
-/// Picking an hour keeps the picker open for the minutes; picking the
-/// minutes closes it.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Pick {
-    Hour(u32),
-    Minute(u32),
-}
-
 /// How one weekday treats a shift without a time.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DayMode {
@@ -202,7 +194,8 @@ impl SetupUi {
     }
 
     /// A label, then »fra« and »til« pickers and how long that makes the
-    /// shift. An open picker's hours and minutes go under the row.
+    /// shift. A picker opens as a dialog over the page; see
+    /// [`SetupUi::time_dialog`].
     fn range_row<'a>(
         &'a self,
         label: impl Into<Element<'a, Message>>,
@@ -213,10 +206,10 @@ impl SetupUi {
             let slot = Slot { day, end };
             crate::widgets::time_field(
                 if end { range.end } else { range.start },
-                Message::OpenTime((self.open_time != Some(slot)).then_some(slot)),
+                Message::OpenTime(Some(slot)),
             )
         };
-        let mut content = column![row![
+        row![
             container(label.into()).width(Length::Fixed(LABEL_WIDTH)),
             text("fra"),
             field(false),
@@ -225,20 +218,28 @@ impl SetupUi {
             text(range.length()).size(13),
         ]
         .spacing(10)
-        .align_y(iced::alignment::Vertical::Center)]
-        .spacing(6);
-        if let Some(slot) = self.open_time.filter(|slot| slot.day == day) {
-            let clock = if slot.end { range.end } else { range.start };
-            content = content.push(
-                container(crate::widgets::clock_panel(
-                    clock,
-                    move |hour| Message::PickTime(slot, Pick::Hour(hour)),
-                    move |minute| Message::PickTime(slot, Pick::Minute(minute)),
-                ))
-                .padding(iced::Padding::ZERO.left(LABEL_WIDTH + 10.0)),
-            );
+        .align_y(iced::alignment::Vertical::Center)
+        .into()
+    }
+
+    /// The time a picker starts from: the slot's saved start or end.
+    fn clock(&self, slot: Slot) -> (u32, u32) {
+        let current = match slot.day {
+            None => &self.standard_default,
+            Some(index) => &self.standard_days[index],
+        };
+        let range = Range::parse(current).unwrap_or(FIRST_RANGE);
+        if slot.end {
+            range.end
+        } else {
+            range.start
         }
-        content.into()
+    }
+
+    /// The open picker's dialog, which the app shows over the whole page.
+    pub fn time_dialog(&self) -> Option<Element<'_, Message>> {
+        let (_, dial) = self.open_time.as_ref()?;
+        Some(dial.view().map(Message::Dial))
     }
 
     /// What a shift without a time becomes on the first weekday that gives
@@ -293,26 +294,29 @@ impl SetupUi {
                 None
             }
             Message::OpenTime(slot) => {
-                self.open_time = slot;
+                self.open_time = slot.map(|slot| (slot, crate::clock::Dial::new(self.clock(slot))));
                 None
             }
-            Message::PickTime(slot, pick) => {
+            Message::Dial(dial_message) => {
+                let (slot, dial) = self.open_time.as_mut()?;
+                let slot = *slot;
+                let clock = match dial.update(dial_message)? {
+                    crate::clock::Outcome::Cancel => {
+                        self.open_time = None;
+                        return None;
+                    }
+                    crate::clock::Outcome::Pick(clock) => clock,
+                };
+                self.open_time = None;
                 let current = match slot.day {
                     None => &self.standard_default,
                     Some(index) => &self.standard_days[index],
                 };
                 let mut range = Range::parse(current).unwrap_or(FIRST_RANGE);
-                let clock = if slot.end {
-                    &mut range.end
+                if slot.end {
+                    range.end = clock;
                 } else {
-                    &mut range.start
-                };
-                match pick {
-                    Pick::Hour(hour) => clock.0 = hour,
-                    Pick::Minute(minute) => {
-                        clock.1 = minute;
-                        self.open_time = None;
-                    }
+                    range.start = clock;
                 }
                 Some(match slot.day {
                     None => Message::StandardDefault(range.text()),
@@ -342,6 +346,7 @@ fn muted_row<'a>(label: impl Into<Element<'a, Message>>, value: String) -> Eleme
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clock::DialMessage;
 
     fn value(message: Option<Message>) -> String {
         match message {
@@ -379,7 +384,7 @@ mod tests {
     }
 
     #[test]
-    fn picking_writes_the_range_the_core_reads_and_closes_on_the_minutes() {
+    fn picking_writes_the_range_the_core_reads_and_closes_the_picker() {
         let mut ui = SetupUi::default();
         assert_eq!(
             value(ui.update_untimed(&Message::UntimedOn(true))),
@@ -390,17 +395,26 @@ mod tests {
             day: None,
             end: false,
         };
+        // The picker starts from the saved start time.
         ui.update_untimed(&Message::OpenTime(Some(start)));
+        assert_eq!(ui.open_time, Some((start, crate::clock::Dial::new((6, 0)))));
+        let dial = |message| Message::Dial(message);
+        assert!(ui
+            .update_untimed(&dial(DialMessage::Hour {
+                hour: 7,
+                next: true
+            }))
+            .is_none());
+        ui.update_untimed(&dial(DialMessage::Minute(30)));
         assert_eq!(
-            value(ui.update_untimed(&Message::PickTime(start, Pick::Hour(7)))),
-            "07:00-22:00"
-        );
-        assert_eq!(ui.open_time, Some(start));
-        ui.standard_default = "07:00-22:00".into();
-        assert_eq!(
-            value(ui.update_untimed(&Message::PickTime(start, Pick::Minute(30)))),
+            value(ui.update_untimed(&dial(DialMessage::Confirm))),
             "07:30-22:00"
         );
+        assert_eq!(ui.open_time, None);
+        // Annuller keeps the saved time.
+        ui.update_untimed(&Message::OpenTime(Some(start)));
+        ui.update_untimed(&dial(DialMessage::Minute(45)));
+        assert!(ui.update_untimed(&dial(DialMessage::Cancel)).is_none());
         assert_eq!(ui.open_time, None);
         assert_eq!(value(ui.update_untimed(&Message::UntimedOn(false))), "");
     }
@@ -439,11 +453,12 @@ mod tests {
         ui.standard_days[0] = "ingen".into();
         assert!(ui.example().contains("en tirsdag"));
         // Every combination renders, an open picker included.
-        ui.open_time = Some(Slot {
+        ui.update_untimed(&Message::OpenTime(Some(Slot {
             day: Some(5),
             end: true,
-        });
+        })));
         let _ = ui.untimed_view();
+        assert!(ui.time_dialog().is_some());
         ui.standard_default.clear();
         ui.standard_days = Default::default();
         let _ = ui.untimed_view();

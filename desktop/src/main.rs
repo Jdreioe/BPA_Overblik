@@ -5,6 +5,7 @@
 //! threads, never on the UI thread.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod clock;
 mod compensation;
 mod guide;
 mod native;

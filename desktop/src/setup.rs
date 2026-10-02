@@ -103,7 +103,8 @@ pub enum Message {
     UntimedDay(usize, crate::untimed::DayMode),
     ShowUntimedDays,
     OpenTime(Option<crate::untimed::Slot>),
-    PickTime(crate::untimed::Slot, crate::untimed::Pick),
+    /// The open time picker's dial or buttons.
+    Dial(crate::clock::DialMessage),
     MarkerDraft(String),
     AddMarker,
     RemoveMarker(usize),
@@ -195,7 +196,7 @@ pub struct SetupUi {
     pub standard_default: String,
     pub standard_days: [String; 7],
     /// The open time picker, if any.
-    pub open_time: Option<crate::untimed::Slot>,
+    pub open_time: Option<(crate::untimed::Slot, crate::clock::Dial)>,
     /// The weekday list was asked for while no day has a time yet.
     pub untimed_days_open: bool,
     /// A marker title being typed, not saved until added.
