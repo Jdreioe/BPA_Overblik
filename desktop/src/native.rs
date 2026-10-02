@@ -1,7 +1,7 @@
 //! Native Iced workflow using the Rust core and app-owned browser sessions.
 //! Setup editing remains in the existing application during migration.
 use crate::widgets::{shift, step_shift, ShiftRef};
-use crate::{compensation, setup, template, update};
+use crate::{compensation, guide, setup, template, update};
 use chrono::{DateTime, Datelike, Duration, FixedOffset, NaiveDate, TimeZone, Timelike, Utc};
 use iced::widget::{
     button, column, container, progress_bar, row, scrollable, space, text, tooltip, Column,
@@ -1115,6 +1115,7 @@ enum Message {
     Loaded(Result<Loaded>),
     VerifiedLoaded(PathBuf, Option<String>),
     Setup(setup::Message),
+    Guide(guide::Message),
     SetupUpdated(Result<setup::SetupState>),
     AccountUpdated(Result<Arc<LiveConfig>>),
     Open(Screen),
@@ -1211,6 +1212,8 @@ enum Screen {
     Compensation,
     Settings,
     Help,
+    /// The first-run guide through setup.
+    Guide,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1245,6 +1248,7 @@ struct NativeApp {
     standard_saved_revision: u64,
     account: Option<Arc<LiveConfig>>,
     setup: setup::SetupUi,
+    guide: guide::Guide,
     compensation: compensation::CompensationUi,
     monday: NaiveDate,
     preview: Option<Preview>,
@@ -1296,6 +1300,7 @@ impl NativeApp {
             standard_saved_revision: 0,
             account: None,
             setup: setup::SetupUi::default(),
+            guide: guide::Guide::default(),
             compensation: compensation::CompensationUi::new(&app_data_dir()),
             monday: Utc::now().date_naive(),
             preview: None,
@@ -1374,6 +1379,7 @@ impl NativeApp {
     fn update(&mut self, message: Message) -> Task<Message> {
         let status = self.status.clone();
         let blocked = self.blocked_reason();
+        let waiting = self.guide_step_waiting();
         let task = self.handle(message);
         let now = std::time::Instant::now();
         if self.status != status {
@@ -1383,7 +1389,84 @@ impl NativeApp {
             self.blocked_since = now;
             self.setup.blocked_hidden = false;
         }
+        // A connection or login that finishes its guide step moves on.
+        if let Some(step) = waiting {
+            if self.guide_step_waiting().is_none() && self.guide.step == step {
+                return Task::batch([task, self.open_guide_step(step.next())]);
+            }
+        }
         task
+    }
+    /// The shown guide step, when it moves on by itself and is not done yet.
+    fn guide_step_waiting(&self) -> Option<guide::Step> {
+        let step = self.guide.step;
+        let state = self.setup.state.as_ref()?;
+        (self.visible_screen() == Screen::Guide
+            && step.advances_itself()
+            && !self.guide.done(step, state))
+        .then_some(step)
+    }
+    fn open_guide_step(&mut self, step: guide::Step) -> Task<Message> {
+        self.guide.step = step;
+        if step == guide::Step::Helpers {
+            return self.refresh_helpers_if_needed();
+        }
+        Task::none()
+    }
+    /// Whether the helper list is on screen, so it should be fetched.
+    fn shows_helpers(&self) -> bool {
+        match self.visible_screen() {
+            Screen::Settings => self.settings_section == SettingsSection::Helpers,
+            Screen::Guide => self.guide.step == guide::Step::Helpers,
+            _ => false,
+        }
+    }
+    fn guide_message(&mut self, message: guide::Message) -> Task<Message> {
+        let reachable = |app: &Self, step| {
+            app.setup
+                .state
+                .as_ref()
+                .is_some_and(|state| app.guide.reachable(step, state))
+        };
+        match message {
+            guide::Message::Setup(message) => self.update(Message::Setup(message)),
+            guide::Message::Next => {
+                let next = self.guide.step.next();
+                if reachable(self, next) {
+                    return self.open_guide_step(next);
+                }
+                Task::none()
+            }
+            guide::Message::Back => self.open_guide_step(self.guide.step.previous()),
+            guide::Message::Go(step) => {
+                if reachable(self, step) {
+                    return self.open_guide_step(step);
+                }
+                Task::none()
+            }
+            guide::Message::Skip => {
+                self.guide.dismissed = true;
+                let task = self.update(Message::Open(Screen::Settings));
+                // Without a source the helpers have nothing to show yet.
+                if self
+                    .setup
+                    .state
+                    .as_ref()
+                    .is_none_or(|state| state.stage == "source")
+                {
+                    self.settings_section = SettingsSection::Integrations;
+                }
+                task
+            }
+            guide::Message::Finish => {
+                self.guide.dismissed = true;
+                self.screen = Screen::Home;
+                self.update(Message::Preview)
+            }
+            guide::Message::Compensation => self.update(Message::Open(Screen::Compensation)),
+            guide::Message::Help => self.update(Message::Open(Screen::Help)),
+            guide::Message::Retry => self.update(Message::Reload),
+        }
     }
     fn blocked_reason(&self) -> Option<String> {
         self.setup
@@ -1468,6 +1551,11 @@ impl NativeApp {
         if let Message::Compensation(message) = message {
             return self.compensation_message(message);
         }
+        // The guide's own buttons only move between its steps. Its setup
+        // forms go through the setup handling below, busy guard included.
+        if let Message::Guide(message) = message {
+            return self.guide_message(message);
+        }
         // Dismissing only hides text, so it is safe at any time.
         if matches!(message, Message::DismissStatus) {
             self.status = None;
@@ -1542,6 +1630,13 @@ impl NativeApp {
                 match result {
                     Ok(loaded) => {
                         self.week_error = None;
+                        // The first load without a confirmed setup opens the
+                        // guide where the setup stopped.
+                        if !self.guide.started && loaded.account.is_none() {
+                            self.guide.started = true;
+                            self.guide.step = self.guide.start(&loaded.state);
+                            self.screen = Screen::Guide;
+                        }
                         self.account = loaded.account.clone();
                         self.accept_standard(&loaded.state);
                         self.setup.load_absences(&loaded.state);
@@ -1564,9 +1659,7 @@ impl NativeApp {
                         self.week_error = Some(error);
                     }
                 }
-                if self.visible_screen() == Screen::Settings
-                    && self.settings_section == SettingsSection::Helpers
-                {
+                if self.shows_helpers() {
                     return self.refresh_helpers_if_needed();
                 }
             }
@@ -1720,7 +1813,10 @@ impl NativeApp {
             Message::Setup(setup::Message::CopyOrganization) => {
                 // Already handled before the busy guard; kept for exhaustiveness.
             }
-            Message::DismissStatus | Message::SelectShift(_) | Message::StepShift(_) => {
+            Message::DismissStatus
+            | Message::SelectShift(_)
+            | Message::StepShift(_)
+            | Message::Guide(_) => {
                 // Already handled before the busy guard; kept for exhaustiveness.
             }
             Message::Setup(setup::Message::CopyPurpose) => {
@@ -1905,6 +2001,33 @@ impl NativeApp {
                 }
             }
             Message::Open(screen) => {
+                // While the guide is in use, Vagtplan without a week is the
+                // guide rather than Indstillinger.
+                let screen = if screen == Screen::Home
+                    && self.account.is_none()
+                    && self.guide.started
+                    && !self.guide.dismissed
+                {
+                    Screen::Guide
+                } else {
+                    screen
+                };
+                if screen == Screen::Guide {
+                    self.guide.dismissed = false;
+                    if self.screen != Screen::Guide {
+                        self.guide.started = true;
+                        self.preview = None;
+                        if let Some(state) = &self.setup.state {
+                            self.guide.step = self.guide.start(state);
+                        }
+                    }
+                    self.screen = screen;
+                    return if self.shows_helpers() {
+                        self.refresh_helpers_if_needed()
+                    } else {
+                        Task::none()
+                    };
+                }
                 // Home stays chosen, so the week appears once the setup loads.
                 if screen == Screen::Home && self.account.is_none() {
                     self.status = Some(Notice::new(
@@ -1986,12 +2109,19 @@ impl NativeApp {
                 match result {
                     Ok(()) => {
                         self.helpers_auto_fetch_attempted = false;
+                        self.guide.checked(service, true);
                         self.status = Some(Notice::new(
                             Tone::Success,
                             format!("{} er forbundet", service.name()),
                             "",
                         ));
-                        if self.settings_section == SettingsSection::Helpers {
+                        // The guide's DUOS step reads the arrangements the
+                        // same way Hjælpere reads the helpers.
+                        let fetches = self.shows_helpers()
+                            || (self.visible_screen() == Screen::Guide
+                                && self.guide.step == guide::Step::Duos
+                                && service == Service::Duos);
+                        if fetches {
                             if self
                                 .setup
                                 .state
@@ -2015,6 +2145,7 @@ impl NativeApp {
                     }
                     Err(e) => {
                         self.preview = None;
+                        self.guide.checked(service, false);
                         self.status = Some(Notice::from_message(Tone::Error, &e));
                     }
                 }
@@ -2035,6 +2166,7 @@ impl NativeApp {
                 self.activity = Activity::Idle;
                 match result {
                     Ok(()) => {
+                        self.guide.checked(service, false);
                         self.status = Some(Notice::new(
                             Tone::Info,
                             format!("Logget ud af {}", service.name()),
@@ -2501,6 +2633,15 @@ impl NativeApp {
                     .width(Length::Fill),
             ),
             Screen::Settings => page.push(self.settings()),
+            Screen::Guide => page.push(
+                self.guide
+                    .view(
+                        &self.setup,
+                        !self.buttons_enabled(),
+                        self.week_error.as_deref(),
+                    )
+                    .map(Message::Guide),
+            ),
             Screen::Help => page.push(
                 scrollable(self.help(column![].spacing(12)))
                     .height(Length::Fill)
@@ -2844,6 +2985,7 @@ impl NativeApp {
             self.quiet("‹ Tilbage", Message::Open(Screen::Home)),
             text("Indstillinger").size(20),
             space::horizontal(),
+            self.quiet("Guidet opsætning", Message::Open(Screen::Guide)),
             tooltip(
                 self.circular_icon("?", Message::Open(Screen::Help)),
                 "Support",
@@ -3005,8 +3147,12 @@ impl NativeApp {
                 .push(self.quiet("Gem en fejlrapport om MitHF og DUOS", Message::Capture))
                 .push(self.quiet("Tilbage til ugen", Message::Open(Screen::Home)))
         } else {
-            content = content
-                .push(self.quiet("Tilbage til Indstillinger", Message::Open(Screen::Settings)))
+            let back = if self.guide.started && !self.guide.dismissed {
+                ("Tilbage til opsætningen", Message::Open(Screen::Guide))
+            } else {
+                ("Tilbage til Indstillinger", Message::Open(Screen::Settings))
+            };
+            content = content.push(self.quiet(back.0, back.1))
         }
         content
     }
@@ -3192,6 +3338,7 @@ mod tests {
             standard_saved_revision: 0,
             account: None,
             setup: setup::SetupUi::default(),
+            guide: guide::Guide::default(),
             compensation: compensation::CompensationUi::loaded(Default::default()),
             monday: NaiveDate::from_ymd_opt(2026, 9, 14).unwrap(),
             preview: None,
@@ -3674,6 +3821,84 @@ mod tests {
         let url = issue_url(&long, path);
         assert!(!url.contains("xxxx"));
         assert!(url.contains("fejlrapport.json"));
+    }
+    #[test]
+    fn a_first_load_without_a_week_opens_the_guide_where_setup_stopped() {
+        let mut app = app();
+        app.activity = Activity::Setup;
+        let _ = app.update(Message::Loaded(Ok(Loaded {
+            state: setup_state("destinations"),
+            account: None,
+        })));
+        assert_eq!(app.visible_screen(), Screen::Guide);
+        assert_eq!(app.guide.step, guide::Step::Mithf);
+        let _ = app.view();
+
+        // A later reload, after a confirmation say, keeps the step.
+        app.guide.step = guide::Step::Helpers;
+        app.activity = Activity::Setup;
+        let _ = app.update(Message::Loaded(Ok(Loaded {
+            state: setup_state("ready"),
+            account: None,
+        })));
+        assert_eq!(app.guide.step, guide::Step::Helpers);
+    }
+    #[test]
+    fn a_checked_login_moves_the_guide_on_and_the_duos_check_reads_arrangements() {
+        let mut app = app();
+        app.screen = Screen::Guide;
+        app.guide.started = true;
+        app.guide.step = guide::Step::Mithf;
+        app.setup.state = Some(setup_state("destinations"));
+        let _ = app.update(Message::Guide(guide::Message::Setup(
+            setup::Message::CheckLogin(Service::Mithf),
+        )));
+        assert_eq!(app.activity, Activity::Login);
+        let _ = app.update(Message::LoginChecked(Service::Mithf, Ok(())));
+        assert_eq!(app.guide.step, guide::Step::Duos);
+        // MitHF alone reads no arrangements: DUOS is not checked yet.
+        assert_eq!(app.activity, Activity::Idle);
+
+        app.activity = Activity::Login;
+        let _ = app.update(Message::LoginChecked(Service::Duos, Ok(())));
+        assert_eq!(app.activity, Activity::Setup);
+        let mut found = setup_state("helpers");
+        found.arrangement = "35505".into();
+        let _ = app.update(Message::SetupUpdated(Ok(found)));
+        assert_eq!(app.guide.step, guide::Step::Helpers);
+
+        // Helpers waits for Næste, even once every choice is valid.
+        app.activity = Activity::Save;
+        let _ = app.update(Message::SetupUpdated(Ok(setup_state("ready"))));
+        assert_eq!(app.guide.step, guide::Step::Helpers);
+    }
+    #[test]
+    fn the_guide_stays_in_order_and_can_be_left_and_reopened() {
+        let mut app = app();
+        app.screen = Screen::Guide;
+        app.guide.started = true;
+        app.setup.state = Some(setup_state("source"));
+        let _ = app.update(Message::Guide(guide::Message::Next));
+        assert_eq!(app.guide.step, guide::Step::Source);
+        // The source is not connected, so MitHF cannot open yet.
+        let _ = app.update(Message::Guide(guide::Message::Next));
+        let _ = app.update(Message::Guide(guide::Message::Go(guide::Step::Helpers)));
+        assert_eq!(app.guide.step, guide::Step::Source);
+
+        let _ = app.update(Message::Guide(guide::Message::Skip));
+        assert_eq!(app.visible_screen(), Screen::Settings);
+        assert_eq!(app.settings_section, SettingsSection::Integrations);
+        // Dismissed, so Vagtplan explains what is missing instead.
+        let _ = app.update(Message::Open(Screen::Home));
+        assert_eq!(app.visible_screen(), Screen::Settings);
+        assert!(app.status.is_some());
+
+        let _ = app.update(Message::Open(Screen::Guide));
+        assert_eq!(app.visible_screen(), Screen::Guide);
+        let _ = app.update(Message::Guide(guide::Message::Compensation));
+        assert_eq!(app.visible_screen(), Screen::Compensation);
+        let _ = app.update(Message::Open(Screen::Home));
+        assert_eq!(app.visible_screen(), Screen::Guide);
     }
     #[test]
     fn an_auto_confirmed_setup_stays_on_settings() {
