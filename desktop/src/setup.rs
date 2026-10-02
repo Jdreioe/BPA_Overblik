@@ -643,7 +643,7 @@ impl SetupUi {
         if mapping.excluded {
             return column![
                 heading,
-                text("Kalenderen er udeladt, så dens vagter overføres ikke."),
+                text("Udeladt – overføres ikke."),
                 row![quiet_button(
                     "Medtag igen",
                     Message::Action("edit", json!({"source": source_id, "excluded": false})),
@@ -699,10 +699,6 @@ impl SetupUi {
         column![
             heading,
             flow,
-            text(format!(
-                "Vagter i »{calendar}« overføres til disse personer. Vælg en anden, hvis et navn er forkert."
-            ))
-            .size(13),
             row![quiet_button(
                 "Udelad kalenderen",
                 Message::Action("edit", json!({"source": source_id, "excluded": true})),

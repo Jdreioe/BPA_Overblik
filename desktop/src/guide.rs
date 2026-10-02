@@ -280,46 +280,57 @@ impl Guide {
             .find(|step| *step <= self.step && !self.done(*step, state));
         match open {
             Some(step) if step < self.step => {
-                format!("Gør trinnet »{}« færdigt først.", step.label())
+                format!("Gør »{}« færdig først.", step.label())
             }
-            Some(Step::Source) => "Tilslut vagtplanen for at gå videre.".into(),
-            Some(Step::Mithf) => "Log ind, og vælg Check forbindelse for at gå videre.".into(),
+            Some(Step::Source) => "Tilslut vagtplanen.".into(),
+            Some(Step::Mithf) => "Log ind, og check forbindelsen.".into(),
             Some(Step::Duos) if state.arrangements.is_empty() => {
-                "Log ind i DUOS, og vælg Check forbindelse.".into()
+                "Log ind, og check forbindelsen.".into()
             }
-            Some(Step::Duos) => "Vælg din SPS-ordning for at gå videre.".into(),
+            Some(Step::Duos) => "Vælg SPS-ordning.".into(),
             // The page shows why the choices are blocked until that notice
             // hides; the reason stays here after it.
             Some(Step::Helpers) => state
                 .blocked
                 .clone()
                 .filter(|_| ui.blocked_hidden)
-                .unwrap_or_else(|| "Vælg en hjælper for hver kalender, eller udelad den.".into()),
+                .unwrap_or_else(|| {
+                    // With every calendar chosen, only the confirmation is left.
+                    if state
+                        .mappings
+                        .iter()
+                        .all(|m| m.excluded || !m.mithf.is_empty())
+                    {
+                        "Vælg Bekræft.".into()
+                    } else {
+                        "Vælg en hjælper for hver kalender.".into()
+                    }
+                }),
             _ => String::new(),
         }
     }
 
     fn welcome(&self, busy: bool) -> Column<'_, Message> {
         let needs = column![
-            text("• Din vagtplan: et TeamUp-link, et regneark eller et kalenderlink"),
-            text("• Dit login til MitHF"),
-            text("• Dit login til DUOS, hvis du registrerer SPS-timer"),
+            text("• Din vagtplan: TeamUp, et regneark eller en kalender"),
+            text("• Login til MitHF"),
+            text("• Login til DUOS, hvis du har SPS-timer"),
         ]
         .spacing(6);
         column![
             text("Velkommen til BPA Overblik").size(28),
-            text("Appen henter ugens vagter fra din vagtplan og lægger dem ind i MitHF, og SPS-timer i DUOS, hvis du bruger det. Du ser altid ugen og godkender ændringerne, før noget bliver overført."),
+            text("Overfør ugens vagter til MitHF og DUOS. Du godkender altid først."),
             crate::widgets::group(text("Det skal du bruge").size(14), needs),
-            text("Det tager 5–10 minutter. Alt gemmes undervejs, så du kan lukke appen og fortsætte senere.").size(13),
+            text("Tager ca. 5 minutter. Alt gemmes undervejs.").size(13),
             row![
                 primary("Kom i gang", Message::Next, true),
-                quiet("Jeg sætter selv op under Indstillinger", Message::Skip, true),
+                quiet("Spring over", Message::Skip, true),
             ]
             .spacing(12),
             space::vertical().height(12),
             crate::widgets::card(
                 row![
-                    text("Skal du kun bruge Kompensationsydelse? Den kræver ingen opsætning.")
+                    text("Kun Kompensationsydelse? Kræver ingen opsætning.")
                         .size(13)
                         .width(Length::Fill),
                     quiet("Åbn Kompensationsydelse", Message::Compensation, !busy),
@@ -364,7 +375,7 @@ impl Guide {
             .map_or("Vagtplanen", |(_, name, _)| *name);
         let mut content = column![
             title("Hvor ligger din vagtplan?"),
-            text("Vælg der, hvor du planlægger vagterne. Appen læser kun vagtplanen og ændrer aldrig i den."),
+            text("Appen læser kun. Den ændrer intet i vagtplanen."),
             choices,
         ];
         if state.stage == "source" {
@@ -404,14 +415,14 @@ impl Guide {
         };
         let mut content = column![].spacing(14);
         if service == Service::Mithf {
-            content = content.push(title("Log ind i MitHF")).push(text(
-                "Appen lægger vagterne ind i MitHF for dig. Den åbner MitHF i sit eget browservindue, hvor du logger ind, som du plejer.",
-            ));
+            content = content
+                .push(title("Log ind i MitHF"))
+                .push(text("Log ind i vinduet, og check så forbindelsen her."));
         }
         content = content
             .push(numbered(
                 1,
-                format!("Åbn {name}, og log ind."),
+                String::new(),
                 Some(primary_or_quiet(
                     format!("Log ind i {name}"),
                     Message::Setup(setup::Message::Login(service)),
@@ -421,7 +432,7 @@ impl Guide {
             ))
             .push(numbered(
                 2,
-                format!("Når du kan se din forside i {name}, så kom tilbage hertil."),
+                String::new(),
                 Some(primary_or_quiet(
                     "Check forbindelse".to_owned(),
                     Message::Setup(setup::Message::CheckLogin(service)),
@@ -432,16 +443,9 @@ impl Guide {
         if checked {
             content = content.push(success(format!("Du er logget ind i {name}.")));
         }
-        if service == Service::Mithf {
-            content = content.push(
-                text(format!(
-                    "Du forbliver logget ind, indtil {name} selv logger dig ud. Så beder appen dig logge ind igen."
-                ))
-                .size(13),
-            );
-        } else if checked && state.arrangements.is_empty() {
+        if service == Service::Duos && checked && state.arrangements.is_empty() {
             content = content.push(if busy {
-                column![text("Henter dine ordninger fra DUOS …").size(13)]
+                column![text("Henter ordninger …").size(13)]
             } else {
                 column![row![quiet(
                     "Hent ordninger",
@@ -456,8 +460,8 @@ impl Guide {
     fn duos<'a>(&'a self, state: &'a SetupState, busy: bool) -> Column<'a, Message> {
         let mut choices = row![].spacing(10);
         for (enabled, name, about) in [
-            (true, "Ja", "Registrér SPS-timer i DUOS"),
-            (false, "Nej", "Overfør kun vagter til MitHF"),
+            (true, "Ja", "Registrér SPS-timer"),
+            (false, "Nej", "Kun MitHF"),
         ] {
             let active = state.duos_enabled == enabled;
             choices = choices.push(
@@ -480,27 +484,22 @@ impl Guide {
         }
         let mut content = column![
             title("Registrerer du SPS-timer i DUOS?"),
-            text("Står der SPS-timer i vagtplanen, kan appen også registrere dem i DUOS. Hjælperen godkender selv registreringen i DUOS bagefter."),
+            text("Hjælperen godkender selv registreringen i DUOS."),
             choices,
         ];
         if !state.duos_enabled {
-            return content.push(
-                text("Appen overfører kun vagter til MitHF. Du kan slå DUOS til senere under Indstillinger → Udbydere.")
-                    .size(13),
-            );
+            return content.push(text("Kan slås til senere under Udbydere.").size(13));
         }
         content = content.push(self.login(state, Service::Duos, busy));
         if let Some(picker) = setup::arrangement_picker(state) {
             content = content.push(numbered(
                 3,
-                "Vælg den SPS-ordning, timerne skal registreres på.".to_owned(),
+                "Vælg SPS-ordning.".to_owned(),
                 Some(picker.map(Message::Setup)),
             ));
         }
         if let Some(arrangement) = setup::arrangement_name(state) {
-            content = content.push(success(format!(
-                "DUOS er klar med ordningen {arrangement}."
-            )));
+            content = content.push(success(format!("DUOS: {arrangement}")));
         }
         content
     }
@@ -527,14 +526,10 @@ impl Guide {
                 ),
             ]
             .align_y(iced::alignment::Vertical::Center),
-            text(format!(
-                "Hver kalender i vagtplanen skal pege på den rigtige hjælper i {services}. Navne, der passer præcist, er valgt for dig. Vælg resten, og udelad kalendere, der ikke er hjælpere. Valg gemmes med det samme."
-            )),
+            text(format!("Vælg hjælperen i {services} for hver kalender.")),
         ];
         if busy && state.mappings.is_empty() {
-            content = content.push(text(format!(
-                "Henter hjælpere fra vagtplanen og {services} …"
-            )));
+            content = content.push(text("Henter hjælpere …"));
         } else {
             content = content.push(ui.view(setup::Section::Helpers).map(Message::Setup));
         }
@@ -543,21 +538,11 @@ impl Guide {
         } else if state.blocked.is_none() && !state.mappings.is_empty() {
             // Valid choices confirm themselves after a fresh check of the
             // services, so a failed check is what is left.
-            content = content.push(
-                row![
-                    text(format!(
-                        "Valgene er gemt, men skal bekræftes mod {services}."
-                    ))
-                    .size(13),
-                    quiet(
-                        "Bekræft",
-                        Message::Setup(setup::Message::Action("auto_confirm", json!({}))),
-                        !busy,
-                    ),
-                ]
-                .spacing(12)
-                .align_y(iced::alignment::Vertical::Center),
-            );
+            content = content.push(row![primary(
+                "Bekræft",
+                Message::Setup(setup::Message::Action("auto_confirm", json!({}))),
+                !busy,
+            )]);
         }
         content
     }
@@ -573,9 +558,9 @@ impl Guide {
     fn done_page(&self, busy: bool) -> Column<'_, Message> {
         let mut steps = column![].spacing(10);
         for (number, line) in [
-            "Vælg ugen, og vælg Se vagtplan.",
-            "Løs advarslerne i sidepanelet. Rettelser laves i vagtplanen eller i MitHF og DUOS, ikke i appen.",
-            "Vælg Godkend ændringer. Hver ændring læses tilbage og kontrolleres, før den næste begynder.",
+            "Vælg Se vagtplan.",
+            "Ret eventuelle advarsler i vagtplanen.",
+            "Vælg Godkend ændringer.",
         ]
         .into_iter()
         .enumerate()
@@ -584,9 +569,9 @@ impl Guide {
         }
         column![
             title("✓ Du er klar"),
-            text("Sådan overfører du en uge:"),
+            text("Hver uge:"),
             steps,
-            text("Appen sletter aldrig noget i MitHF eller DUOS. Du kan altid ændre opsætningen under ⚙ Indstillinger.").size(13),
+            text("Appen sletter aldrig noget i MitHF eller DUOS.").size(13),
             row![
                 quiet("‹ Tilbage", Message::Back, true),
                 primary("Se denne uges vagtplan", Message::Finish, !busy),
@@ -598,34 +583,20 @@ impl Guide {
 
 /// The shift sources: id, name and what each covers.
 const SOURCES: [(&str, &str, &str); 3] = [
-    (
-        "teamup",
-        "TeamUp",
-        "En TeamUp-kalender med én underkalender pr. hjælper.",
-    ),
-    (
-        "sheets",
-        "Regneark",
-        "Google Sheets, Excel, Nextcloud, Dropbox eller en fil på computeren.",
-    ),
-    (
-        "ical",
-        "Kalender (iCal)",
-        "Google Kalender, Outlook, iCloud eller Nextcloud via et kalenderlink.",
-    ),
+    ("teamup", "TeamUp", "Én kalender pr. hjælper."),
+    ("sheets", "Regneark", "Sheets, Excel eller en fil."),
+    ("ical", "Kalender (iCal)", "Google, Outlook eller iCloud."),
 ];
 
 /// Where to find what the source's form asks for. TeamUp's form already
 /// says it beside its fields.
 fn source_hints(source: &str) -> &'static [&'static str] {
     match source {
-        "sheets" => &[
-            "Del regnearket, så alle med linket kan se det, og indsæt linket. Eller vælg en fil på computeren.",
-        ],
+        "sheets" => &["Del arket, så alle med linket kan se det."],
         "ical" => &[
-            "Google Kalender: Indstillinger → kalenderen → Integrer kalender → Hemmelig adresse i iCal-format.",
-            "Outlook: Indstillinger → Kalender → Delte kalendere → Udgiv en kalender → ICS-linket.",
-            "iCloud: Del kalenderen, slå Offentlig kalender til, og kopiér linket.",
+            "Google: Indstillinger → kalenderen → Hemmelig adresse i iCal-format.",
+            "Outlook: Indstillinger → Delte kalendere → Udgiv en kalender.",
+            "iCloud: Del kalenderen som offentlig kalender.",
         ],
         _ => &[],
     }
@@ -641,7 +612,10 @@ fn numbered<'a>(
     line: String,
     action: Option<Element<'a, Message>>,
 ) -> Element<'a, Message> {
-    let mut lines = column![text(line)].spacing(8).width(Length::Fill);
+    let mut lines = column![].spacing(8).width(Length::Fill);
+    if !line.is_empty() {
+        lines = lines.push(text(line));
+    }
     if let Some(action) = action {
         lines = lines.push(action);
     }
