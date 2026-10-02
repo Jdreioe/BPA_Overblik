@@ -291,8 +291,10 @@ impl IssueKind {
         match self {
             IssueKind::MissingHelper => "Hjælperen mangler.",
             IssueKind::MissingTime => "Tiden mangler.",
-            IssueKind::NoStandardTime => "Der er ingen standardtid for denne ugedag.",
-            IssueKind::InvalidStandardTime => "Standardtiden kan ikke bruges på denne dato.",
+            IssueKind::NoStandardTime => "Der er ikke valgt en tid for vagter uden tid den ugedag.",
+            IssueKind::InvalidStandardTime => {
+                "Tiden for vagter uden tid kan ikke bruges den dag, fordi uret stilles om."
+            }
             IssueKind::UnreadableTime => "Tiden skal være som 8-24 eller 08:30-16:00.",
             IssueKind::UnreadableSps => "SPS-feltet følger ikke skabelonens skrivemåde.",
             IssueKind::ImpossibleDate => "Datoen findes ikke.",
@@ -332,12 +334,8 @@ impl SheetIssue {
         match self.kind {
             IssueKind::MissingHelper => format!("Vagten {day} mangler en hjælper."),
             IssueKind::MissingTime => format!("{shift} mangler tid."),
-            IssueKind::NoStandardTime => {
-                format!("{shift} mangler tid, og ugedagen har ingen standardtid.")
-            }
-            IssueKind::InvalidStandardTime => {
-                format!("{shift} har en standardtid, der ikke kan bruges på grund af sommertid.")
-            }
+            IssueKind::NoStandardTime => crate::standard_time::missing_message(&shift, date),
+            IssueKind::InvalidStandardTime => crate::standard_time::clock_change_message(&shift),
             IssueKind::UnreadableTime => format!(
                 "{shift} har en tid, der ikke kan læses. Skriv den som 8-24 eller 08:30-16:00."
             ),
@@ -853,7 +851,7 @@ mod tests {
         assert_eq!(parsed.shifts.len(), 1);
         assert_eq!(
             parsed.issues[0].message("SPS"),
-            "Ninkes vagt d. 22/9 mangler tid, og ugedagen har ingen standardtid."
+            "Ninkes vagt d. 22/9 har ingen tid, og der er ikke valgt en tid for vagter uden tid om tirsdagen. Vælg en under Indstillinger → Vagter uden tid."
         );
         assert_eq!(
             parsed

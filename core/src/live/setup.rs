@@ -127,7 +127,7 @@ impl Setup {
     fn standard_times(&self) -> Result<StandardTimes, LiveError> {
         let standard: StandardTimes =
             serde_json::from_value(self.data["standard_times"].clone())
-                .map_err(|_| LiveError("De gemte standardtider er ugyldige."))?;
+                .map_err(|_| LiveError("De gemte tider for vagter uden tid er ugyldige."))?;
         standard.validate().map_err(LiveError)?;
         Ok(standard)
     }

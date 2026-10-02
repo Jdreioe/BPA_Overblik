@@ -256,7 +256,7 @@ fn config_from_setup(
             .cloned()
             .unwrap_or_else(|| json!({})),
     )
-    .map_err(|_| LiveError("De gemte standardtider er ugyldige."))?;
+    .map_err(|_| LiveError("De gemte tider for vagter uden tid er ugyldige."))?;
     standard_times.validate().map_err(LiveError)?;
     let markers = match setup.get("markers") {
         None => DEFAULT_MARKERS.map(String::from).to_vec(),
