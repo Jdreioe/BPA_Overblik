@@ -5,6 +5,33 @@ Fixture previews are CLI-only; the desktop app never opens example data.
 
 ## First run
 
+A launch without a confirmed setup opens a guide, **Opsætning**, instead of
+Indstillinger. A fresh install starts on a welcome page that says what is
+needed. A setup left halfway opens on the first step that is not done. A row
+of chips shows the five steps, **Vagtplan**, **MitHF**, **DUOS**, **Hjælpere**
+and **Standardtid**, with ✓ once each is done. A step can be opened once every
+step before it is done, and **Næste** says what is still missing.
+
+| Step | Done when |
+| --- | --- |
+| Vagtplan: choose TeamUp, Regneark or Kalender (iCal) as a card, then fill in its form. iCal and spreadsheet sources show where to find the link. | The source is connected. |
+| MitHF: **Log ind i MitHF**, then **Check forbindelse**. | The check succeeded in this session, or helpers were already read. |
+| DUOS: **Ja** or **Nej**. With **Ja**, log in and check DUOS; the check reads the arrangements, and more than one asks for a choice. | DUOS is off, or an arrangement is chosen. |
+| Hjælpere: the same list as Indstillinger → Hjælpere, fetched on arrival. | The setup is confirmed. |
+| Standardtid: the same fields as Indstillinger → Standardtider. | Optional: **Spring over**. |
+
+The first three steps move on by themselves when they are done. Hjælpere waits
+for **Næste**, so the list stays put while the last choice is checked. The last
+page sums up the weekly routine and opens the current week with **Se denne
+uges vagtplan**. The forms are the ones from Indstillinger, so every choice
+saves as it is made.
+
+**Spring guiden over** opens Indstillinger and keeps it there for the
+session. **Guidet opsætning** in Indstillinger opens the guide again. The
+welcome page also opens Kompensationsydelse, which needs no setup.
+
+The steps in detail:
+
 1. Choose TeamUp, **Regneark** (a spreadsheet), or an iCal calendar. For TeamUp, paste a shared `https://teamup.com/ks…` calendar link and the one-time API
    key. The app reads calendar configuration and the current week's events,
    including each event's comments. Account-only, password-protected and
