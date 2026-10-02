@@ -331,11 +331,18 @@ impl SetupUi {
     }
 
     pub fn standard_view(&self) -> Element<'_, Message> {
-        let mut content = column![
+        column![
             text("Standardtider").size(20),
             text("Bruges når en vagt ikke har egne tider.").size(13),
+            self.standard_fields(),
         ]
-        .spacing(10);
+        .spacing(10)
+        .into()
+    }
+
+    /// The standard time fields without a heading, for the guide's own.
+    pub fn standard_fields(&self) -> Element<'_, Message> {
+        let mut content = column![].spacing(10);
         content = content
             .push(text("Standardtid for alle dage").size(14))
             .push(
@@ -803,7 +810,7 @@ impl SetupUi {
     }
 
     /// The connection form for the not-yet-connected source.
-    fn source_connection<'a>(&'a self, state: &'a SetupState) -> Element<'a, Message> {
+    pub fn source_connection<'a>(&'a self, state: &'a SetupState) -> Element<'a, Message> {
         let mut content = column![].spacing(8);
         if state.source == "ical" {
             return self.ical_connection();
@@ -1018,17 +1025,8 @@ impl SetupUi {
         if !state.account.is_empty() {
             content = content.push(text(&state.account));
         }
-        if !state.arrangements.is_empty() {
-            content = content.push(text("DUOS SPS-ordning").size(13)).push(
-                pick_list(
-                    state.arrangements.clone(),
-                    find(&state.arrangements, &state.arrangement),
-                    |c: Choice| Message::Action("discover", json!({"arrangement": c.id})),
-                )
-                .placeholder("Vælg ordning")
-                .padding(8)
-                .width(Length::Fixed(280.0)),
-            );
+        if let Some(picker) = arrangement_picker(state) {
+            content = content.push(text("DUOS SPS-ordning").size(13)).push(picker);
         }
         // Registration is always the ordinary type until per-shift choice
         // lands, so the picker only appears as an escape hatch when nothing
@@ -1053,6 +1051,34 @@ impl SetupUi {
             self.collapsed.insert(id.to_owned());
         }
     }
+}
+
+/// The DUOS arrangements found, once there are any. Picking one reads it in
+/// full, like a fresh discovery.
+pub fn arrangement_picker(state: &SetupState) -> Option<Element<'_, Message>> {
+    if state.arrangements.is_empty() {
+        return None;
+    }
+    Some(
+        pick_list(
+            state.arrangements.clone(),
+            find(&state.arrangements, &state.arrangement),
+            |c: Choice| Message::Action("discover", json!({"arrangement": c.id})),
+        )
+        .placeholder("Vælg ordning")
+        .padding(8)
+        .width(Length::Fixed(280.0))
+        .into(),
+    )
+}
+
+/// The name of the chosen DUOS arrangement, if one is chosen.
+pub fn arrangement_name(state: &SetupState) -> Option<&str> {
+    state
+        .arrangements
+        .iter()
+        .find(|choice| choice.id == state.arrangement)
+        .map(|choice| choice.name.as_str())
 }
 
 /// One provider mark beside its name. Icon only, never the full lockup.
