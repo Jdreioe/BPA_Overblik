@@ -144,10 +144,17 @@ impl BrowserSessions {
         let lock = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
+            // Windows locks need read or write access; append alone has neither.
+            .read(true)
             .open(root.join("browser.lock"))
             .map_err(|_| INVALID)?;
-        fs2::FileExt::try_lock_exclusive(&lock)
-            .map_err(|_| LiveError("Appen kører allerede i et andet vindue. Luk det først."))?;
+        fs2::FileExt::try_lock_exclusive(&lock).map_err(|error| {
+            if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() {
+                LiveError("Appen kører allerede i et andet vindue. Luk det først.")
+            } else {
+                INVALID
+            }
+        })?;
         let client = reqwest::Client::builder()
             .no_proxy()
             .timeout(Duration::from_secs(10))
