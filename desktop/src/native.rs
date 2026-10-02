@@ -1599,7 +1599,7 @@ impl NativeApp {
                         | setup::Message::UntimedDay(..)
                         | setup::Message::ShowUntimedDays
                         | setup::Message::OpenTime(_)
-                        | setup::Message::PickTime(..)
+                        | setup::Message::Dial(_)
                 )
             );
         if self.activity != Activity::Idle
@@ -1734,7 +1734,7 @@ impl NativeApp {
                 | setup::Message::UntimedDay(..)
                 | setup::Message::ShowUntimedDays
                 | setup::Message::OpenTime(_)
-                | setup::Message::PickTime(..)),
+                | setup::Message::Dial(_)),
             ) => {
                 if let Some(change) = self.setup.update_untimed(&message) {
                     return self.update(Message::Setup(change));
@@ -2687,14 +2687,29 @@ impl NativeApp {
                 Some(Message::DismissStatus),
             ));
         }
-        iced::widget::stack![
+        let mut layers = iced::widget::stack![
             base,
             container(notices)
                 .align_right(Length::Fill)
                 .align_bottom(Length::Fill)
                 .padding(20),
-        ]
-        .into()
+        ];
+        // An open time picker dims the page, and a click beside it cancels.
+        if let Some(dialog) = self.setup.time_dialog() {
+            let cancel = Message::Setup(setup::Message::Dial(crate::clock::DialMessage::Cancel));
+            layers = layers.push(iced::widget::opaque(
+                iced::widget::mouse_area(
+                    iced::widget::center(iced::widget::opaque(dialog.map(Message::Setup))).style(
+                        |_theme| container::Style {
+                            background: Some(iced::Color::BLACK.scale_alpha(0.5).into()),
+                            ..container::Style::default()
+                        },
+                    ),
+                )
+                .on_press(cancel),
+            ));
+        }
+        layers.into()
     }
 
     /// Vagtplan and Kompensationsydelse as chips, with Support and
@@ -3696,7 +3711,8 @@ mod tests {
     }
     #[test]
     fn a_picked_time_saves_like_a_typed_one_even_during_a_save() {
-        use crate::untimed::{DayMode, Pick, Slot};
+        use crate::clock::DialMessage;
+        use crate::untimed::{DayMode, Slot};
         let mut app = app();
         app.setup.state = Some(setup_state("ready"));
         let _ = app.update(Message::Setup(setup::Message::UntimedOn(true)));
@@ -3709,15 +3725,24 @@ mod tests {
             end: true,
         };
         let _ = app.update(Message::Setup(setup::Message::OpenTime(Some(end))));
-        let _ = app.update(Message::Setup(setup::Message::PickTime(
-            end,
-            Pick::Hour(22),
-        )));
-        assert_eq!(app.setup.standard_default, "08:00-22:00");
-        assert_eq!(app.setup.open_time, Some(end));
+        assert_eq!(app.setup.open_time.map(|(slot, _)| slot), Some(end));
+        let _ = app.view();
+        for message in [
+            DialMessage::Hour {
+                hour: 22,
+                next: true,
+            },
+            DialMessage::Minute(30),
+        ] {
+            let _ = app.update(Message::Setup(setup::Message::Dial(message)));
+        }
+        // Nothing saves until OK.
+        assert_eq!(app.setup.standard_default, "08:00-16:00");
+        let _ = app.update(Message::Setup(setup::Message::Dial(DialMessage::Confirm)));
+        assert_eq!(app.setup.standard_default, "08:00-22:30");
+        assert_eq!(app.setup.open_time, None);
         let _ = app.update(Message::Setup(setup::Message::UntimedDay(6, DayMode::Off)));
         assert_eq!(app.setup.standard_days[6], "ingen");
-        assert_eq!(app.setup.open_time, None);
         assert_eq!(app.standard_revision, 3);
         assert!(app.setup.standard_times().validate().is_ok());
     }
