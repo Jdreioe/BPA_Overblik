@@ -117,6 +117,19 @@ browser can be opened, the file is still written and the app says to send it.
 which records the field types the two services return, without any values. It is
 the same capture the CLI writes.
 
+Login is the only time a service browser has a window. **Check forbindelse**
+on a working login closes that window and checks the same profile again in the
+background, and every later read runs headless. MitHF signs in with a session
+cookie (`vp_sess`), which a browser drops when its window closes, so closing
+the login window used to log the person out. While a login window is open, and
+after every successful check, the app sets the service's own session cookies
+again with a 30-day expiry, so the browser keeps them. The value, path and
+host-only scope are unchanged, and other sites' cookies are untouched. MitHF
+still decides when the login ends; a read that then finds no login says
+»Du er ikke logget ind i MitHF« and asks for **Log ind**, instead of asking to
+finish a login in a browser that is not shown. DUOS keeps its login in the
+page's storage, which survives either way.
+
 The native workflow uses the same separate browser profiles as the Rust CLI.
 Only one native browser owner can run at a time. Browsers belong to that
 window and close when it exits. This mode does not download a browser.
