@@ -43,27 +43,30 @@ A first launch opens a guide that takes these steps one at a time: connect
 TeamUp, a spreadsheet (Google Sheets, OneDrive, SharePoint, Nextcloud,
 Dropbox, a direct link, or a local `.xlsx`, `.ods` or `.csv`), or an iCal calendar;
 log in to MitHF, optionally enable DUOS,
-map helpers, set standard times, and review the week. The
+map helpers, choose a time for shifts without one, and review the week. The
 [guided setup](docs/guided-setup.md) describes it. Credentials live in the OS credential store;
 setup and sync history live in the per-user application data directory
 (`TEAMUP_SHIFT_SYNC_DATA_DIR` overrides it). Do not commit API keys, `setup.json`
 or browser session data.
 
-In **Indstillinger → Standardtider**, enter a shared shift time such as `6-22` if shifts
-may have no times of their own. Each weekday can use that time, override it
-(for example `8-20`), or say `ingen` to have no standard that day. Leaving the
-shared field empty means there is no standard unless a weekday overrides it.
+In **Indstillinger → Vagter uden tid**, switch on **Giv vagter uden tid en tid**
+and pick a start and end, such as 06:00 to 22:00, if shifts may have no times of
+their own. Each weekday is **Som alle dage**, **Egen tid** (for example 08:00 to
+20:00) or **Ingen tid**. With the switch off, no day has a time unless a weekday
+has its own. The page ends with an example of what a shift without a time
+becomes. The code and `setup.json` still call these standard times; the app no
+longer does, because Danish *standardtid* means winter time.
 All sources use the same rule: a single-day TeamUp or iCal all-day event on a
 confirmed helper calendar, or a Sheets shift with a helper and an empty time
-field, uses that date's standard. A Sheets row with separate start and end cells uses it
-only when both cells are empty. The preview marks these shifts `standardtid`.
+field, uses that date's time. A Sheets row with separate start and end cells uses it
+only when both cells are empty. The preview marks these shifts `uden tid`.
 An unset weekday, a multi-day TeamUp or iCal all-day event, or a clock time invalid
 on a daylight-saving transition requires correction before transfer.
 Marker titles (below) are never shifts. Ordinary timed shifts keep their own hours.
 Valid times save automatically. Changing the setting revokes approval of the
 currently shown week. **Indstillinger** opens on **Hjælpere**, which lists each
 calendar beside the chosen one's MitHF and DUOS person; use the chips at the top
-for **Standardtider**, **Markeringer**, **Fravær**, **Udbydere** and **Kompensation**. Under **Udbydere**, the **Vagtplan**
+for **Vagter uden tid**, **Markeringer**, **Fravær**, **Udbydere** and **Kompensation**. Under **Udbydere**, the **Vagtplan**
 group holds the shift source (only one active at a time) and the **Løn** group
 the MitHF and DUOS services, each with its own login. DUOS registration always
 uses the ordinary shift type.

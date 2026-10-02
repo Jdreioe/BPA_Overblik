@@ -639,7 +639,9 @@ impl Engine {
                 .and_then(|titles| document.set_markers(&titles)),
             "standard_times" => serde_json::from_value(params)
                 .map_err(|_| {
-                    teamup_shift_sync_core::live::LiveError("Standardtiderne kunne ikke læses.")
+                    teamup_shift_sync_core::live::LiveError(
+                        "Tiderne for vagter uden tid kunne ikke læses.",
+                    )
                 })
                 .and_then(|standard| document.set_standard_times(standard)),
             "absences" => {
@@ -1590,8 +1592,15 @@ impl NativeApp {
         let standard_input_during_save = self.activity == Activity::Save
             && matches!(
                 message,
-                Message::Setup(setup::Message::StandardDefault(_))
-                    | Message::Setup(setup::Message::StandardDay(_, _))
+                Message::Setup(
+                    setup::Message::StandardDefault(_)
+                        | setup::Message::StandardDay(_, _)
+                        | setup::Message::UntimedOn(_)
+                        | setup::Message::UntimedDay(..)
+                        | setup::Message::ShowUntimedDays
+                        | setup::Message::OpenTime(_)
+                        | setup::Message::PickTime(..)
+                )
             );
         if self.activity != Activity::Idle
             && !completion
@@ -1720,6 +1729,17 @@ impl NativeApp {
                 | setup::Message::IcalShared(_)
                 | setup::Message::IcalSeparator(_)),
             ) => self.setup.update_ical(&message),
+            Message::Setup(
+                message @ (setup::Message::UntimedOn(_)
+                | setup::Message::UntimedDay(..)
+                | setup::Message::ShowUntimedDays
+                | setup::Message::OpenTime(_)
+                | setup::Message::PickTime(..)),
+            ) => {
+                if let Some(change) = self.setup.update_untimed(&message) {
+                    return self.update(Message::Setup(change));
+                }
+            }
             Message::Setup(setup::Message::StandardDefault(value)) => {
                 self.setup.standard_default = value;
                 self.setup.error = None;
@@ -2998,7 +3018,7 @@ impl NativeApp {
         let mut sections = row![].spacing(8);
         for (section, label) in [
             (SettingsSection::Helpers, "Hjælpere"),
-            (SettingsSection::StandardTimes, "Standardtider"),
+            (SettingsSection::StandardTimes, crate::untimed::NAME),
             (SettingsSection::Markers, "Markeringer"),
             (SettingsSection::Absences, "Fravær"),
             (SettingsSection::Integrations, "Udbydere"),
@@ -3037,7 +3057,7 @@ impl NativeApp {
             ]
             .spacing(12),
             SettingsSection::StandardTimes => {
-                column![self.setup.standard_view().map(Message::Setup)].spacing(12)
+                column![self.setup.untimed_view().map(Message::Setup)].spacing(12)
             }
             SettingsSection::Markers => {
                 column![self.setup.markers_view().map(Message::Setup)].spacing(12)
@@ -3673,6 +3693,33 @@ mod tests {
         assert_eq!(app.activity, Activity::Idle);
         let _ = app.update(Message::AutosaveStandard(1));
         assert_eq!(app.activity, Activity::Save);
+    }
+    #[test]
+    fn a_picked_time_saves_like_a_typed_one_even_during_a_save() {
+        use crate::untimed::{DayMode, Pick, Slot};
+        let mut app = app();
+        app.setup.state = Some(setup_state("ready"));
+        let _ = app.update(Message::Setup(setup::Message::UntimedOn(true)));
+        assert_eq!(app.setup.standard_default, "08:00-16:00");
+        assert_eq!(app.standard_revision, 1);
+        // A save is running: the pickers still answer.
+        app.activity = Activity::Save;
+        let end = Slot {
+            day: None,
+            end: true,
+        };
+        let _ = app.update(Message::Setup(setup::Message::OpenTime(Some(end))));
+        let _ = app.update(Message::Setup(setup::Message::PickTime(
+            end,
+            Pick::Hour(22),
+        )));
+        assert_eq!(app.setup.standard_default, "08:00-22:00");
+        assert_eq!(app.setup.open_time, Some(end));
+        let _ = app.update(Message::Setup(setup::Message::UntimedDay(6, DayMode::Off)));
+        assert_eq!(app.setup.standard_days[6], "ingen");
+        assert_eq!(app.setup.open_time, None);
+        assert_eq!(app.standard_revision, 3);
+        assert!(app.setup.standard_times().validate().is_ok());
     }
     #[test]
     fn an_auto_save_keeps_the_settings_form_mounted() {

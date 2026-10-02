@@ -53,7 +53,7 @@ impl Step {
             Step::Mithf => "MitHF",
             Step::Duos => "DUOS",
             Step::Helpers => "Hjælpere",
-            Step::StandardTimes => "Standardtid",
+            Step::StandardTimes => "Uden tid",
             Step::Done => "Færdig",
         }
     }
@@ -549,9 +549,9 @@ impl Guide {
 
     fn standard_times<'a>(&'a self, ui: &'a SetupUi) -> Column<'a, Message> {
         column![
-            title("Vagter uden tidspunkt"),
-            text("Står nogle vagter uden tider i vagtplanen, f.eks. som heldagsbegivenheder, får de en standardtid. Skriv f.eks. 6-22. Har alle vagter egne tider, kan du springe trinnet over."),
-            ui.standard_fields().map(Message::Setup),
+            title(crate::untimed::NAME),
+            text(crate::untimed::INTRO),
+            ui.untimed_fields().map(Message::Setup),
         ]
     }
 
