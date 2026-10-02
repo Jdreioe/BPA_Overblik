@@ -63,6 +63,15 @@ const DUOS_SESSION: &str = r#"() => localStorage.getItem('role') === 'citizen'
 const MITHF_SESSION: &str = r#"() => [...document.scripts].filter(s => !s.src)
   .some(s => /var TOK=("[^"]*"|'[^']*')/.test(s.textContent))"#;
 
+/// How long the browser keeps a service's session cookie once the app has
+/// kept it. The service still decides when the login itself ends; this only
+/// stops the browser from dropping it when its window closes.
+const KEEP_LOGIN: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+/// How often an open login window's session cookies are kept, so closing the
+/// window right after signing in keeps the login.
+const KEEP_EVERY: Duration = Duration::from_secs(2);
+
 /// Chromium visibility for a launch. Interactive login and its two-factor step
 /// need a window; every other launch reuses the saved profile without one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -93,6 +102,12 @@ impl Service {
         match self {
             Self::Mithf => "https://mithf.handicapformidlingen.dk",
             Self::Duos => "https://mit.duos.dk",
+        }
+    }
+    fn host(self) -> &'static str {
+        match self {
+            Self::Mithf => "mithf.handicapformidlingen.dk",
+            Self::Duos => "mit.duos.dk",
         }
     }
     fn entry(self) -> &'static str {
@@ -228,11 +243,15 @@ impl BrowserSessions {
                     .and_then(|s| s.parse::<u16>().ok())
                     .filter(|p| *p != 0)
                 {
+                    let endpoint = format!("http://127.0.0.1:{port}");
+                    if visibility == Visibility::Window {
+                        tokio::spawn(watch_login(self.client.clone(), endpoint.clone(), service));
+                    }
                     self.sessions.insert(
                         service,
                         Session {
                             child,
-                            endpoint: format!("http://127.0.0.1:{port}"),
+                            endpoint,
                             visibility,
                         },
                     );
@@ -316,7 +335,13 @@ impl BrowserSessions {
             })
             .collect();
         if candidates.len() != 1 {
-            return Err(LiveError("Gennemfør login i browseren. På MitHF skal du vælge Åbn din vagtplan. Behold én kalenderfane pr. tjeneste."));
+            // Without a window there is nothing to complete: the saved login
+            // is gone, and only a new one helps.
+            return Err(match (session.visibility, service) {
+                (Visibility::Window, _) => LiveError("Gennemfør login i browseren. På MitHF skal du vælge Åbn din vagtplan. Behold én kalenderfane pr. tjeneste."),
+                (Visibility::Background, Service::Mithf) => LiveError("Du er ikke logget ind i MitHF. Vælg Log ind i MitHF, og log ind i vinduet."),
+                (Visibility::Background, Service::Duos) => LiveError("Du er ikke logget ind i DUOS. Vælg Log ind i DUOS, og log ind i vinduet."),
+            });
         }
         let socket = text(&candidates[0]["webSocketDebuggerUrl"])?;
         let url = reqwest::Url::parse(socket).map_err(|_| INVALID)?;
@@ -337,7 +362,35 @@ impl BrowserSessions {
             json!({}),
         )
         .await?;
+        // A working login is worth keeping, whichever way it was reached.
+        if let Some(session) = self.sessions.get(&service) {
+            keep_login(&self.client, &session.endpoint, service).await?;
+        }
         Ok(())
+    }
+
+    /// Close a login window whose login works, and go on without one.
+    ///
+    /// The window shuts down cleanly, so the browser writes the kept session
+    /// cookies, and the same profile is checked again in the background. A
+    /// login that did not survive is reported now, while the person is still
+    /// at the screen, rather than on the next read.
+    pub async fn settle(&mut self, service: Service) -> Result<(), LiveError> {
+        let Some(session) = self.sessions.get(&service) else {
+            return Ok(());
+        };
+        if session.visibility != Visibility::Window {
+            return Ok(());
+        }
+        keep_login(&self.client, &session.endpoint, service).await?;
+        if let Ok(socket) = browser_socket(&self.client, &session.endpoint).await {
+            let _ = cdp(&socket, "Browser.close", json!({})).await;
+        }
+        if let Some(mut session) = self.sessions.remove(&service) {
+            let _ = tokio::time::timeout(Duration::from_secs(5), session.child.wait()).await;
+        }
+        self.open(service, Visibility::Background).await?;
+        self.check(service).await
     }
 
     /// Reads only. Nothing reachable from here can change a destination.
@@ -448,6 +501,109 @@ impl BrowserSessions {
             }
             Service::Duos => LiveError("DUOS kunne ikke læses. Log ind i DUOS igen, og prøv igen."),
         })
+    }
+}
+
+/// The browser-wide DevTools socket, for cookies and closing the browser.
+async fn browser_socket(client: &reqwest::Client, endpoint: &str) -> Result<String, LiveError> {
+    let version: Value = client
+        .get(format!("{endpoint}/json/version"))
+        .send()
+        .await
+        .map_err(|_| INVALID)?
+        .json()
+        .await
+        .map_err(|_| INVALID)?;
+    let socket = text(&version["webSocketDebuggerUrl"])?;
+    let url = reqwest::Url::parse(socket).map_err(|_| INVALID)?;
+    if url.scheme() != "ws" || !matches!(url.host_str(), Some("127.0.0.1" | "localhost")) {
+        return Err(INVALID);
+    }
+    Ok(socket.into())
+}
+
+/// Give the service's session cookies an expiry, so the browser keeps them
+/// when it closes.
+///
+/// MitHF signs in with a session cookie, which a browser drops when its last
+/// window closes. Closing the login window would then log the person out, and
+/// every later read, which runs without a window, would find no login. DUOS
+/// keeps its login in the page's storage, which survives either way.
+async fn keep_login(
+    client: &reqwest::Client,
+    endpoint: &str,
+    service: Service,
+) -> Result<(), LiveError> {
+    let socket = browser_socket(client, endpoint).await?;
+    let cookies = cdp(&socket, "Storage.getCookies", json!({})).await?;
+    let kept = kept_cookies(&cookies["cookies"], service, KEEP_LOGIN);
+    if !kept.is_empty() {
+        cdp(&socket, "Storage.setCookies", json!({ "cookies": kept })).await?;
+    }
+    Ok(())
+}
+
+/// The service's session cookies, set again with an expiry. Every other
+/// cookie, and every cookie of another site, is left as it is. A host-only
+/// cookie is set through its address, so it stays host-only instead of
+/// gaining a second copy for the whole domain.
+fn kept_cookies(cookies: &Value, service: Service, keep: Duration) -> Vec<Value> {
+    let host = service.host();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let expires = (now + keep).as_secs_f64();
+    cookies
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter(|cookie| cookie["session"] == json!(true))
+        .filter_map(|cookie| {
+            let domain = cookie["domain"].as_str()?;
+            let ours = match domain.strip_prefix('.') {
+                Some(parent) => host == parent || host.ends_with(&format!(".{parent}")),
+                None => host == domain,
+            };
+            if !ours {
+                return None;
+            }
+            let path = cookie["path"].as_str().unwrap_or("/");
+            let mut kept = json!({
+                "name": cookie["name"],
+                "value": cookie["value"],
+                "path": path,
+                "secure": cookie["secure"],
+                "httpOnly": cookie["httpOnly"],
+                "expires": expires,
+            });
+            if domain.starts_with('.') {
+                kept["domain"] = json!(domain);
+            } else {
+                kept["url"] = json!(format!("https://{domain}{path}"));
+            }
+            if let Some(same_site) = cookie.get("sameSite") {
+                kept["sameSite"] = same_site.clone();
+            }
+            Some(kept)
+        })
+        .collect()
+}
+
+/// Keep an open login window's session cookies until the window closes. A
+/// closed browser stops answering, which ends the watch.
+async fn watch_login(client: reqwest::Client, endpoint: String, service: Service) {
+    loop {
+        tokio::time::sleep(KEEP_EVERY).await;
+        if client
+            .get(format!("{endpoint}/json/version"))
+            .send()
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let _ = keep_login(&client, &endpoint, service).await;
     }
 }
 
@@ -628,7 +784,36 @@ fn linux_browsers() -> Vec<(&'static str, PathBuf)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{write_allowed, Service};
+    use super::{kept_cookies, write_allowed, Service};
+    use serde_json::json;
+    use std::time::Duration;
+
+    #[test]
+    fn only_the_services_own_session_cookies_are_kept_and_host_only_stays_host_only() {
+        let cookies = json!([
+            {"name": "vp_sess", "value": "s", "domain": "mithf.handicapformidlingen.dk",
+             "path": "/", "secure": true, "httpOnly": true, "session": true, "sameSite": "Lax"},
+            {"name": "wide", "value": "w", "domain": ".handicapformidlingen.dk",
+             "path": "/x", "secure": true, "httpOnly": false, "session": true},
+            {"name": "remembered", "value": "r", "domain": "mithf.handicapformidlingen.dk",
+             "path": "/", "secure": true, "httpOnly": true, "session": false},
+            {"name": "lookalike", "value": "l", "domain": ".formidlingen.dk",
+             "path": "/", "secure": true, "httpOnly": false, "session": true},
+            {"name": "ARRAffinity", "value": "a", "domain": ".mit.duos.dk",
+             "path": "/", "secure": true, "httpOnly": true, "session": true},
+        ]);
+        let kept = kept_cookies(&cookies, Service::Mithf, Duration::from_secs(60));
+        let names: Vec<_> = kept.iter().map(|c| c["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["vp_sess", "wide"]);
+        // Host-only by address, a domain cookie by its domain.
+        assert_eq!(kept[0]["url"], "https://mithf.handicapformidlingen.dk/");
+        assert!(kept[0].get("domain").is_none());
+        assert_eq!(kept[0]["sameSite"], "Lax");
+        assert_eq!(kept[1]["domain"], ".handicapformidlingen.dk");
+        assert!(kept[1].get("url").is_none());
+        assert!(kept.iter().all(|c| c["expires"].as_f64().unwrap() > 1.7e9));
+        assert!(kept_cookies(&json!(null), Service::Mithf, Duration::ZERO).is_empty());
+    }
 
     #[test]
     fn forgetting_a_login_removes_only_that_service_profile() {

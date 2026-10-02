@@ -753,10 +753,13 @@ impl Engine {
         }
         Ok(guard)
     }
+    /// Check one login. A login made in a window then goes on without it:
+    /// the window closes, and the saved login is checked in the background.
     async fn check_service(&self, service: Service) -> Result<()> {
-        let guard = self.sessions_for(&[service]).await?;
-        let browser = guard.as_ref().ok_or("Log ind først.")?;
-        browser.check(service).await.map_err(|e| e.to_string())
+        let mut guard = self.sessions_for(&[service]).await?;
+        let browser = guard.as_mut().ok_or("Log ind først.")?;
+        browser.check(service).await.map_err(|e| e.to_string())?;
+        browser.settle(service).await.map_err(|e| e.to_string())
     }
     /// Record what MitHF and DUOS actually send, for checking the readers'
     /// assumptions. Types only: the file holds no shift, helper or account
