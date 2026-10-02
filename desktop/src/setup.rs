@@ -95,8 +95,15 @@ pub enum Message {
     Link(String),
     Key(String),
     Template(template::Message),
+    /// A new common or weekday time for shifts without one, as the text the
+    /// core reads. The pickers below produce these.
     StandardDefault(String),
     StandardDay(usize, String),
+    UntimedOn(bool),
+    UntimedDay(usize, crate::untimed::DayMode),
+    ShowUntimedDays,
+    OpenTime(Option<crate::untimed::Slot>),
+    PickTime(crate::untimed::Slot, crate::untimed::Pick),
     MarkerDraft(String),
     AddMarker,
     RemoveMarker(usize),
@@ -156,16 +163,6 @@ const MITHF_ICON: &[u8] = include_bytes!("../assets/mithf-icon.png");
 /// Stable input ids. Iced tracks focus by widget position, so an error line
 /// appearing under a field would otherwise move every field and drop focus
 /// on each keystroke.
-const STANDARD_DEFAULT_ID: &str = "standard-falles";
-const STANDARD_DAY_IDS: [&str; 7] = [
-    "standard-mandag",
-    "standard-tirsdag",
-    "standard-onsdag",
-    "standard-torsdag",
-    "standard-fredag",
-    "standard-lordag",
-    "standard-sondag",
-];
 const SOURCE_LINK_ID: &str = "source-link";
 const ICAL_SEPARATOR_ID: &str = "ical-separator";
 const MARKER_DRAFT_ID: &str = "marker-draft";
@@ -188,11 +185,19 @@ pub struct SetupUi {
     pub sheet_file: Option<String>,
     /// The workbook tab picked from [`SetupState::sheet_tabs`].
     pub sheet_tab: Option<String>,
-    /// Why the typed standard times cannot be saved. Shown beside the fields;
-    /// action results and errors go to the app's status notice instead.
+    /// Why the picked times for shifts without one cannot be saved. Shown
+    /// beside the fields; action results and errors go to the app's status
+    /// notice instead.
     pub error: Option<String>,
+    /// The time for shifts without one, as the core reads it: a range, or
+    /// empty for none. Each weekday is empty to follow it, `ingen` for none,
+    /// or its own range.
     pub standard_default: String,
     pub standard_days: [String; 7],
+    /// The open time picker, if any.
+    pub open_time: Option<crate::untimed::Slot>,
+    /// The weekday list was asked for while no day has a time yet.
+    pub untimed_days_open: bool,
     /// A marker title being typed, not saved until added.
     pub marker_draft: String,
     /// Each absence reason's words as typed, comma separated, in
@@ -328,55 +333,6 @@ impl SetupUi {
                 .ok_or_else(|| "Indsæt en vagt fra regnearket først.".to_owned()),
             None => Err("Vælg vagtens celler først.".to_owned()),
         }
-    }
-
-    pub fn standard_view(&self) -> Element<'_, Message> {
-        column![
-            text("Standardtider").size(20),
-            text("Bruges når en vagt ikke har egne tider.").size(13),
-            self.standard_fields(),
-        ]
-        .spacing(10)
-        .into()
-    }
-
-    /// The standard time fields without a heading, for the guide's own.
-    pub fn standard_fields(&self) -> Element<'_, Message> {
-        let mut content = column![].spacing(10);
-        content = content
-            .push(text("Standardtid for alle dage").size(14))
-            .push(
-                text_input("F.eks. 6-22", &self.standard_default)
-                    .id(iced::widget::Id::new(STANDARD_DEFAULT_ID))
-                    .on_input(Message::StandardDefault)
-                    .padding(10),
-            )
-            .push(
-                text("Lad en dag stå tom for at bruge tiden ovenfor. Skriv »ingen« for ingen standardtid.")
-                    .size(12),
-            );
-        for (index, day) in [
-            "Mandag", "Tirsdag", "Onsdag", "Torsdag", "Fredag", "Lørdag", "Søndag",
-        ]
-        .iter()
-        .enumerate()
-        {
-            content = content.push(
-                row![
-                    text(*day).width(Length::Fixed(90.0)),
-                    text_input("Brug tiden ovenfor", &self.standard_days[index])
-                        .id(iced::widget::Id::new(STANDARD_DAY_IDS[index]))
-                        .on_input(move |value| Message::StandardDay(index, value))
-                        .padding(10)
-                        .width(Length::Fixed(200.0)),
-                ]
-                .spacing(10),
-            );
-        }
-        content
-            .push(text(self.error.as_deref().unwrap_or("")).size(13))
-            .push(text("Gyldige tider gemmes automatisk.").size(12))
-            .into()
     }
 
     /// Show the absence words of a state about to replace `self.state`,
@@ -1105,7 +1061,10 @@ fn primary_button<'a>(label: &'a str, message: Message) -> iced::widget::Button<
 
 /// Low-emphasis setup action. Outlined like the quiet buttons in `native.rs`,
 /// so a row of them reads as buttons rather than as labels.
-fn quiet_button<'a>(label: &'a str, message: Message) -> iced::widget::Button<'a, Message> {
+pub(crate) fn quiet_button<'a>(
+    label: &'a str,
+    message: Message,
+) -> iced::widget::Button<'a, Message> {
     button(text(label).size(14))
         .style(crate::widgets::outlined)
         .padding([7, 12])

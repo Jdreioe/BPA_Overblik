@@ -1,4 +1,7 @@
 //! Optional shift hours shared by TeamUp all-day events and undated sheet times.
+//!
+//! The app calls these »Vagter uden tid«: the setting is named after the
+//! shifts it applies to, because Danish »standardtid« is winter time.
 
 use std::collections::BTreeMap;
 
@@ -9,6 +12,30 @@ use serde::{Deserialize, Serialize};
 use crate::sheets::{interval, split_range};
 
 const DAYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+
+/// The Danish weekday of `date`, lower case, for messages such as »om
+/// mandagen«.
+pub fn weekday_da(date: NaiveDate) -> &'static str {
+    [
+        "mandag", "tirsdag", "onsdag", "torsdag", "fredag", "lørdag", "søndag",
+    ][date.weekday().num_days_from_monday() as usize]
+}
+
+/// Why a shift without a time has none: no time is chosen for its weekday.
+pub fn missing_message(shift: &str, date: NaiveDate) -> String {
+    format!(
+        "{shift} har ingen tid, og der er ikke valgt en tid for vagter uden tid om {}en. Vælg en under Indstillinger → Vagter uden tid.",
+        weekday_da(date)
+    )
+}
+
+/// Why a shift without a time cannot take the chosen one: the clock changes
+/// that night, so the time is missing or there twice.
+pub fn clock_change_message(shift: &str) -> String {
+    format!(
+        "{shift} har ingen tid, og tiden for vagter uden tid kan ikke bruges den dag, fordi uret stilles om. Giv vagten egne tider."
+    )
+}
 
 pub type StandardInterval = (DateTime<FixedOffset>, DateTime<FixedOffset>);
 
@@ -36,11 +63,11 @@ impl StandardTimes {
                 .is_some()
         };
         if !self.everyday.is_empty() && !valid(&self.everyday) {
-            return Err("Skriv standardtiden som 8-24 eller 08:30-16:00.");
+            return Err("Tiden for vagter uden tid kan ikke læses. Vælg den igen.");
         }
         for (day, value) in &self.weekdays {
             if !DAYS.contains(&day.as_str()) || value.as_deref().is_some_and(|v| !valid(v)) {
-                return Err("En ugedags standardtid er ugyldig. Brug 8-24 eller 08:30-16:00.");
+                return Err("En ugedags tid for vagter uden tid kan ikke læses. Vælg den igen.");
             }
         }
         Ok(())
@@ -61,7 +88,7 @@ impl StandardTimes {
         let (start, end) = split_range(value);
         interval(date, start, end, zone)
             .map(Some)
-            .ok_or("Standardtiden kan ikke bruges på denne dato på grund af sommertid.")
+            .ok_or("Tiden for vagter uden tid kan ikke bruges den dag, fordi uret stilles om.")
     }
 }
 

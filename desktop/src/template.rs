@@ -57,10 +57,10 @@ impl Field {
     }
 
     /// The button for an optional field the shift does not have. A shift
-    /// without a time takes the standard time.
+    /// without a time takes the time chosen under Vagter uden tid.
     fn skip(self) -> &'static str {
         match self {
-            Field::Time => "Ingen tid – brug standardtid",
+            Field::Time => "Arket har ingen tider",
             Field::Sps => "Ingen SPS",
             _ => "Ingen titel",
         }

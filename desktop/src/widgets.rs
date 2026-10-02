@@ -343,6 +343,75 @@ pub fn date_picker<'a, M: Clone + 'a>(
         .into()
 }
 
+/// Width of one hour or minute in [`clock_panel`].
+const CLOCK_WIDTH: f32 = 34.0;
+
+/// A clock time as a button with a ▾, like [`date_picker`]'s field. Pressing
+/// it opens or closes its [`clock_panel`].
+pub fn time_field<'a, M: Clone + 'a>((hour, minute): (u32, u32), toggle: M) -> Element<'a, M> {
+    button(text(format!("{hour:02}:{minute:02}  ▾")))
+        .style(outlined)
+        .padding([8, 12])
+        .on_press(toggle)
+        .into()
+}
+
+/// The hours and the minutes, every five, of an open [`time_field`]. The
+/// caller closes it when the minutes are picked, so an hour can come first.
+/// It goes under the row of fields, so opening it moves nothing sideways.
+pub fn clock_panel<'a, M: Clone + 'a>(
+    (hour, minute): (u32, u32),
+    on_hour: impl Fn(u32) -> M,
+    on_minute: impl Fn(u32) -> M,
+) -> Element<'a, M> {
+    let grid = |values: Vec<u32>, per_row: usize, chosen: u32, on_pick: &dyn Fn(u32) -> M| {
+        let mut rows = column![];
+        for line in values.chunks(per_row) {
+            let mut cells = row![];
+            for &value in line {
+                cells = cells.push(
+                    button(
+                        text(format!("{value:02}"))
+                            .size(13)
+                            .width(Length::Fill)
+                            .align_x(iced::alignment::Horizontal::Center),
+                    )
+                    .width(Length::Fixed(CLOCK_WIDTH))
+                    .padding([4, 0])
+                    .style(move |theme, status| {
+                        if value == chosen {
+                            button::primary(theme, status)
+                        } else {
+                            button::text(theme, status)
+                        }
+                    })
+                    .on_press(on_pick(value)),
+                );
+            }
+            rows = rows.push(cells);
+        }
+        rows
+    };
+    // A minute off the five-minute steps, from a time typed before, stays
+    // pickable.
+    let mut minutes: Vec<u32> = (0..60).step_by(5).collect();
+    if !minutes.contains(&minute) {
+        minutes.push(minute);
+        minutes.sort_unstable();
+    }
+    let label = |value: &'static str| text(value).size(12).width(Length::Fixed(50.0));
+    container(
+        column![
+            row![label("Time"), grid((0..24).collect(), 12, hour, &on_hour)],
+            row![label("Minut"), grid(minutes, 12, minute, &on_minute)],
+        ]
+        .spacing(8),
+    )
+    .padding(8)
+    .style(group_box)
+    .into()
+}
+
 fn group_box(theme: &iced::Theme) -> container::Style {
     let palette = theme.extended_palette();
     container::Style {
@@ -528,7 +597,7 @@ fn block_body<'a, M: 'a>(block: &'a Block) -> Element<'a, M> {
         marks.push("✚ fravær");
     }
     if block.standard_time {
-        marks.push("standardtid");
+        marks.push("uden tid");
     }
     if !block.part_label.is_empty() {
         marks.push(&block.part_label);
@@ -572,9 +641,6 @@ pub fn shift_details<'a, M: 'a>(block: &'a Block) -> Element<'a, M> {
     if !block.part_label.is_empty() {
         facts.push(&block.part_label);
     }
-    if block.standard_time {
-        facts.push("standardtid");
-    }
     let mut lines = column![
         text(&block.helper).size(16).font(iced::Font {
             weight: iced::font::Weight::Bold,
@@ -583,6 +649,12 @@ pub fn shift_details<'a, M: 'a>(block: &'a Block) -> Element<'a, M> {
         text(facts.join(" · ")).size(13),
     ]
     .spacing(4);
+    if block.standard_time {
+        lines = lines.push(
+            text("Vagten har ingen tid i vagtplanen. Tiden kommer fra Indstillinger → Vagter uden tid.")
+                .size(13),
+        );
+    }
     if !block.sps_label.is_empty() {
         lines = lines.push(text(format!("SPS {}", block.sps_label)).size(13));
     }

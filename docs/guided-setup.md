@@ -9,7 +9,7 @@ A launch without a confirmed setup opens a guide, **Opsætning**, instead of
 Indstillinger. A fresh install starts on a welcome page that says what is
 needed. A setup left halfway opens on the first step that is not done. A row
 of chips shows the five steps, **Vagtplan**, **MitHF**, **DUOS**, **Hjælpere**
-and **Standardtid**, with ✓ once each is done. A step can be opened once every
+and **Uden tid**, with ✓ once each is done. A step can be opened once every
 step before it is done, and **Næste** says what is still missing.
 
 | Step | Done when |
@@ -18,7 +18,7 @@ step before it is done, and **Næste** says what is still missing.
 | MitHF: **Log ind i MitHF**, then **Check forbindelse**. | The check succeeded in this session, or helpers were already read. |
 | DUOS: **Ja** or **Nej**. With **Ja**, log in and check DUOS; the check reads the arrangements, and more than one asks for a choice. | DUOS is off, or an arrangement is chosen. |
 | Hjælpere: the same list as Indstillinger → Hjælpere, fetched on arrival. | The setup is confirmed. |
-| Standardtid: the same fields as Indstillinger → Standardtider. | Optional: **Spring over**. |
+| Uden tid: the same fields as Indstillinger → Vagter uden tid. | Optional: **Spring over**. |
 
 The first three steps move on by themselves when they are done. Hjælpere waits
 for **Næste**, so the list stays put while the last choice is checked. The last
@@ -116,8 +116,8 @@ once the one before is done. In step 2, copy the cells of one filled shift
 choose **Indsæt vagt**. The app then asks one question at a time, such as
 "Hvor står datoen?", answered by clicking the cell. SPS hours and a title such
 as `P-MØDE` can be answered with **Ingen SPS** or **Ingen titel**. A sheet
-that holds only the helper answers the time with **Ingen tid – brug
-standardtid**, and every shift takes the standard time. If the time cell holds
+that holds only the helper answers the time with **Arket har ingen tider**, and
+every shift takes the time under **Vagter uden tid**. If the time cell holds
 only a start time, the app also asks for the end time. **Start
 forfra** goes back to pasting. A workbook with several tabs asks for one in
 step 3.
@@ -203,30 +203,45 @@ occurrence it replaces, so editing or moving an occurrence updates the same
 shift. The event description is read as the shift's notes, including SPS
 instructions.
 
-An all-day event on one date uses that date's standard time, like in TeamUp.
+An all-day event on one date uses that date's time under **Vagter uden tid**,
+like in TeamUp.
 A multi-day all-day event, an event that ends when it starts, a time that
 does not exist or exists twice at a daylight-saving change, or an event that
 cannot be read blocks every week it touches, with a message naming the helper
 and date. Other weeks still work.
 
-## Standard shift time
+## Vagter uden tid
 
-Under **Indstillinger → Standardtider**, enter a common time such as `6-22` for days where a
-shift has no hours of its own. Leave a weekday field empty to inherit that
-time, enter another range to override it, or enter `ingen` to clear it for that
-weekday. The common field may be empty if only some weekdays need a standard.
-Ranges accept `8-24`, `08:30-16:00`, and overnight hours such as `22-8`.
+The setting was called *Standardtider*. Danish *standardtid* means winter time,
+and the name did not say which shifts it is for, so the app now names it after
+them. The code and `setup.json` keep the old name, and saved times are read
+unchanged.
+
+Under **Indstillinger → Vagter uden tid**, switch on **Giv vagter uden tid en
+tid** and pick a start and end for days where a shift has no hours of its own.
+A time button opens its hours and then its minutes, every five; picking the
+minutes closes it. An end at or before the start is the next day, and the row
+says how long the shift is, such as `10 timer, slutter næste dag`. Each weekday
+is **Som alle dage**, **Egen tid** with its own pickers, or **Ingen tid**. With
+the switch off, **Vælg en tid for enkelte ugedage** shows the weekdays, so only
+some days can have a time. A card shows what »Anna« without a time becomes on
+the first day that has one, or says that such a shift cannot be transferred.
+The picks are saved as the `HH:MM-HH:MM` ranges the core reads. Older typed
+values such as `6-22` or `22.15-8` show in the pickers as they were.
 The app uses Copenhagen local time and refuses ambiguous or nonexistent times
 at daylight-saving changes.
 
 A TeamUp or iCal all-day event on exactly one date and a confirmed helper calendar uses
-that date's standard. A multi-day all-day event needs its own times before the
-week can be transferred. A Sheets shift with a helper and no time uses the
-standard; when start and end are separate cells, both must be empty. A weekday
-without a standard is reported with the shift date. The week preview marks
-every such shift `standardtid`. The ordinary reminder, marker, meeting and SPS
-rules still apply, so an all-day `Ønsker fri` is a marker, not a standard shift. Valid times save automatically, and a changed standard requires a
-fresh week review.
+that date's time. A multi-day all-day event needs its own times before the
+week can be transferred. A Sheets shift with a helper and no time uses it;
+when start and end are separate cells, both must be empty. A weekday without a
+time is reported with the shift, date and weekday, and where to choose one:
+»Annas vagt d. 3/11 har ingen tid, og der er ikke valgt en tid for vagter uden
+tid om tirsdagen. Vælg en under Indstillinger → Vagter uden tid.« The week
+preview marks every such shift `uden tid`, and the selected shift's details
+say where its time came from. The ordinary reminder, marker, meeting and SPS
+rules still apply, so an all-day `Ønsker fri` is a marker, not a shift without
+a time. Picks save at once, and a changed time requires a fresh week review.
 A shift's identity is its date. Editing cells in place updates the same
 shift. Moving a shift to another date is treated like deleting and
 recreating a TeamUp event: the new position is a new shift, and the app never
