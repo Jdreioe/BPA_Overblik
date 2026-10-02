@@ -219,8 +219,11 @@ unchanged.
 
 Under **Indstillinger → Vagter uden tid**, switch on **Giv vagter uden tid en
 tid** and pick a start and end for days where a shift has no hours of its own.
-A time button opens its hours and then its minutes, every five; picking the
-minutes closes it. An end at or before the start is the next day, and the row
+A time button opens a dialog like Android's time picker: the time in large
+digits over a round dial with 0 to 11 outside and 12 to 23 inside. Picking an
+hour moves on to the minutes; a click picks them in fives and a drag any
+minute. Digits can be typed, and nothing saves until **OK**. **Annuller**,
+Escape or a click beside the dialog keeps the saved time. An end at or before the start is the next day, and the row
 says how long the shift is, such as `10 timer, slutter næste dag`. Each weekday
 is **Som alle dage**, **Egen tid** with its own pickers, or **Ingen tid**. With
 the switch off, **Vælg en tid for enkelte ugedage** shows the weekdays, so only
