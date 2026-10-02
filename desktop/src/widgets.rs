@@ -650,10 +650,7 @@ pub fn shift_details<'a, M: 'a>(block: &'a Block) -> Element<'a, M> {
     ]
     .spacing(4);
     if block.standard_time {
-        lines = lines.push(
-            text("Vagten har ingen tid i vagtplanen. Tiden kommer fra Indstillinger → Vagter uden tid.")
-                .size(13),
-        );
+        lines = lines.push(text("Tid fra Vagter uden tid.").size(13));
     }
     if !block.sps_label.is_empty() {
         lines = lines.push(text(format!("SPS {}", block.sps_label)).size(13));

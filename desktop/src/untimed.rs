@@ -16,7 +16,8 @@ use crate::setup::{Message, SetupUi};
 pub const NAME: &str = "Vagter uden tid";
 
 /// What the setting does, in the user's own terms.
-pub const INTRO: &str = "Står en vagt i vagtplanen uden klokkeslæt, fx en heldagsbegivenhed »Anna« i TeamUp eller en tom tidscelle i regnearket, overføres den med tiden her. Har alle dine vagter egne tider, kan du lade det være slået fra.";
+pub const INTRO: &str =
+    "Tiden en vagt får, når den står uden klokkeslæt, fx som heldagsbegivenhed.";
 
 /// The range a newly switched-on time starts from.
 const FIRST_RANGE: Range = Range {
@@ -175,9 +176,7 @@ impl SetupUi {
         if let Some(error) = &self.error {
             content = content.push(text(error).size(13));
         }
-        content
-            .push(text("Ændringer gemmes med det samme.").size(12))
-            .into()
+        content.into()
     }
 
     fn weekdays(&self, common: Option<Range>) -> Column<'_, Message> {
@@ -257,10 +256,10 @@ impl SetupUi {
         });
         match found {
             Some((day, range)) => format!(
-                "Eksempel: Står »Anna« uden tid i vagtplanen en {day}, overføres vagten som Anna {}.",
+                "Eksempel: »Anna« uden tid en {day} bliver Anna {}.",
                 range.label()
             ),
-            None => "Lige nu kan en vagt uden tid ikke overføres. Ugen viser den som en advarsel, så du kan give den en tid i vagtplanen.".into(),
+            None => "Slået fra: en vagt uden tid vises som en advarsel.".into(),
         }
     }
 
@@ -433,13 +432,9 @@ mod tests {
     #[test]
     fn the_example_names_the_first_day_with_a_time_or_says_there_is_none() {
         let mut ui = SetupUi::default();
-        assert!(ui
-            .example()
-            .starts_with("Lige nu kan en vagt uden tid ikke"));
+        assert!(ui.example().starts_with("Slået fra"));
         ui.standard_days[5] = "8-20".into();
-        assert!(ui
-            .example()
-            .contains("en lørdag, overføres vagten som Anna 08:00–20:00"));
+        assert!(ui.example().contains("en lørdag bliver Anna 08:00–20:00"));
         ui.standard_default = "6-22".into();
         ui.standard_days[0] = "ingen".into();
         assert!(ui.example().contains("en tirsdag"));

@@ -225,7 +225,7 @@ says how long the shift is, such as `10 timer, slutter næste dag`. Each weekday
 is **Som alle dage**, **Egen tid** with its own pickers, or **Ingen tid**. With
 the switch off, **Vælg en tid for enkelte ugedage** shows the weekdays, so only
 some days can have a time. A card shows what »Anna« without a time becomes on
-the first day that has one, or says that such a shift cannot be transferred.
+the first day that has one, or that such a shift is shown as a warning.
 The picks are saved as the `HH:MM-HH:MM` ranges the core reads. Older typed
 values such as `6-22` or `22.15-8` show in the pickers as they were.
 The app uses Copenhagen local time and refuses ambiguous or nonexistent times
@@ -239,7 +239,7 @@ time is reported with the shift, date and weekday, and where to choose one:
 »Annas vagt d. 3/11 har ingen tid, og der er ikke valgt en tid for vagter uden
 tid om tirsdagen. Vælg en under Indstillinger → Vagter uden tid.« The week
 preview marks every such shift `uden tid`, and the selected shift's details
-say where its time came from. The ordinary reminder, marker, meeting and SPS
+say »Tid fra Vagter uden tid«. The ordinary reminder, marker, meeting and SPS
 rules still apply, so an all-day `Ønsker fri` is a marker, not a shift without
 a time. Picks save at once, and a changed time requires a fresh week review.
 A shift's identity is its date. Editing cells in place updates the same
