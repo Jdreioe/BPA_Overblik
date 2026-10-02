@@ -11,6 +11,7 @@ mod native;
 mod selfcheck;
 mod setup;
 mod template;
+mod untimed;
 mod update;
 mod widgets;
 

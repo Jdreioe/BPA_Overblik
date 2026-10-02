@@ -257,15 +257,20 @@ fn use_standard_time(
             date.format("%d/%m")
         )));
     }
-    let interval = standard.on(date, zone)
-        .map_err(|_| SourceReadError::Review(format!(
-            "Standardtiden d. {} kan ikke bruges på grund af sommertid. Ret tiden før overførsel.",
-            date.format("%d/%m")
-        )))?
-        .ok_or_else(|| SourceReadError::Review(format!(
-            "TeamUp-vagten d. {} mangler en standardtid for denne ugedag. Tilføj en tid i Indstillinger før overførsel.",
-            date.format("%d/%m")
-        )))?;
+    let interval = standard
+        .on(date, zone)
+        .map_err(|_| {
+            SourceReadError::Review(crate::standard_time::clock_change_message(&format!(
+                "TeamUp-vagten d. {}",
+                date.format("%d/%m")
+            )))
+        })?
+        .ok_or_else(|| {
+            SourceReadError::Review(crate::standard_time::missing_message(
+                &format!("TeamUp-vagten d. {}", date.format("%d/%m")),
+                date,
+            ))
+        })?;
     shift.starts_at = interval.0;
     shift.ends_at = interval.1;
     shift.standard_time = true;
