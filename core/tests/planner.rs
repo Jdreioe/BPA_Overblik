@@ -303,3 +303,79 @@ fn planning_preserves_recovery_records_and_rejects_corrupt_state() {
         Err(PlanningError::State(_))
     ));
 }
+
+#[test]
+fn a_shift_naming_several_helpers_waits_for_the_app_and_ignores_the_sources_notes() {
+    use serde_json::json;
+    use teamup_shift_sync_core::{Outcome, SourceComment};
+
+    let config: PlanningConfig = serde_json::from_value(json!({
+        "timezone": "Europe/Copenhagen", "default_helper_count": 1,
+        "duos_arrangement_id": "arrangement", "duos_registration_type": "Almindelig",
+        "helpers": {
+            "anna": {"mithf_name": "Anna", "duos_employee_number": "1"},
+            "bo": {"mithf_name": "Bo", "duos_employee_number": "2"}
+        }
+    }))
+    .unwrap();
+    let shared: SourceShift = serde_json::from_value(json!({
+        "calendar_id": "sheet", "event_id": "one", "occurrence_id": "one",
+        "title": "Vagt", "helper_key": "Anna / Bo", "notes": "uni 10-12\nsyg: Bo",
+        "starts_at": "2026-11-02T08:00:00+01:00",
+        "ends_at": "2026-11-02T16:00:00+01:00"
+    }))
+    .unwrap();
+    let state = SyncState::open(":memory:").unwrap();
+    let plan = |shifts: &[SourceShift]| {
+        build_plan(
+            &PlanRequest {
+                config: &config,
+                shifts,
+                destination: &DestinationSnapshot::default(),
+                range_start: DateTime::parse_from_rfc3339("2026-11-02T00:00:00+01:00").unwrap(),
+                range_end: DateTime::parse_from_rfc3339("2026-11-03T00:00:00+01:00").unwrap(),
+                now: DateTime::parse_from_rfc3339("2026-11-01T12:00:00+01:00").unwrap(),
+                live: true,
+            },
+            &state,
+        )
+        .unwrap()
+    };
+    let mut shifts = shared.for_helpers(&["anna".into(), "bo".into()]);
+
+    // Until each part is checked in the app, it only asks for that.
+    let waiting = plan(&shifts);
+    assert_eq!(waiting.items.len(), 2);
+    assert!(waiting
+        .items
+        .iter()
+        .all(|item| item.outcome == Outcome::Review && item.reason == "shared_shift"));
+
+    // Checked, the source's SPS and absence lines are not anyone's; SPS
+    // added in the app is that helper's own.
+    for shift in &mut shifts {
+        shift.confirmed = true;
+    }
+    shifts[1].comments.push(SourceComment {
+        id: "app".into(),
+        text: "uni 2026-11-02 13:00-14:00".into(),
+        updated_at: None,
+    });
+    let checked = plan(&shifts);
+    assert!(checked
+        .items
+        .iter()
+        .all(|item| item.outcome == Outcome::WouldCreate));
+    let duos: Vec<_> = checked
+        .items
+        .iter()
+        .filter(|item| item.system == PlanSystem::Duos)
+        .map(|item| {
+            (
+                item.payload["employee_number"].clone(),
+                item.payload["starts_at"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(duos, [(json!("2"), json!("2026-11-02T13:00:00+01:00"))]);
+}

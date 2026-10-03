@@ -338,6 +338,7 @@ fn shift_edit(key: &str, starts_at: &str) -> ShiftEdit {
             },
             helper_key: "anna".into(),
             text: "digest".into(),
+            shared_with: vec![],
         },
         times: Some((at(starts_at), at("2026-09-15T17:00:00+02:00"))),
         helper_key: Some("bo".into()),
@@ -349,6 +350,7 @@ fn shift_edit(key: &str, starts_at: &str) -> ShiftEdit {
             reason: AbsenceReason::ChildIllness,
             substitute: "bo".into(),
         }),
+        confirmed: false,
     }
 }
 

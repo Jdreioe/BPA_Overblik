@@ -27,6 +27,14 @@ pub struct SourceShift {
     /// The source supplied no hours, so setup supplied this interval.
     #[serde(default, skip_serializing_if = "is_false")]
     pub standard_time: bool,
+    /// The other helpers the source names on this shift, as in `Anna / Bo`.
+    /// The source cannot say whose hours, SPS or absence are whose, so the
+    /// shift waits until each part is checked in the app.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shared_with: Vec<String>,
+    /// Checked in the app since the source last changed it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub confirmed: bool,
 }
 
 /// A calendar note on a helper's calendar, such as a day-off wish. It is shown
@@ -51,6 +59,24 @@ impl SourceShift {
             "{}:{}:{}",
             self.calendar_id, self.event_id, self.occurrence_id
         )
+    }
+
+    /// One shift per helper key. The first keeps this shift's identity, so
+    /// naming a second helper beside the first leaves the first's transfer in
+    /// place; the others are told apart by their helper.
+    pub fn for_helpers(self, keys: &[String]) -> Vec<SourceShift> {
+        keys.iter()
+            .enumerate()
+            .map(|(index, key)| {
+                let mut shift = self.clone();
+                if index > 0 {
+                    shift.occurrence_id = format!("{}+{key}", self.occurrence_id);
+                }
+                shift.helper_key = key.clone();
+                shift.shared_with = keys.iter().filter(|other| *other != key).cloned().collect();
+                shift
+            })
+            .collect()
     }
 }
 

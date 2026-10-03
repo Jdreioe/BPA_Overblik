@@ -30,6 +30,8 @@ fn shift(starts_at: &str, ends_at: &str, notes: &str, comment: Option<&str>) -> 
         recurrence_start: None,
         source_version: None,
         standard_time: false,
+        shared_with: Vec::new(),
+        confirmed: false,
     }
 }
 

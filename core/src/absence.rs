@@ -240,7 +240,7 @@ pub fn parse_absences(
                     continue;
                 }
             };
-            if substitute == shift.helper_key {
+            if same_helper(helpers, &substitute, &shift.helper_key) {
                 report(
                     ParseIssueCode::AbsenceHelperIsPlanned,
                     "An absence line names the shift's own helper".into(),
@@ -342,7 +342,7 @@ pub fn parse_absences(
 }
 
 /// A full name wins over a first name; a first name shared by two helpers is
-/// ambiguous rather than guessed.
+/// ambiguous rather than guessed. Two names of the same helper are one match.
 fn find_helper(
     name: &str,
     helpers: &BTreeMap<String, HelperMapping>,
@@ -370,13 +370,27 @@ fn find_helper(
             .collect::<Vec<_>>()
     };
     for first_only in [false, true] {
-        match matching(first_only).as_slice() {
-            [key] => return Ok(key.clone()),
-            [] => {}
-            _ => return Err(ParseIssueCode::AmbiguousAbsenceHelper),
+        let keys = matching(first_only);
+        match keys.first() {
+            Some(key) if keys.iter().all(|other| same_helper(helpers, key, other)) => {
+                return Ok(key.clone())
+            }
+            Some(_) => return Err(ParseIssueCode::AmbiguousAbsenceHelper),
+            None => {}
         }
     }
     Err(ParseIssueCode::UnknownAbsenceHelper)
+}
+
+/// Whether two helper keys are one helper under two names, such as »Anna«
+/// and »Anna A« mapped to the same MitHF and DUOS helper.
+fn same_helper(helpers: &BTreeMap<String, HelperMapping>, a: &str, b: &str) -> bool {
+    a == b
+        || matches!(
+            (helpers.get(a), helpers.get(b)),
+            (Some(a), Some(b)) if a.mithf_name == b.mithf_name
+                && a.duos_employee_number == b.duos_employee_number
+        )
 }
 
 /// Lowercase, single-spaced and without accents, so `Barns  Sygdom` and
@@ -440,6 +454,8 @@ mod tests {
             recurrence_start: None,
             source_version: None,
             standard_time: false,
+            shared_with: Vec::new(),
+            confirmed: false,
         }
     }
 
@@ -522,6 +538,26 @@ mod tests {
             Some(ParseIssueCode::OverlappingAbsences)
         );
         assert!(parse("syg: Anders Kjær").issues.is_empty());
+    }
+
+    #[test]
+    fn two_names_of_one_helper_are_one_match() {
+        let mut helpers = helpers();
+        for (key, name) in [("anna a", "Anna A"), ("bo b", "Bo B")] {
+            let mut alias = helpers[key.split(' ').next().unwrap()].clone();
+            alias.source_name = name.into();
+            helpers.insert(key.into(), alias);
+        }
+        let parse =
+            |notes: &str| parse_absences(&shift(notes), &default_absences(), &helpers, Copenhagen);
+        let parsed = parse("syg: Anna");
+        assert!(parsed.issues.is_empty(), "{:?}", parsed.issues);
+        assert!(["anna", "anna a"].contains(&parsed.parts[0].substitute.as_str()));
+        // Bo under his other name is still the shift's own helper.
+        assert_eq!(
+            parse("syg: Bo B").issues[0].code,
+            ParseIssueCode::AbsenceHelperIsPlanned
+        );
     }
 
     #[test]
