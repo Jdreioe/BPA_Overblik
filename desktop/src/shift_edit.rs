@@ -22,6 +22,8 @@ pub struct ShiftTimes {
     pub helper_key: String,
     pub source: SourceSnapshot,
     pub edit: Option<ShiftEdit>,
+    /// The other helpers the source names on the shift, by name.
+    pub shared_with: Vec<String>,
 }
 
 /// A day to move the shift to, named like the week's columns.
@@ -89,7 +91,7 @@ pub enum Message {
 /// What saving does to the stored edits.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Change {
-    Save(ShiftEdit),
+    Save(Box<ShiftEdit>),
     Forget(String),
 }
 
@@ -101,6 +103,7 @@ pub struct Editor {
     source_key: String,
     source: SourceSnapshot,
     edited: bool,
+    shared_with: Vec<String>,
     choices: Choices,
     days: Vec<Day>,
     day: Day,
@@ -146,6 +149,7 @@ impl Editor {
             source_key: source_key.into(),
             source: shift.source.clone(),
             edited: edit.is_some(),
+            shared_with: shift.shared_with.clone(),
             choices: choices.clone(),
             days,
             day,
@@ -229,6 +233,7 @@ impl Editor {
 
     /// The form as an edit, holding only what differs from the source. An
     /// end at or before the start is the next day, for the shift and SPS.
+    /// A shift naming several helpers is saved as checked even unchanged.
     fn change(&self, zone: Tz) -> Result<Change, &'static str> {
         const CLOCK_CHANGE: &str = "Tiden findes ikke den dag, fordi uret stilles om.";
         let at = |date: NaiveDate, clock: Clock| {
@@ -295,11 +300,12 @@ impl Editor {
                 .map(|(from, to)| (time(*from), time(*to)))
                 .collect(),
             absence,
+            confirmed: !self.shared_with.is_empty(),
         };
         Ok(if edit.is_empty() {
             Change::Forget(self.source_key.clone())
         } else {
-            Change::Save(edit)
+            Change::Save(Box::new(edit))
         })
     }
 
@@ -313,20 +319,32 @@ impl Editor {
             )
         };
         let label = |value: &'static str| text(value).size(13);
-        let mut form = column![
-            pick_list(self.days.clone(), Some(self.day), Message::Day)
-                .padding([6, 10])
-                .width(Length::Fill),
-            row![
-                text("fra"),
-                field(Slot::Shift { end: false }),
-                text("til"),
-                field(Slot::Shift { end: true })
+        let mut form = column![].spacing(8);
+        if !self.shared_with.is_empty() {
+            form = form.push(
+                text(format!(
+                    "Deles med {} – kildens SPS og fravær bruges ikke.",
+                    self.shared_with.join(" og ")
+                ))
+                .size(13),
+            );
+        }
+        form = form.push(
+            column![
+                pick_list(self.days.clone(), Some(self.day), Message::Day)
+                    .padding([6, 10])
+                    .width(Length::Fill),
+                row![
+                    text("fra"),
+                    field(Slot::Shift { end: false }),
+                    text("til"),
+                    field(Slot::Shift { end: true })
+                ]
+                .spacing(8)
+                .align_y(iced::alignment::Vertical::Center),
             ]
-            .spacing(8)
-            .align_y(iced::alignment::Vertical::Center),
-        ]
-        .spacing(8);
+            .spacing(8),
+        );
         if self.end <= self.start {
             form = form.push(label("Slutter næste dag."));
         }
@@ -458,6 +476,7 @@ mod tests {
             },
             helper_key: "anna".into(),
             text: "digest".into(),
+            shared_with: vec![],
         };
         ShiftTimes {
             starts_at: source.times.starts_at,
@@ -465,6 +484,7 @@ mod tests {
             helper_key: "anna".into(),
             source,
             edit: None,
+            shared_with: vec![],
         }
     }
 
@@ -487,7 +507,7 @@ mod tests {
 
     fn saved(editor: &mut Editor) -> ShiftEdit {
         match editor.update(Message::Save, ZONE) {
-            Some(Change::Save(edit)) => edit,
+            Some(Change::Save(edit)) => *edit,
             other => panic!("expected an edit, got {other:?} ({:?})", editor.error),
         }
     }
@@ -569,6 +589,23 @@ mod tests {
     }
 
     #[test]
+    fn a_shift_naming_several_helpers_is_saved_as_checked_even_unchanged() {
+        let mut shared = shift();
+        shared.shared_with = vec!["Bo Jensen".into()];
+        let mut editor = open(&shared);
+        let Some(Change::Save(edit)) = editor.update(Message::Save, ZONE) else {
+            panic!("a check is saved");
+        };
+        assert!(edit.confirmed);
+        assert!(edit.times.is_none() && edit.helper_key.is_none());
+        // Brug kildens still forgets it, so the shift waits again.
+        assert_eq!(
+            editor.update(Message::Revert, ZONE),
+            Some(Change::Forget("cal:event:1".into()))
+        );
+    }
+
+    #[test]
     fn the_source_values_or_revert_forget_the_edit() {
         let mut edited = shift();
         edited.starts_at = at("2026-09-15T09:00:00+02:00");
@@ -580,6 +617,7 @@ mod tests {
             helper_key: None,
             sps: vec![],
             absence: None,
+            confirmed: false,
         });
         let mut editor = open(&edited);
         let forget = Some(Change::Forget("cal:event:1".into()));

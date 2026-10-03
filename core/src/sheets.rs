@@ -628,6 +628,8 @@ fn read_shift(
                     recurrence_start: None,
                     source_version: None,
                     standard_time: use_standard,
+                    shared_with: Vec::new(),
+                    confirmed: false,
                 })
             }
             None => Err(issue(layout.sps, IssueKind::UnreadableSps)),

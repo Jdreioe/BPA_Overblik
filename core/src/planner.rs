@@ -5,7 +5,9 @@ use chrono::{DateTime, FixedOffset};
 use serde_json::{json, Map, Value};
 
 use crate::{
-    classify_source_title, parse_absences, parse_sps_instructions,
+    classify_source_title,
+    edits::APP_COMMENT_ID,
+    parse_absences, parse_sps_instructions,
     reconciliation::{duos_payload, reconcile_duos, reconcile_mithf, shift_payload},
     segment_step,
     state::isoformat,
@@ -140,7 +142,25 @@ fn plan_shifts(
             ));
             continue;
         }
-        let parsed = parse_sps_instructions(shift, request.config.timezone);
+        // Several helpers share the source's notes, which cannot say whose
+        // SPS or absence a line is. Only the lines added in the app count.
+        let own_lines;
+        let readable = if shift.shared_with.is_empty() {
+            shift
+        } else {
+            own_lines = SourceShift {
+                notes: String::new(),
+                comments: shift
+                    .comments
+                    .iter()
+                    .filter(|comment| comment.id == APP_COMMENT_ID)
+                    .cloned()
+                    .collect(),
+                ..shift.clone()
+            };
+            &own_lines
+        };
+        let parsed = parse_sps_instructions(readable, request.config.timezone);
         if !request.config.duos_enabled && !parsed.intervals.is_empty() {
             items.push(item(
                 shift,
@@ -152,7 +172,7 @@ fn plan_shifts(
             ));
         }
         let absences = parse_absences(
-            shift,
+            readable,
             &request.config.absences,
             &request.config.helpers,
             request.config.timezone,
@@ -200,6 +220,17 @@ fn plan_shifts(
             ));
             continue;
         };
+        if !shift.shared_with.is_empty() && !shift.confirmed {
+            items.push(item(
+                shift,
+                PlanSystem::Source,
+                "source.shared",
+                Outcome::Review,
+                "The shift names several helpers; check this helper's part in the app",
+                "shared_shift",
+            ));
+            continue;
+        }
         let blocked = crossing
             || !absences.issues.is_empty()
             || parsed

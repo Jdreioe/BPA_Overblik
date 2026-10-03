@@ -58,6 +58,9 @@ pub struct SourceSnapshot {
     /// A digest of the shift's notes and comments, where SPS and absences
     /// are written.
     pub text: String,
+    /// The other helpers the source names on the shift.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shared_with: Vec<String>,
 }
 
 impl SourceSnapshot {
@@ -74,6 +77,7 @@ impl SourceSnapshot {
             times: SourceTimes::of(shift),
             helper_key: shift.helper_key.clone(),
             text: format!("{:x}", text.finalize()),
+            shared_with: shift.shared_with.clone(),
         }
     }
 }
@@ -99,6 +103,14 @@ pub struct ShiftEdit {
     pub sps: Vec<(NaiveTime, NaiveTime)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub absence: Option<AbsenceEdit>,
+    /// A shift naming several helpers was checked as it is, even where
+    /// nothing differs from the source.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub confirmed: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 impl ShiftEdit {
@@ -107,20 +119,28 @@ impl ShiftEdit {
             && self.helper_key.is_none()
             && self.sps.is_empty()
             && self.absence.is_none()
+            && !self.confirmed
     }
 
     /// Drop the parts the source has changed since.
     fn current(mut self, shift: &SourceShift) -> Self {
         let now = SourceSnapshot::of(shift);
-        if !self.source.times.unchanged(shift) {
+        let times = self.source.times.unchanged(shift);
+        let helper = self.source.helper_key == now.helper_key;
+        let text = self.source.text == now.text;
+        if !times {
             self.times = None;
         }
-        if self.source.helper_key != now.helper_key {
+        if !helper {
             self.helper_key = None;
         }
-        if self.source.text != now.text {
+        if !text {
             self.sps.clear();
             self.absence = None;
+        }
+        // A check holds only for the shift as it was checked.
+        if !(times && helper && text && self.source.shared_with == now.shared_with) {
+            self.confirmed = false;
         }
         self
     }
@@ -210,6 +230,7 @@ pub fn apply_shift_edits(
         if let Some(helper_key) = &current.helper_key {
             shift.helper_key = helper_key.clone();
         }
+        shift.confirmed = current.confirmed;
         let lines = current.lines(shift, config);
         if !lines.is_empty() {
             shift.comments.push(SourceComment {
@@ -272,6 +293,8 @@ mod tests {
             recurrence_start: None,
             source_version: None,
             standard_time,
+            shared_with: Vec::new(),
+            confirmed: false,
         }
     }
 
@@ -294,6 +317,7 @@ mod tests {
             helper_key: None,
             sps: vec![],
             absence: None,
+            confirmed: false,
         }
     }
 
@@ -383,6 +407,36 @@ mod tests {
         );
         assert!(absences.issues.is_empty(), "{:?}", absences.issues);
         assert_eq!(absences.parts[0].substitute, "bo");
+    }
+
+    #[test]
+    fn a_check_holds_until_the_source_changes_the_shift() {
+        let read = SourceShift {
+            shared_with: vec!["bo".into()],
+            ..day()
+        };
+        let mut checked = edit(&read);
+        checked.times = None;
+        checked.confirmed = true;
+        let mut shifts = vec![read.clone()];
+        apply_shift_edits(&mut shifts, vec![checked.clone()], &config());
+        assert!(shifts[0].confirmed);
+        // A third helper named beside them is a change to check again.
+        let mut shifts = vec![SourceShift {
+            shared_with: vec!["bo".into(), "cai".into()],
+            ..read.clone()
+        }];
+        let applied = apply_shift_edits(&mut shifts, vec![checked.clone()], &config());
+        assert_eq!(applied.outdated, [read.key()]);
+        assert!(!shifts[0].confirmed);
+        // Other changes stay; only the check goes.
+        checked.helper_key = Some("anna".into());
+        let mut noted = read.clone();
+        noted.notes = "uni 9-10".into();
+        let mut shifts = vec![noted];
+        let applied = apply_shift_edits(&mut shifts, vec![checked], &config());
+        assert!(!applied.reduced[0].confirmed);
+        assert!(!shifts[0].confirmed);
     }
 
     #[test]

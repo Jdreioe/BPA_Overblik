@@ -878,6 +878,11 @@ impl Engine {
                             .as_ref()
                             .map_or_else(|| SourceSnapshot::of(shift), |edit| edit.source.clone()),
                         edit,
+                        shared_with: shift
+                            .shared_with
+                            .iter()
+                            .map(|key| account.helper_names.get(key).unwrap_or(key).clone())
+                            .collect(),
                     };
                     (key, times)
                 })
@@ -4411,6 +4416,7 @@ mod tests {
             },
             helper_key: "anna".into(),
             text: "digest".into(),
+            shared_with: vec![],
         };
         shown.shifts.insert(
             "cal:event:1".into(),
@@ -4420,6 +4426,7 @@ mod tests {
                 helper_key: "anna".into(),
                 source: source.clone(),
                 edit: None,
+                shared_with: vec![],
             },
         );
         app.preview = Some(shown);
@@ -4442,7 +4449,7 @@ mod tests {
             .unwrap()
             .block_on(app.engine.save_shift(
                 state_path.clone(),
-                shift_edit::Change::Save(ShiftEdit {
+                shift_edit::Change::Save(Box::new(ShiftEdit {
                     source_key: "cal:event:1".into(),
                     source,
                     times: Some((
@@ -4452,7 +4459,8 @@ mod tests {
                     helper_key: None,
                     sps: vec![],
                     absence: None,
-                }),
+                    confirmed: false,
+                })),
             ));
         let _ = app.update(Message::ShiftSaved(saved));
         assert_eq!(app.activity, Activity::Idle);

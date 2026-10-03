@@ -1280,11 +1280,13 @@ fn two_helpers_on_the_same_time_each_get_their_own_mithf_shift() {
     }))
     .unwrap();
     request.shifts[0].notes.clear();
-    request.shifts[0].helper_key = "Anna".into();
-    let mut second = request.shifts[0].clone();
-    second.helper_key = "Bo".into();
-    second.event_id.push_str("+Bo");
-    request.shifts.push(second);
+    request.shifts = request.shifts[0]
+        .clone()
+        .for_helpers(&["Anna".into(), "Bo".into()]);
+    // Each part checked in the app.
+    for shift in &mut request.shifts {
+        shift.confirmed = true;
+    }
     approve(&mut request, &adapter);
     runtime()
         .block_on(apply_plan(

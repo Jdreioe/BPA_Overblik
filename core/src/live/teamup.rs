@@ -467,6 +467,8 @@ fn parse_occurrence(config: &LiveConfig, raw: &Value) -> Result<SourceShift, Liv
             Some(id(&raw["version"])?)
         },
         standard_time: false,
+        shared_with: Vec::new(),
+        confirmed: false,
     })
 }
 
@@ -488,6 +490,8 @@ mod tests {
             recurrence_start: None,
             source_version: None,
             standard_time: false,
+            shared_with: Vec::new(),
+            confirmed: false,
         }
     }
 

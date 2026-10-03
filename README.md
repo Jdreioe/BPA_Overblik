@@ -74,13 +74,20 @@ uses the ordinary shift type.
 One helper may go by several names, such as `Anna` and `Anna A`: pick the same
 MitHF and DUOS person for each. A spreadsheet helper cell or a shared iCal title
 that names several helpers, as in `Anna / Bo` or `Anna + Bo`, gives each of them
-the shift. Notes in parentheses, as in `Anna (oplæring)`, are not part of a name. The first name keeps the shift's sync history, so adding a second
-helper beside the first leaves the first one's transfer in place.
+the shift. Notes in parentheses, as in `Anna (oplæring)`, are not part of a
+name. The first name keeps the shift's sync history, so adding a second helper
+beside the first leaves the first one's transfer in place.
 
 On **Vagtplan**, **Ret vagt** under the selected shift changes its day, time
 or helper, adds SPS or records an absence, without changing the source. Each
 change holds until the source itself changes that part of the shift; then the
 source's newer values win.
+
+The source cannot say whose hours, SPS or absence are whose on a shift naming
+several helpers, so each helper's part waits for review until it is saved in
+**Ret vagt**, even unchanged. The source's SPS and absence lines on such a shift
+are not used; add each helper's own in **Ret vagt**. Any later change to the
+shift in the source, including another name, sends it back for review.
 
 The desktop drives an installed Edge, Chrome, Chromium or Brave, or the
 `TEAMUP_BROWSER_PATH` executable, with its own profile per service. It never

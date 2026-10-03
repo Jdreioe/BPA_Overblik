@@ -374,6 +374,8 @@ pub fn parse_feed(
                 recurrence_start: repeats.then_some(original),
                 source_version: version(component),
                 standard_time: all_day,
+                shared_with: Vec::new(),
+                confirmed: false,
             };
             parsed.shifts.extend(shift.for_helpers(&helpers));
         }

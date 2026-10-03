@@ -454,6 +454,8 @@ mod tests {
             recurrence_start: None,
             source_version: None,
             standard_time: false,
+            shared_with: Vec::new(),
+            confirmed: false,
         }
     }
 
