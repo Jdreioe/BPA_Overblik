@@ -29,3 +29,8 @@ CREATE TABLE IF NOT EXISTS sync_steps (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (source_key, step_key)
 );
+CREATE TABLE IF NOT EXISTS shift_edits (
+    source_key TEXT PRIMARY KEY,
+    edit_json TEXT NOT NULL,
+    edited_at TEXT NOT NULL
+);

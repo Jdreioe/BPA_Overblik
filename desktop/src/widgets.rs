@@ -593,6 +593,9 @@ pub fn shift_details<'a, M: 'a>(block: &'a Block) -> Element<'a, M> {
     if block.standard_time {
         lines = lines.push(text("Tid fra Vagter uden tid.").size(13));
     }
+    if !block.changed.is_empty() {
+        lines = lines.push(text(&block.changed).size(13));
+    }
     if !block.sps_label.is_empty() {
         lines = lines.push(text(format!("SPS {}", block.sps_label)).size(13));
     }

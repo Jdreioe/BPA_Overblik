@@ -71,6 +71,11 @@ group holds the shift source (only one active at a time) and the **Løn** group
 the MitHF and DUOS services, each with its own login. DUOS registration always
 uses the ordinary shift type.
 
+On **Vagtplan**, **Ret vagt** under the selected shift changes its day, time
+or helper, adds SPS or records an absence, without changing the source. Each
+change holds until the source itself changes that part of the shift; then the
+source's newer values win.
+
 The desktop drives an installed Edge, Chrome, Chromium or Brave, or the
 `TEAMUP_BROWSER_PATH` executable, with its own profile per service. It never
 downloads a browser. The search order is in [desktop](docs/rust-desktop.md).

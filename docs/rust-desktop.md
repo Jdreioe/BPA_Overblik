@@ -34,6 +34,18 @@ TOML configuration is the one setup feature not carried over from the old engine
    shift, or move with the arrow keys, to see in the panel what the transfer
    does with it; Escape clears the selection. Selecting is view state on the
    preview, so it never revokes the approval and goes when the week changes.
+   **Ret vagt** under the selected shift changes it in the app: another day
+   or time of the shown week, another helper, added SPS, or an absence with
+   who took the shift. **Gem** stores the change in the account's sync
+   database and fetches the week again, so the approval follows it. Added SPS
+   and absences reach the planner as the `uni` and absence lines a
+   coordinator would write, in a comment of their own, so they are read and
+   checked like the source's. Each part keeps what the source said at that
+   moment and holds only while the source still says it: a new time in the
+   source replaces the app's time, a new helper the app's helper, and new
+   notes or comments the added SPS and absence. A notice says when that
+   happens. A shift without a time keeps its change when Vagter uden tid
+   changes. **Brug kildens** drops every change at once.
 4. **Godkend ændringer** approves exactly the displayed plan and submits it.
    The app reloads saved setup and the selected source, checks the account database scope,
    and invokes the core's locked destination revalidation and verified transfer.

@@ -229,7 +229,11 @@ pub async fn read_teamup(
             shifts.push(shift);
         }
     }
-    Ok(SourceWeek { shifts, markers })
+    Ok(SourceWeek {
+        shifts,
+        markers,
+        ..SourceWeek::default()
+    })
 }
 
 fn use_standard_time(
