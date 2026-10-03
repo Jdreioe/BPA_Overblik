@@ -414,7 +414,7 @@ pub fn build_week(
                 continues_after: false,
                 details,
                 source_key: shift.key(),
-                source_time: String::new(),
+                changed: String::new(),
             };
             // Iterate visible days only, retaining the true continuation markers.
             for (day, blocks) in &mut days {

@@ -31,10 +31,6 @@ CREATE TABLE IF NOT EXISTS sync_steps (
 );
 CREATE TABLE IF NOT EXISTS shift_edits (
     source_key TEXT PRIMARY KEY,
-    source_starts_at TEXT NOT NULL,
-    source_ends_at TEXT NOT NULL,
-    source_standard_time INTEGER NOT NULL,
-    starts_at TEXT NOT NULL,
-    ends_at TEXT NOT NULL,
+    edit_json TEXT NOT NULL,
     edited_at TEXT NOT NULL
 );

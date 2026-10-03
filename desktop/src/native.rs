@@ -24,7 +24,7 @@ use teamup_shift_sync_core::{
         redacted_report, BrowserSessions, LiveConfig, LiveDestinations, Service, Setup, Visibility,
     },
     plan_digest, AbsenceReason, ApplyOutcome, ApplyRequest, Outcome, PlanItem, PlanRequest,
-    PlanSystem, SourceTimes, SyncState, TransferEvent, TransferOperation,
+    PlanSystem, ShiftEdit, SourceSnapshot, SyncState, TransferEvent, TransferOperation,
 };
 use teamup_shift_sync_gui::{
     files::app_data_dir,
@@ -857,11 +857,11 @@ impl Engine {
             let edits: BTreeMap<_, _> = source
                 .edits
                 .iter()
-                .map(|edit| (edit.source_key.as_str(), edit.source))
+                .map(|edit| (edit.source_key.as_str(), edit))
                 .collect();
             for block in week.days.iter_mut().flat_map(|day| &mut day.blocks) {
-                if let Some(times) = edits.get(block.source_key.as_str()) {
-                    block.source_time = source_time_label(times, zone);
+                if let Some(edit) = edits.get(block.source_key.as_str()) {
+                    block.changed = changed_label(edit, zone);
                 }
             }
             let shifts = source
@@ -869,19 +869,42 @@ impl Engine {
                 .iter()
                 .map(|shift| {
                     let key = shift.key();
-                    let source = edits
-                        .get(key.as_str())
-                        .copied()
-                        .unwrap_or_else(|| SourceTimes::of(shift));
+                    let edit = edits.get(key.as_str()).map(|edit| (*edit).clone());
                     let times = ShiftTimes {
                         starts_at: shift.starts_at,
                         ends_at: shift.ends_at,
-                        source,
-                        edited: edits.contains_key(key.as_str()),
+                        helper_key: shift.helper_key.clone(),
+                        source: edit
+                            .as_ref()
+                            .map_or_else(|| SourceSnapshot::of(shift), |edit| edit.source.clone()),
+                        edit,
                     };
                     (key, times)
                 })
                 .collect();
+            let mut helpers: Vec<_> = account
+                .planning
+                .helpers
+                .iter()
+                .map(|(key, helper)| shift_edit::Helper {
+                    key: key.clone(),
+                    name: helper.mithf_name.clone(),
+                })
+                .collect();
+            helpers.sort_by(|a, b| a.name.cmp(&b.name));
+            let choices = shift_edit::Choices {
+                helpers,
+                reasons: AbsenceReason::ALL
+                    .into_iter()
+                    .filter(|reason| {
+                        account
+                            .planning
+                            .absences
+                            .iter()
+                            .any(|m| m.reason == *reason && !m.words.is_empty())
+                    })
+                    .collect(),
+            };
             let digest = plan_digest(&plan)
                 .map_err(|_| "Ugens godkendelse kunne ikke beregnes.".to_owned())?;
             Ok(Preview {
@@ -895,7 +918,9 @@ impl Engine {
                 items: plan.items.clone(),
                 zone,
                 shifts,
+                choices,
                 editor: None,
+                replaced: source.replaced,
             })
         })
         .await
@@ -1160,10 +1185,14 @@ struct Preview {
     markers: Vec<String>,
     items: Vec<PlanItem>,
     zone: chrono_tz::Tz,
-    /// Every shift's times and its source's, by source key, for Ret tid.
+    /// Every shift as it is, its source and its edit, by source key, for
+    /// Ret vagt.
     shifts: BTreeMap<String, ShiftTimes>,
-    /// The open Ret tid form for the selected shift. View state only.
+    choices: shift_edit::Choices,
+    /// The open Ret vagt form for the selected shift. View state only.
     editor: Option<shift_edit::Editor>,
+    /// How many shifts' changes made here a newer source replaced.
+    replaced: usize,
 }
 
 impl Preview {
@@ -1176,7 +1205,7 @@ impl Preview {
             self.editor = None;
         }
     }
-    /// Open, change or close the Ret tid form. Gem and Brug kildens tid
+    /// Open, change or close the Ret vagt form. Gem and Brug kildens
     /// return what to store.
     fn edit_shift(&mut self, message: shift_edit::Message) -> Option<shift_edit::Change> {
         match message {
@@ -1188,6 +1217,7 @@ impl Preview {
                     times,
                     self.from,
                     self.zone,
+                    &self.choices,
                 ));
                 None
             }
@@ -1200,18 +1230,34 @@ impl Preview {
     }
 }
 
-/// What a shift changed in the app says in its source.
-fn source_time_label(times: &SourceTimes, zone: chrono_tz::Tz) -> String {
-    let start = times.starts_at.with_timezone(&zone);
-    if times.standard_time {
-        format!("{} uden tid", date_label(start.date_naive()))
-    } else {
-        format!(
-            "{} {}",
-            date_label(start.date_naive()),
-            span(start, times.ends_at.with_timezone(&zone))
-        )
+/// What was changed in the app, and the source's time when that changed.
+fn changed_label(edit: &ShiftEdit, zone: chrono_tz::Tz) -> String {
+    let mut parts = Vec::new();
+    if edit.times.is_some() {
+        parts.push("tid");
     }
+    if edit.helper_key.is_some() {
+        parts.push("hjælper");
+    }
+    if !edit.sps.is_empty() {
+        parts.push("SPS");
+    }
+    if edit.absence.is_some() {
+        parts.push("fravær");
+    }
+    let mut label = format!("Rettet i appen: {}.", parts.join(", "));
+    if edit.times.is_some() {
+        let times = &edit.source.times;
+        let start = times.starts_at.with_timezone(&zone);
+        let day = date_label(start.date_naive());
+        if times.standard_time {
+            label.push_str(&format!(" Kilden: {day} uden tid."));
+        } else {
+            let span = span(start, times.ends_at.with_timezone(&zone));
+            label.push_str(&format!(" Kilden: {day} {span}."));
+        }
+    }
+    label
 }
 
 #[derive(Clone)]
@@ -1229,7 +1275,7 @@ enum Message {
     SelectShift(Option<ShiftRef>),
     /// Move the selection by this many shifts (arrow keys).
     StepShift(isize),
-    /// The Ret tid form of the selected shift.
+    /// The Ret vagt form of the selected shift.
     EditShift(shift_edit::Message),
     ShiftSaved(Result<()>),
     SelectSettings(SettingsSection),
@@ -1306,7 +1352,7 @@ const PANEL_WIDTH: f32 = 280.0;
 const HELP: [&str; 5] = [
     "1. Log ind i MitHF og eventuelt DUOS under Udbydere. Login holder, indtil tjenesten selv logger dig ud.",
     "2. Vælg ugen på forsiden, og vælg Se vagtplan.",
-    "3. Løs først advarslerne ved siden af ugen. Vælg en vagt for at se, hvad der sker med den. Ret tid flytter den i appen, indtil kilden selv ændrer den.",
+    "3. Løs først advarslerne ved siden af ugen. Vælg en vagt for at se, hvad der sker med den. Ret vagt ændrer den i appen, indtil kilden selv ændrer det samme.",
     "4. Vælg Godkend ændringer. Hver ændring læses tilbage og bekræftes, før den næste begynder.",
     "Appen sletter aldrig noget i MitHF eller DUOS, og den godkender ikke registreringer for hjælperen.",
 ];
@@ -1679,15 +1725,15 @@ impl NativeApp {
             }
             return Task::none();
         }
-        // The form itself is view state. Only Gem and Brug kildens tid store
+        // The form itself is view state. Only Gem and Brug kildens store
         // anything, so they wait for the busy guard below.
-        if let Message::EditShift(edit) = message {
+        if let Message::EditShift(edit) = &message {
             if !matches!(
                 edit,
                 shift_edit::Message::Save | shift_edit::Message::Revert
             ) {
                 if let Some(preview) = &mut self.preview {
-                    preview.edit_shift(edit);
+                    preview.edit_shift(edit.clone());
                 }
                 return Task::none();
             }
@@ -2443,7 +2489,21 @@ impl NativeApp {
                 self.fetch = None;
                 self.activity = Activity::Idle;
                 match result {
-                    Ok(preview) if preview.from == self.monday => self.preview = Some(*preview),
+                    Ok(preview) if preview.from == self.monday => {
+                        if preview.replaced > 0 {
+                            self.status =
+                                Some(Notice::new(
+                                    Tone::Info,
+                                    "Kilden er ændret",
+                                    format!(
+                                    "Kildens nye værdier erstatter rettelser fra appen på {} {}.",
+                                    preview.replaced,
+                                    if preview.replaced == 1 { "vagt" } else { "vagter" }
+                                ),
+                                ));
+                        }
+                        self.preview = Some(*preview);
+                    }
                     Ok(_) => {}
                     Err(e) => self.status = Some(Notice::from_message(Tone::Error, &e)),
                 }
@@ -3134,7 +3194,7 @@ impl NativeApp {
                 card = match &preview.editor {
                     Some(editor) => card.push(
                         column![
-                            text("Ret tid").size(14),
+                            text("Ret vagt").size(14),
                             editor.view(self.buttons_enabled()).map(Message::EditShift)
                         ]
                         .spacing(8)
@@ -3142,7 +3202,7 @@ impl NativeApp {
                     ),
                     None if preview.shifts.contains_key(&block.source_key) => card.push(
                         container(
-                            self.quiet("Ret tid", Message::EditShift(shift_edit::Message::Open)),
+                            self.quiet("Ret vagt", Message::EditShift(shift_edit::Message::Open)),
                         )
                         .padding(iced::Padding::ZERO.top(8)),
                     ),
@@ -3628,7 +3688,9 @@ mod tests {
             ],
             zone: chrono_tz::Europe::Copenhagen,
             shifts: BTreeMap::new(),
+            choices: Default::default(),
             editor: None,
+            replaced: 0,
         }
     }
     fn done() -> ApplyDone {
@@ -4319,10 +4381,10 @@ mod tests {
         let _ = app.update(Message::Navigate(7));
         assert!(app.preview.is_none());
     }
-    /// Ret tid is a form beside the selected shift. Gem stores the change
-    /// and fetches the week again, so the approval follows the new time.
+    /// Ret vagt is a form beside the selected shift. Gem stores the change
+    /// and fetches the week again, so the approval follows it.
     #[test]
-    fn ret_tid_stores_the_change_and_revokes_the_approval() {
+    fn ret_vagt_stores_the_change_and_revokes_the_approval() {
         let directory = tempfile::tempdir().unwrap();
         let state_path = directory.path().join("sync.sqlite3");
         let mut app = app();
@@ -4341,18 +4403,23 @@ mod tests {
         .unwrap();
         shown.week.days[0].blocks[0].source_key = "cal:event:1".into();
         let at = |value| DateTime::parse_from_rfc3339(value).unwrap();
-        let source = SourceTimes {
-            starts_at: at("2026-09-14T08:00:00+02:00"),
-            ends_at: at("2026-09-14T16:00:00+02:00"),
-            standard_time: false,
+        let source = SourceSnapshot {
+            times: teamup_shift_sync_core::SourceTimes {
+                starts_at: at("2026-09-14T08:00:00+02:00"),
+                ends_at: at("2026-09-14T16:00:00+02:00"),
+                standard_time: false,
+            },
+            helper_key: "anna".into(),
+            text: "digest".into(),
         };
         shown.shifts.insert(
             "cal:event:1".into(),
             ShiftTimes {
-                starts_at: source.starts_at,
-                ends_at: source.ends_at,
-                source,
-                edited: false,
+                starts_at: source.times.starts_at,
+                ends_at: source.times.ends_at,
+                helper_key: "anna".into(),
+                source: source.clone(),
+                edit: None,
             },
         );
         app.preview = Some(shown);
@@ -4375,18 +4442,23 @@ mod tests {
             .unwrap()
             .block_on(app.engine.save_shift(
                 state_path.clone(),
-                shift_edit::Change::Save(teamup_shift_sync_core::ShiftEdit {
+                shift_edit::Change::Save(ShiftEdit {
                     source_key: "cal:event:1".into(),
                     source,
-                    starts_at: at("2026-09-15T08:00:00+02:00"),
-                    ends_at: at("2026-09-15T16:00:00+02:00"),
+                    times: Some((
+                        at("2026-09-15T08:00:00+02:00"),
+                        at("2026-09-15T16:00:00+02:00"),
+                    )),
+                    helper_key: None,
+                    sps: vec![],
+                    absence: None,
                 }),
             ));
         let _ = app.update(Message::ShiftSaved(saved));
         assert_eq!(app.activity, Activity::Idle);
         assert!(app.preview.is_none(), "the old approval is gone");
         let edits = SyncState::open(&state_path).unwrap().shift_edits().unwrap();
-        assert_eq!(edits[0].starts_at, at("2026-09-15T08:00:00+02:00"));
+        assert_eq!(edits[0].times.unwrap().0, at("2026-09-15T08:00:00+02:00"));
     }
     #[test]
     fn verification_time_uses_the_configured_timezone() {
@@ -4471,7 +4543,9 @@ mod tests {
             items: vec![],
             zone: chrono_tz::Europe::Copenhagen,
             shifts: BTreeMap::new(),
+            choices: Default::default(),
             editor: None,
+            replaced: 0,
         });
         let _ = app.view();
         // Dette uge-knappen bærer ingen vægt, når ugen allerede er valgt.

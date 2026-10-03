@@ -4,7 +4,8 @@ use chrono::{DateTime, FixedOffset};
 use rusqlite::Connection;
 use serde_json::json;
 use teamup_shift_sync_core::{
-    ShiftEdit, SourceShift, SourceTimes, StateError, StepRecord, SyncState,
+    AbsenceEdit, AbsenceReason, ShiftEdit, SourceShift, SourceSnapshot, SourceTimes, StateError,
+    StepRecord, SyncState,
 };
 use tempfile::tempdir;
 
@@ -329,13 +330,25 @@ fn shift_edit(key: &str, starts_at: &str) -> ShiftEdit {
     let at = |value: &str| DateTime::parse_from_rfc3339(value).unwrap();
     ShiftEdit {
         source_key: key.into(),
-        source: SourceTimes {
-            starts_at: at("2026-09-14T08:00:00+02:00"),
-            ends_at: at("2026-09-14T16:00:00+02:00"),
-            standard_time: true,
+        source: SourceSnapshot {
+            times: SourceTimes {
+                starts_at: at("2026-09-14T08:00:00+02:00"),
+                ends_at: at("2026-09-14T16:00:00+02:00"),
+                standard_time: true,
+            },
+            helper_key: "anna".into(),
+            text: "digest".into(),
         },
-        starts_at: at(starts_at),
-        ends_at: at("2026-09-15T17:00:00+02:00"),
+        times: Some((at(starts_at), at("2026-09-15T17:00:00+02:00"))),
+        helper_key: Some("bo".into()),
+        sps: vec![(
+            chrono::NaiveTime::from_hms_opt(10, 0, 0).unwrap(),
+            chrono::NaiveTime::from_hms_opt(12, 30, 0).unwrap(),
+        )],
+        absence: Some(AbsenceEdit {
+            reason: AbsenceReason::ChildIllness,
+            substitute: "bo".into(),
+        }),
     }
 }
 

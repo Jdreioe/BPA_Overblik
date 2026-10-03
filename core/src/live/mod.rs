@@ -35,7 +35,7 @@ pub enum SourceReadError {
     Sheet(String),
     #[error("{0}")]
     Review(String),
-    #[error("Vagter ændret i appen kunne ikke læses. Prøv igen.")]
+    #[error("Vagter rettet i appen kunne ikke læses. Prøv igen.")]
     Edits,
 }
 
@@ -47,6 +47,8 @@ pub struct SourceWeek {
     pub markers: Vec<SourceMarker>,
     /// The edits made in the app that `shifts` already have.
     pub edits: Vec<ShiftEdit>,
+    /// How many shifts' edits lost a part, or all, to a newer source.
+    pub replaced: usize,
 }
 
 /// Read the selected source, preserving the same SourceShift contract for
@@ -60,19 +62,25 @@ pub async fn read_source(
 ) -> Result<SourceWeek, SourceReadError> {
     let mut week = read_unedited(config, from, to).await?;
     let path = config.state_path.clone();
+    let planning = config.planning.clone();
     let shifts = std::mem::take(&mut week.shifts);
     let (shifts, edits) = tokio::task::spawn_blocking(move || {
         let mut state = SyncState::open(&path)?;
         let mut shifts = shifts;
-        let edits = apply_shift_edits(&mut shifts, state.shift_edits()?);
+        let edits = apply_shift_edits(&mut shifts, state.shift_edits()?, &planning);
+        let now = chrono::Utc::now().fixed_offset();
+        for edit in &edits.reduced {
+            state.save_shift_edit(edit, now)?;
+        }
         state.forget_shift_edits(&edits.outdated)?;
-        Ok::<_, crate::StateError>((shifts, edits.applied))
+        Ok::<_, crate::StateError>((shifts, edits))
     })
     .await
     .map_err(|_| SourceReadError::Edits)?
     .map_err(|_| SourceReadError::Edits)?;
     week.shifts = shifts;
-    week.edits = edits;
+    week.replaced = edits.reduced.len() + edits.outdated.len();
+    week.edits = edits.applied;
     Ok(week)
 }
 

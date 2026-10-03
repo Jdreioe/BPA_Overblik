@@ -13,7 +13,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
-use crate::{ShiftEdit, SourceShift, SourceTimes};
+use crate::{ShiftEdit, SourceShift};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {
@@ -206,17 +206,12 @@ impl SyncState {
                 ),
                 [&prefix],
             )?;
-            let edit = "source_key, source_starts_at, source_ends_at, source_standard_time, \
-                starts_at, ends_at, edited_at";
             transaction.execute(
                 &format!(
-                    "INSERT INTO shift_edits ({edit}) SELECT {edit}
-                     FROM other.shift_edits WHERE {own} ON CONFLICT(source_key) DO UPDATE SET
-                     source_starts_at = excluded.source_starts_at,
-                     source_ends_at = excluded.source_ends_at,
-                     source_standard_time = excluded.source_standard_time,
-                     starts_at = excluded.starts_at, ends_at = excluded.ends_at,
-                     edited_at = excluded.edited_at
+                    "INSERT INTO shift_edits (source_key, edit_json, edited_at)
+                     SELECT source_key, edit_json, edited_at FROM other.shift_edits
+                     WHERE {own} ON CONFLICT(source_key) DO UPDATE SET
+                     edit_json = excluded.edit_json, edited_at = excluded.edited_at
                      WHERE excluded.edited_at > shift_edits.edited_at"
                 ),
                 [&prefix],
@@ -313,65 +308,35 @@ impl SyncState {
         Ok(())
     }
 
-    /// Every shift time changed in the app. See [`crate::apply_shift_edits`].
+    /// Every shift change made in the app. See [`crate::apply_shift_edits`].
     pub fn shift_edits(&self) -> Result<Vec<ShiftEdit>, StateError> {
-        let mut statement = self.connection.prepare(
-            "SELECT source_key, source_starts_at, source_ends_at, source_standard_time,
-                 starts_at, ends_at FROM shift_edits ORDER BY source_key",
-        )?;
-        let rows = statement.query_map([], |row| {
-            let time = |index: usize| {
-                let value: String = row.get(index)?;
-                DateTime::parse_from_rfc3339(&value).map_err(|_| {
-                    rusqlite::Error::InvalidColumnType(
-                        index,
-                        "shift_edits".into(),
-                        rusqlite::types::Type::Text,
-                    )
-                })
-            };
-            Ok(ShiftEdit {
-                source_key: row.get(0)?,
-                source: SourceTimes {
-                    starts_at: time(1)?,
-                    ends_at: time(2)?,
-                    standard_time: row.get(3)?,
-                },
-                starts_at: time(4)?,
-                ends_at: time(5)?,
-            })
-        })?;
-        rows.collect::<Result<_, _>>().map_err(StateError::from)
+        let mut statement = self
+            .connection
+            .prepare("SELECT edit_json FROM shift_edits ORDER BY source_key")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
     }
 
-    /// Save new times for a shift, replacing an earlier edit of it.
+    /// Save a shift's changes, replacing earlier ones.
     pub fn save_shift_edit(
         &self,
         edit: &ShiftEdit,
         edited_at: DateTime<FixedOffset>,
     ) -> Result<(), StateError> {
         self.connection.execute(
-            "INSERT INTO shift_edits (source_key, source_starts_at, source_ends_at,
-                 source_standard_time, starts_at, ends_at, edited_at) VALUES (?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(source_key) DO UPDATE SET source_starts_at = excluded.source_starts_at,
-                 source_ends_at = excluded.source_ends_at,
-                 source_standard_time = excluded.source_standard_time,
-                 starts_at = excluded.starts_at, ends_at = excluded.ends_at,
+            "INSERT INTO shift_edits (source_key, edit_json, edited_at) VALUES (?, ?, ?)
+             ON CONFLICT(source_key) DO UPDATE SET edit_json = excluded.edit_json,
                  edited_at = excluded.edited_at",
             params![
                 edit.source_key,
-                isoformat(edit.source.starts_at),
-                isoformat(edit.source.ends_at),
-                edit.source.standard_time,
-                isoformat(edit.starts_at),
-                isoformat(edit.ends_at),
+                serde_json::to_string(edit)?,
                 isoformat(edited_at)
             ],
         )?;
         Ok(())
     }
 
-    /// Drop these shifts' edits, so they take the source's times again.
+    /// Drop these shifts' edits, so they take the source's values again.
     pub fn forget_shift_edits(&mut self, source_keys: &[String]) -> Result<(), StateError> {
         let transaction = self.connection.transaction()?;
         for key in source_keys {
