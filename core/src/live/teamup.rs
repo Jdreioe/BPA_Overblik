@@ -212,7 +212,15 @@ pub async fn read_teamup(
         if selected.is_empty() {
             continue;
         }
-        if selected.len() != 1 {
+        // Two calendars may be the same helper under two names.
+        let people: std::collections::BTreeSet<_> = selected
+            .iter()
+            .map(|id| {
+                let mapping = &config.planning.helpers[*id];
+                (&mapping.mithf_name, &mapping.duos_employee_number)
+            })
+            .collect();
+        if people.len() != 1 {
             return Err(LiveError(
                 "En TeamUp-vagt tilhører flere bekræftede hjælpere. Ret kalenderne, og prøv igen.",
             )
@@ -459,6 +467,8 @@ fn parse_occurrence(config: &LiveConfig, raw: &Value) -> Result<SourceShift, Liv
             Some(id(&raw["version"])?)
         },
         standard_time: false,
+        shared_with: Vec::new(),
+        confirmed: false,
     })
 }
 
@@ -480,6 +490,8 @@ mod tests {
             recurrence_start: None,
             source_version: None,
             standard_time: false,
+            shared_with: Vec::new(),
+            confirmed: false,
         }
     }
 

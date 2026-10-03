@@ -795,7 +795,6 @@ impl Setup {
         } else {
             vec!["mithf"]
         } {
-            let mut chosen = std::collections::BTreeSet::new();
             for row in &included {
                 // Not chosen yet is a step left, not a stale choice.
                 if row[service] == "" {
@@ -817,8 +816,19 @@ impl Setup {
                 {
                     return Err(LiveError("MitHF har flere hjælpere med samme navn. Få navnene gjort entydige i MitHF, før de kan overføres sikkert."));
                 }
-                if !chosen.insert(person["id"].to_string()) {
-                    return Err(LiveError("Flere kalendere er valgt til samme hjælper. Ret valgene, eller udelad en kalender."));
+            }
+        }
+        // Several names may be the same helper, such as »Anna« and »Anna A«,
+        // but a MitHF helper is always the same DUOS helper.
+        if self.duos_enabled() {
+            let mut people = std::collections::BTreeMap::new();
+            let mut registered = std::collections::BTreeMap::new();
+            for row in &included {
+                let (mithf, duos) = (row["mithf"].to_string(), row["duos"].to_string());
+                if *people.entry(mithf.clone()).or_insert(duos.clone()) != duos
+                    || *registered.entry(duos).or_insert(mithf.clone()) != mithf
+                {
+                    return Err(LiveError("Navne for samme hjælper skal have samme MitHF- og DUOS-hjælper. Ret valgene, eller udelad en kalender."));
                 }
             }
         }
@@ -1175,11 +1185,20 @@ mod tests {
             json!([{"source": "c1", "mithf": "m1", "duos": "d1", "excluded": false}]);
         assert!(setup.validate_choices().is_err());
 
-        // Both calendars pointing at the same helper.
+        // Two names for the same helper, such as »Anna« and »Anna A«.
         setup.data["mappings"] = json!([
             {"source": "c1", "mithf": "m1", "duos": "d1", "excluded": false},
             {"source": "c2", "mithf": "m1", "duos": "d1", "excluded": false},
         ]);
+        setup
+            .validate_choices()
+            .expect("one helper may have two names");
+
+        // The same MitHF helper as two different DUOS helpers, or the reverse.
+        setup.data["mappings"][1]["duos"] = json!("d2");
+        assert!(setup.validate_choices().is_err());
+        setup.data["mappings"][1]["mithf"] = json!("m2");
+        setup.data["mappings"][1]["duos"] = json!("d1");
         assert!(setup.validate_choices().is_err());
 
         setup.data["mappings"] = json!([

@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::standard_time::StandardTimes;
-use crate::{classify_source_title, SourceShift, SourceTitle};
+use crate::{classify_source_title, helper_names, SourceShift, SourceTitle};
 
 /// Which part of a shared feed's event title names the helper.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -45,7 +45,8 @@ pub enum TitlePart {
 pub enum HelperRule {
     /// Each feed is one helper's calendar, like a TeamUp sub-calendar.
     Feed,
-    /// One shared feed; each event's title names its helper.
+    /// One shared feed; each event's title names its helper, or several
+    /// helpers as in `Anna / Bo`.
     Title { part: TitlePart, separator: String },
 }
 
@@ -271,32 +272,43 @@ pub fn parse_feed(
             if classify_source_title(&summary) == SourceTitle::Reminder {
                 continue;
             }
-            let (helper, title) = match rule {
-                HelperRule::Feed => (calendar_id.to_owned(), summary.clone()),
+            let (helpers, title) = match rule {
+                HelperRule::Feed => (vec![calendar_id.to_owned()], summary.clone()),
                 HelperRule::Title { .. } => {
                     let (name, rest) = rule.split(&summary);
-                    let Some(name) = name else {
+                    let names = name.as_deref().map(helper_names).unwrap_or_default();
+                    if names.is_empty() {
                         parsed.issues.push(issue(IssueKind::MissingHelper, None));
                         continue;
-                    };
-                    let key = helper_key(&name);
-                    parsed
-                        .helpers
-                        .entry(key.clone())
-                        .and_modify(|shown| {
-                            // The same helper written two ways: show one of
-                            // them, the same one every time.
-                            if name < *shown {
-                                shown.clone_from(&name);
-                            }
-                        })
-                        .or_insert_with(|| name.clone());
-                    (key, rest.to_owned())
+                    }
+                    let mut keys = Vec::new();
+                    for name in names {
+                        let key = helper_key(&name);
+                        parsed
+                            .helpers
+                            .entry(key.clone())
+                            .and_modify(|shown| {
+                                // The same helper written two ways: show one of
+                                // them, the same one every time.
+                                if name < *shown {
+                                    shown.clone_from(&name);
+                                }
+                            })
+                            .or_insert(name);
+                        keys.push(key);
+                    }
+                    (keys, rest.to_owned())
                 }
             };
             let shown = match rule {
                 HelperRule::Feed => feed_name.clone(),
-                HelperRule::Title { .. } => parsed.helpers.get(&helper).cloned(),
+                HelperRule::Title { .. } => Some(
+                    helpers
+                        .iter()
+                        .filter_map(|key| parsed.helpers.get(key).cloned())
+                        .collect::<Vec<_>>()
+                        .join(" / "),
+                ),
             };
             let all_day = start_has_time(component) == Some(false);
             let (starts_at, ends_at) = if all_day {
@@ -342,7 +354,7 @@ pub fn parse_feed(
                 parsed.issues.push(issue(IssueKind::RepeatedEvent, shown));
                 continue;
             }
-            parsed.shifts.push(SourceShift {
+            let shift = SourceShift {
                 calendar_id: calendar_id.into(),
                 event_id: event_id.clone(),
                 occurrence_id,
@@ -351,7 +363,7 @@ pub fn parse_feed(
                 } else {
                     title
                 },
-                helper_key: helper,
+                helper_key: String::new(),
                 starts_at,
                 ends_at,
                 notes: text_of(component, &ICalendarProperty::Description)
@@ -362,7 +374,10 @@ pub fn parse_feed(
                 recurrence_start: repeats.then_some(original),
                 source_version: version(component),
                 standard_time: all_day,
-            });
+                shared_with: Vec::new(),
+                confirmed: false,
+            };
+            parsed.shifts.extend(shift.for_helpers(&helpers));
         }
     }
     parsed.shifts.sort_by_key(|shift| shift.starts_at);

@@ -256,6 +256,29 @@ fn a_shared_feed_names_helpers_in_titles() {
 }
 
 #[test]
+fn a_title_naming_two_helpers_gives_each_the_shift() {
+    let text = feed(concat!(
+        "BEGIN:VEVENT\r\nUID:pair\r\nDTSTART:20261020T060000Z\r\nDTEND:20261020T140000Z\r\nSUMMARY:Anna / Bo - Vagt\r\nEND:VEVENT\r\n",
+        "BEGIN:VEVENT\r\nUID:long\r\nDTSTART;VALUE=DATE:20261021\r\nDTEND;VALUE=DATE:20261023\r\nSUMMARY:Anna + Bo\r\nEND:VEVENT\r\n",
+    ));
+    let parsed = week(&text, &before_dash(), &standard());
+    let shifts: Vec<_> = parsed
+        .shifts
+        .iter()
+        .map(|shift| (shift.helper_key.as_str(), shift.title.as_str()))
+        .collect();
+    assert_eq!(shifts, [("anna", "Vagt"), ("bo", "Vagt")]);
+    // The first keeps the event's identity; the second is told apart by helper.
+    assert_eq!(
+        parsed.shifts[1].occurrence_id,
+        format!("{}+bo", parsed.shifts[0].occurrence_id)
+    );
+    // An event to fix is reported once, naming both.
+    assert_eq!(parsed.issues.len(), 1);
+    assert_eq!(parsed.issues[0].helper.as_deref(), Some("Anna / Bo"));
+}
+
+#[test]
 fn title_rules_split_names_before_after_or_whole() {
     let after = HelperRule::Title {
         part: TitlePart::After,

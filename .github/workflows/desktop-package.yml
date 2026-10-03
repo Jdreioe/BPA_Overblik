@@ -67,7 +67,9 @@ jobs:
 
   package:
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    # The matrix must always run: a job-level skip reports a single
+    # "package" check, so the required "package (<os>)" checks never arrive
+    # and a docs-only PR waits forever. The steps are skipped instead.
     # The Windows runner is slow (a release iced build alone takes ~10
     # min), but a silent hang must never burn the 6-hour default again.
     timeout-minutes: 60
@@ -76,14 +78,20 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      CODE: ${{ needs.changes.outputs.code }}
     steps:
       - uses: actions/checkout@v4
+        if: env.CODE == 'true'
       - uses: dtolnay/rust-toolchain@stable
+        if: env.CODE == 'true'
       - name: Install Linux system dependencies
-        if: runner.os == 'Linux'
+        if: env.CODE == 'true' && runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev
       - uses: Swatinem/rust-cache@v2
+        if: env.CODE == 'true'
       - name: Run Rust tests
+        if: env.CODE == 'true'
         run: cargo test --workspace --all-targets
       - name: Build release binaries
         if: github.event_name == 'push'
