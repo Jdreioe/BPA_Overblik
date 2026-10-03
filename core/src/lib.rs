@@ -6,6 +6,7 @@
 mod absence;
 mod approval;
 pub mod compensation;
+mod edits;
 pub mod fixture;
 pub mod ical;
 pub mod live;
@@ -24,6 +25,10 @@ pub mod workbook;
 pub use absence::{
     absence_markings, default_absences, parse_absences, AbsenceMarking, AbsenceParseResult,
     AbsencePart, AbsenceReason, DuosAbsence,
+};
+pub use edits::{
+    apply_shift_edits, AbsenceEdit, AppliedEdits, ShiftEdit, SourceSnapshot, SourceTimes,
+    APP_COMMENT_ID,
 };
 pub use models::{
     ParseIssue, ParseIssueCode, SourceComment, SourceMarker, SourceShift, SpsInterval,

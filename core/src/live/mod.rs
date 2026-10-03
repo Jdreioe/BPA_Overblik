@@ -22,7 +22,10 @@ use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, TimeZone};
 use chrono_tz::Tz;
 use serde_json::Value;
 
-use crate::{reconciliation_range, DestinationSnapshot, SourceMarker, SourceShift};
+use crate::{
+    apply_shift_edits, reconciliation_range, DestinationSnapshot, ShiftEdit, SourceMarker,
+    SourceShift, SyncState,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SourceReadError {
@@ -32,6 +35,8 @@ pub enum SourceReadError {
     Sheet(String),
     #[error("{0}")]
     Review(String),
+    #[error("Vagter rettet i appen kunne ikke læses. Prøv igen.")]
+    Edits,
 }
 
 /// One read of the shift source: the shifts to plan, and the calendar markers
@@ -40,11 +45,46 @@ pub enum SourceReadError {
 pub struct SourceWeek {
     pub shifts: Vec<SourceShift>,
     pub markers: Vec<SourceMarker>,
+    /// The edits made in the app that `shifts` already have.
+    pub edits: Vec<ShiftEdit>,
+    /// How many shifts' edits lost a part, or all, to a newer source.
+    pub replaced: usize,
 }
 
 /// Read the selected source, preserving the same SourceShift contract for
-/// planning and approved transfers. Only TeamUp has markers.
+/// planning and approved transfers. Only TeamUp has markers. Times changed in
+/// the app replace the source's while the source still has the times they
+/// were changed from; see [`crate::apply_shift_edits`].
 pub async fn read_source(
+    config: &LiveConfig,
+    from: NaiveDate,
+    to: NaiveDate,
+) -> Result<SourceWeek, SourceReadError> {
+    let mut week = read_unedited(config, from, to).await?;
+    let path = config.state_path.clone();
+    let planning = config.planning.clone();
+    let shifts = std::mem::take(&mut week.shifts);
+    let (shifts, edits) = tokio::task::spawn_blocking(move || {
+        let mut state = SyncState::open(&path)?;
+        let mut shifts = shifts;
+        let edits = apply_shift_edits(&mut shifts, state.shift_edits()?, &planning);
+        let now = chrono::Utc::now().fixed_offset();
+        for edit in &edits.reduced {
+            state.save_shift_edit(edit, now)?;
+        }
+        state.forget_shift_edits(&edits.outdated)?;
+        Ok::<_, crate::StateError>((shifts, edits))
+    })
+    .await
+    .map_err(|_| SourceReadError::Edits)?
+    .map_err(|_| SourceReadError::Edits)?;
+    week.shifts = shifts;
+    week.replaced = edits.reduced.len() + edits.outdated.len();
+    week.edits = edits.applied;
+    Ok(week)
+}
+
+async fn read_unedited(
     config: &LiveConfig,
     from: NaiveDate,
     to: NaiveDate,
@@ -61,7 +101,7 @@ pub async fn read_source(
         .await?;
         Ok(SourceWeek {
             shifts,
-            markers: Vec::new(),
+            ..SourceWeek::default()
         })
     } else if let Some(sheet) = &config.sheet {
         let shifts = sheets::read(
@@ -75,7 +115,7 @@ pub async fn read_source(
         .map_err(SourceReadError::Sheet)?;
         Ok(SourceWeek {
             shifts,
-            markers: Vec::new(),
+            ..SourceWeek::default()
         })
     } else {
         teamup::read_teamup(config, from, to).await

@@ -77,6 +77,11 @@ that names several helpers, as in `Anna / Bo` or `Anna + Bo`, gives each of them
 the shift. Notes in parentheses, as in `Anna (oplæring)`, are not part of a name. The first name keeps the shift's sync history, so adding a second
 helper beside the first leaves the first one's transfer in place.
 
+On **Vagtplan**, **Ret vagt** under the selected shift changes its day, time
+or helper, adds SPS or records an absence, without changing the source. Each
+change holds until the source itself changes that part of the shift; then the
+source's newer values win.
+
 The desktop drives an installed Edge, Chrome, Chromium or Brave, or the
 `TEAMUP_BROWSER_PATH` executable, with its own profile per service. It never
 downloads a browser. The search order is in [desktop](docs/rust-desktop.md).

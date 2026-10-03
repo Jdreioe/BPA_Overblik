@@ -30,6 +30,12 @@ pub struct Block {
     pub continues_after: bool,
     #[serde(default)]
     pub details: Vec<String>,
+    /// The source shift this block draws, for changing its time in the app.
+    #[serde(skip)]
+    pub source_key: String,
+    /// What was changed in the app, else empty.
+    #[serde(skip)]
+    pub changed: String,
 }
 
 fn is_false(value: &bool) -> bool {
