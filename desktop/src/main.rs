@@ -11,6 +11,7 @@ mod guide;
 mod native;
 mod selfcheck;
 mod setup;
+mod shift_edit;
 mod template;
 mod untimed;
 mod update;

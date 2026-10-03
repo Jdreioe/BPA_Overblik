@@ -3,7 +3,9 @@ use std::{path::Path, sync::mpsc};
 use chrono::{DateTime, FixedOffset};
 use rusqlite::Connection;
 use serde_json::json;
-use teamup_shift_sync_core::{SourceShift, StateError, StepRecord, SyncState};
+use teamup_shift_sync_core::{
+    ShiftEdit, SourceShift, SourceTimes, StateError, StepRecord, SyncState,
+};
 use tempfile::tempdir;
 
 fn now() -> DateTime<FixedOffset> {
@@ -321,4 +323,61 @@ fn adopting_history_keeps_the_newest_record_of_one_source() {
         rows[0],
         [r#"["cal:event:1","cal","event","1",null,null,"hash","seen"]"#]
     );
+}
+
+fn shift_edit(key: &str, starts_at: &str) -> ShiftEdit {
+    let at = |value: &str| DateTime::parse_from_rfc3339(value).unwrap();
+    ShiftEdit {
+        source_key: key.into(),
+        source: SourceTimes {
+            starts_at: at("2026-09-14T08:00:00+02:00"),
+            ends_at: at("2026-09-14T16:00:00+02:00"),
+            standard_time: true,
+        },
+        starts_at: at(starts_at),
+        ends_at: at("2026-09-15T17:00:00+02:00"),
+    }
+}
+
+#[test]
+fn shift_edits_are_saved_replaced_forgotten_and_adopted() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("sync-edits.sqlite3");
+    let mut state = SyncState::open(&path).unwrap();
+    state
+        .save_shift_edit(
+            &shift_edit("cal:event:1", "2026-09-15T09:00:00+02:00"),
+            now(),
+        )
+        .unwrap();
+    state
+        .save_shift_edit(
+            &shift_edit("cal:event:2", "2026-09-15T09:00:00+02:00"),
+            now(),
+        )
+        .unwrap();
+    let later = now() + chrono::Duration::hours(1);
+    let newest = shift_edit("cal:event:1", "2026-09-15T10:30:00+02:00");
+    state.save_shift_edit(&newest, later).unwrap();
+    assert_eq!(
+        SyncState::open(&path).unwrap().shift_edits().unwrap(),
+        [
+            newest.clone(),
+            shift_edit("cal:event:2", "2026-09-15T09:00:00+02:00")
+        ]
+    );
+    state.forget_shift_edits(&["cal:event:2".into()]).unwrap();
+    assert_eq!(state.shift_edits().unwrap(), std::slice::from_ref(&newest));
+    drop(state);
+
+    let mut adopted = SyncState::open(directory.path().join("sync-new.sqlite3")).unwrap();
+    adopted
+        .save_shift_edit(
+            &shift_edit("cal:event:1", "2026-09-15T09:00:00+02:00"),
+            now(),
+        )
+        .unwrap();
+    adopted.adopt_history(&path, "cal").unwrap();
+    adopted.adopt_history(&path, "other").unwrap();
+    assert_eq!(adopted.shift_edits().unwrap(), [newest]);
 }

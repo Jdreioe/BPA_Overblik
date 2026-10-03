@@ -53,7 +53,8 @@ fn bounds(payload: &Map<String, Value>, zone: Tz) -> Result<(DateTime<Tz>, DateT
 fn minutes(v: DateTime<Tz>) -> u32 {
     v.hour() * 60 + v.minute()
 }
-fn date_label(day: NaiveDate) -> String {
+/// A day as the week names it, such as `man 14. sep`.
+pub fn date_label(day: NaiveDate) -> String {
     format!(
         "{} {}. {}",
         DAYS[day.weekday().num_days_from_monday() as usize],
@@ -61,7 +62,8 @@ fn date_label(day: NaiveDate) -> String {
         MONTHS[day.month0() as usize]
     )
 }
-fn span(start: DateTime<Tz>, end: DateTime<Tz>) -> String {
+/// A shift's time as the week shows it, such as `08:00–16:00`.
+pub fn span(start: DateTime<Tz>, end: DateTime<Tz>) -> String {
     if minutes(end) == 0 && start.date_naive().succ_opt() == Some(end.date_naive()) {
         format!("{}–24:00", start.format("%H:%M"))
     } else if start.date_naive() == end.date_naive() {
@@ -411,6 +413,8 @@ pub fn build_week(
                 continues_before: false,
                 continues_after: false,
                 details,
+                source_key: shift.key(),
+                source_time: String::new(),
             };
             // Iterate visible days only, retaining the true continuation markers.
             for (day, blocks) in &mut days {

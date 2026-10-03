@@ -34,6 +34,13 @@ TOML configuration is the one setup feature not carried over from the old engine
    shift, or move with the arrow keys, to see in the panel what the transfer
    does with it; Escape clears the selection. Selecting is view state on the
    preview, so it never revokes the approval and goes when the week changes.
+   **Ret tid** under the selected shift moves it to another day or time of the
+   shown week. **Gem** stores the change in the account's sync database and
+   fetches the week again, so the approval follows the new time. The change
+   keeps the source's times from that moment and replaces them only while the
+   source still has them; once the source itself changes the shift's times,
+   the source wins and the change is dropped. A shift without a time keeps its
+   change when Vagter uden tid changes. **Brug kildens tid** drops it at once.
 4. **Godkend ændringer** approves exactly the displayed plan and submits it.
    The app reloads saved setup and the selected source, checks the account database scope,
    and invokes the core's locked destination revalidation and verified transfer.
