@@ -1261,3 +1261,52 @@ fn an_unchosen_duos_type_or_a_removed_absence_stops_for_review() {
         "{reasons:?}"
     );
 }
+
+#[test]
+fn two_helpers_on_the_same_time_each_get_their_own_mithf_shift() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut adapter = MemoryDestinations {
+        state_path: temp.path().join("sync.sqlite3"),
+        ..Default::default()
+    };
+    let mut request = request();
+    request.config = serde_json::from_value(json!({
+        "timezone": "Europe/Copenhagen", "default_helper_count": 1,
+        "duos_arrangement_id": "arrangement", "duos_registration_type": "Almindelig",
+        "helpers": {
+            "Anna": {"mithf_name": "Anna Hansen", "duos_employee_number": "1"},
+            "Bo": {"mithf_name": "Bo Berg", "duos_employee_number": "2"},
+        }
+    }))
+    .unwrap();
+    request.shifts[0].notes.clear();
+    request.shifts[0].helper_key = "Anna".into();
+    let mut second = request.shifts[0].clone();
+    second.helper_key = "Bo".into();
+    second.event_id.push_str("+Bo");
+    request.shifts.push(second);
+    approve(&mut request, &adapter);
+    runtime()
+        .block_on(apply_plan(
+            request.clone(),
+            adapter.state_path.clone(),
+            &mut adapter,
+            |_| {},
+        ))
+        .unwrap();
+    let mut helpers: Vec<_> = adapter
+        .snapshot
+        .mithf_shifts
+        .iter()
+        .map(|s| s.helper_name.clone())
+        .collect();
+    helpers.sort();
+    assert_eq!(
+        helpers,
+        [Some("Anna Hansen".into()), Some("Bo Berg".into())]
+    );
+    assert!(preview_plan(&request, &adapter)
+        .items
+        .iter()
+        .all(|item| item.outcome == Outcome::AlreadyMatched));
+}

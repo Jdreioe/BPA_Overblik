@@ -8,7 +8,8 @@
 //!
 //! A shift's identity is its date (`20261102`). Editing the cells in place
 //! keeps the identity; moving a shift to another date is a new shift, exactly
-//! like deleting and recreating a TeamUp event.
+//! like deleting and recreating a TeamUp event. A helper cell naming two
+//! helpers, `Anna / Bo` or `Anna + Bo`, gives each of them the shift.
 
 use std::collections::BTreeSet;
 
@@ -519,15 +520,16 @@ pub fn parse_cells_with_standard(
     for reading in readings {
         let stray =
             reading.result.is_err() && reading.cells.iter().any(|cell| owned.contains(cell));
-        if !stray && !reading.helper.is_empty() {
-            parsed.helpers.insert(reading.helper.clone());
+        let names = crate::helper_names(&reading.helper);
+        if !stray {
+            parsed.helpers.extend(names.iter().cloned());
         }
         match reading.result {
             Ok(shift) => {
                 // The date is the shift's identity, so a repeated date would
                 // make two shifts indistinguishable.
                 if positions.insert(shift.event_id.clone()) {
-                    parsed.shifts.push(shift);
+                    parsed.shifts.extend(shift.for_helpers(&names));
                 } else {
                     parsed.issues.push(SheetIssue {
                         cell: reading.date_cell,
@@ -607,7 +609,7 @@ fn read_shift(
     } else {
         Ok(interval(date, start_text, end_text, zone))
     };
-    let result = if helper.is_empty() {
+    let result = if crate::helper_names(helper).is_empty() {
         Err(issue(offsets[0], IssueKind::MissingHelper))
     } else if let Ok(Some((starts_at, ends_at))) = &resolved {
         match sps_notes(sps, &layout.sps_label) {
@@ -833,6 +835,42 @@ mod tests {
         assert_eq!(
             parsed.shifts[1].ends_at.to_rfc3339(),
             "2026-11-04T08:00:00+01:00"
+        );
+    }
+
+    #[test]
+    fn a_cell_naming_two_helpers_gives_each_the_shift() {
+        let layout = column_template();
+        let sheet = csv_cells(
+            b"21/9/26,22/9/26\n\
+              Mandag,Tirsdag\n\
+              Zain / Ninke,Zain + Ninke\n\
+              7:30-12,8-16\n",
+        )
+        .unwrap();
+        let parsed = parse_cells(&sheet, &layout, "sheet", TZ, day(2026, 9, 21)).unwrap();
+        assert!(parsed.issues.is_empty());
+        let shifts: Vec<_> = parsed
+            .shifts
+            .iter()
+            .map(|s| (s.helper_key.as_str(), s.key()))
+            .collect();
+        assert_eq!(
+            shifts,
+            [
+                ("Zain", "sheet:20260921:20260921".to_owned()),
+                ("Ninke", "sheet:20260921:20260921+Ninke".to_owned()),
+                ("Zain", "sheet:20260922:20260922".to_owned()),
+                ("Ninke", "sheet:20260922:20260922+Ninke".to_owned()),
+            ]
+        );
+        assert_eq!(
+            parsed
+                .helpers
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["Ninke", "Zain"]
         );
     }
 

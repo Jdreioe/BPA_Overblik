@@ -52,6 +52,23 @@ impl SourceShift {
             self.calendar_id, self.event_id, self.occurrence_id
         )
     }
+
+    /// One shift per helper key. The first keeps this shift's identity, so
+    /// naming a second helper beside the first leaves the first's transfer in
+    /// place; the others are told apart by their helper.
+    pub fn for_helpers(self, keys: &[String]) -> Vec<SourceShift> {
+        keys.iter()
+            .enumerate()
+            .map(|(index, key)| {
+                let mut shift = self.clone();
+                if index > 0 {
+                    shift.occurrence_id = format!("{}+{key}", self.occurrence_id);
+                }
+                shift.helper_key = key.clone();
+                shift
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

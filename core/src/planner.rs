@@ -110,7 +110,25 @@ fn plan_shifts(
         .filter(|s| !s.sick)
         .cloned()
         .collect();
-    for &shift in shifts {
+    // Read once, keeping all errors visible rather than treating bad state as absent.
+    let recorded = shifts
+        .iter()
+        .map(|shift| state.steps_for_source(&shift.key()))
+        .collect::<Result<Vec<_>, _>>()?;
+    // A MitHF shift recorded for one source shift is never another's, so two
+    // helpers on the same time each keep their own.
+    let claims: HashMap<String, String> = shifts
+        .iter()
+        .zip(&recorded)
+        .flat_map(|(shift, records)| {
+            records
+                .iter()
+                .filter(|r| r.step_key.starts_with("mithf.create_shift"))
+                .filter_map(|r| r.destination_id.clone())
+                .map(|id| (id, shift.key()))
+        })
+        .collect();
+    for (&shift, records) in shifts.iter().zip(recorded) {
         if classify_source_title(&shift.title) == SourceTitle::Reminder {
             items.push(item(
                 shift,
@@ -182,8 +200,6 @@ fn plan_shifts(
             ));
             continue;
         };
-        // Read once, keeping all errors visible rather than treating bad state as absent.
-        let records = state.steps_for_source(&shift.key())?;
         let blocked = crossing
             || !absences.issues.is_empty()
             || parsed
@@ -197,7 +213,8 @@ fn plan_shifts(
                 absent_segments.insert(segment_step("mithf.report_sick", index));
             }
             plan_segment(
-                request, shift, &records, index, segment, blocked, &healthy, moves, &mut items,
+                request, shift, &records, &claims, index, segment, blocked, &healthy, moves,
+                &mut items,
             );
         }
         for record in &records {
@@ -505,6 +522,7 @@ fn plan_segment(
     request: &PlanRequest<'_>,
     shift: &SourceShift,
     records: &[StepRecord],
+    claims: &HashMap<String, String>,
     index: usize,
     segment: &Segment<'_>,
     blocked: bool,
@@ -560,7 +578,15 @@ fn plan_segment(
         &mapping.mithf_name,
         record(records, &shift_key),
         candidates,
-        &owned_by_others(records, "mithf.create_shift", &shift_key),
+        &owned_by_others(records, "mithf.create_shift", &shift_key)
+            .into_iter()
+            .chain(
+                claims
+                    .iter()
+                    .filter(|(_, source)| **source != shift.key())
+                    .map(|(id, _)| id.clone()),
+            )
+            .collect(),
         &moved,
     );
     let matched = reconciled.matched;

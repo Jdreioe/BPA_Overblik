@@ -1,3 +1,10 @@
+use std::sync::LazyLock;
+
+use regex::Regex;
+
+static NAME_SEPARATOR: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"/|\s\+\s").expect("valid name separator regex"));
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MeetingCategory {
     pub name: &'static str,
@@ -49,6 +56,18 @@ pub fn marker_titles(titles: &[String]) -> Result<Vec<String>, &'static str> {
     Ok(cleaned)
 }
 
+/// The helpers a shift names, in order: `Anna / Bo` and `Anna + Bo` are two
+/// helpers working the same shift. Empty and repeated names are dropped.
+pub fn helper_names(text: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for name in NAME_SEPARATOR.split(text).map(str::trim) {
+        if !name.is_empty() && !names.iter().any(|seen| words(seen) == words(name)) {
+            names.push(name.to_owned());
+        }
+    }
+    names
+}
+
 fn words(text: &str) -> String {
     text.split_whitespace()
         .collect::<Vec<_>>()
@@ -78,7 +97,18 @@ pub fn classify_source_title(title: &str) -> SourceTitle {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_marker, marker_titles};
+    use super::{helper_names, is_marker, marker_titles};
+
+    #[test]
+    fn a_slash_or_spaced_plus_separates_helpers() {
+        assert_eq!(helper_names("Anna / Bo"), ["Anna", "Bo"]);
+        assert_eq!(helper_names("Anna/Bo + Cai"), ["Anna", "Bo", "Cai"]);
+        assert_eq!(helper_names(" Anna A "), ["Anna A"]);
+        // A plus inside a name is not a separator.
+        assert_eq!(helper_names("Anna+"), ["Anna+"]);
+        assert_eq!(helper_names("Anna / anna / "), ["Anna"]);
+        assert!(helper_names(" / ").is_empty());
+    }
 
     #[test]
     fn a_marker_matches_whole_words_at_the_start_of_the_title() {

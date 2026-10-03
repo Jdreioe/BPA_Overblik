@@ -71,6 +71,12 @@ group holds the shift source (only one active at a time) and the **Løn** group
 the MitHF and DUOS services, each with its own login. DUOS registration always
 uses the ordinary shift type.
 
+One helper may go by several names, such as `Anna` and `Anna A`: pick the same
+MitHF and DUOS person for each. A spreadsheet helper cell or a shared iCal title
+that names several helpers, as in `Anna / Bo` or `Anna + Bo`, gives each of them
+the shift. The first name keeps the shift's sync history, so adding a second
+helper beside the first leaves the first one's transfer in place.
+
 The desktop drives an installed Edge, Chrome, Chromium or Brave, or the
 `TEAMUP_BROWSER_PATH` executable, with its own profile per service. It never
 downloads a browser. The search order is in [desktop](docs/rust-desktop.md).
@@ -177,7 +183,8 @@ the existing shift that its first part updates.
 
 Helper identity is resolved from the confirmed TeamUp-to-destination mappings in
 setup. An event must match exactly one mapped helper; zero or multiple matches
-require review. Fixture runs map helpers through the TOML `helpers` list instead.
+require review. Calendars mapped to the same MitHF and DUOS person count as one
+helper. Fixture runs map helpers through the TOML `helpers` list instead.
 
 Titles starting with `Husk at checke …` are shared reminders, not shifts.
 They are reported as excluded before helper matching or SPS parsing, in both
