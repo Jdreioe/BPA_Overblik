@@ -124,6 +124,10 @@ fn listed(reason: &str, system: PlanSystem) -> Option<(&'static str, &'static st
             "SPS-timerne står stadig på den fraværende hjælpers vagt i MitHF.",
             "Fjern SPS-timerne fra den vagt i MitHF, og hent ugen igen. Appen sætter dem på afløserens vagt.",
         ),
+        ("shared_shift", _) => (
+            "Vagten nævner flere hjælpere, så kilden siger ikke, hvem der har hvilke timer, SPS og fravær.",
+            "Vælg Ret vagt, ret hjælperens del, og tryk Gem. Gør det for hver hjælper.",
+        ),
         ("no_helper_mapping", _) => (
             "Hjælperen fra vagtplanen er ikke koblet til en hjælper i MitHF.",
             "Vælg Åbn indstillingen, og kobl hjælperen under Hjælpere.",

@@ -878,6 +878,11 @@ impl Engine {
                             .as_ref()
                             .map_or_else(|| SourceSnapshot::of(shift), |edit| edit.source.clone()),
                         edit,
+                        shared_with: shift
+                            .shared_with
+                            .iter()
+                            .map(|key| account.helper_names.get(key).unwrap_or(key).clone())
+                            .collect(),
                     };
                     (key, times)
                 })
@@ -1738,6 +1743,20 @@ impl NativeApp {
                 return Task::none();
             }
         }
+        // Reading the sheet for its example shift only reads and stores
+        // nothing, so it never waits for, or blocks, another operation.
+        if let Message::Setup(setup::Message::ReadSheet(revision)) = message {
+            return self.read_sheet(revision);
+        }
+        if let Message::Setup(setup::Message::SheetRead(revision, result)) = message {
+            if revision == self.setup.sheet_revision {
+                if let Ok(preview) = &result {
+                    self.setup.sheet_tab.clone_from(&preview.tab);
+                }
+                self.setup.template.read(result);
+            }
+            return Task::none();
+        }
         // Picking a calendar only changes which one Hjælpere shows, so it
         // also works while the helpers are being fetched.
         if let Message::Setup(setup::Message::SelectHelper(source)) = message {
@@ -1849,7 +1868,27 @@ impl NativeApp {
                     self.last_verified = label;
                 }
             }
-            Message::Setup(setup::Message::Link(link)) => self.setup.link = link,
+            Message::Setup(setup::Message::Link(link)) => {
+                self.setup.link = link;
+                let sheets = self
+                    .setup
+                    .state
+                    .as_ref()
+                    .is_some_and(|state| state.source == "sheets");
+                if sheets && self.setup.sheet_file.is_none() {
+                    // Read once typing or pasting pauses, not per keystroke.
+                    let revision = self.new_sheet();
+                    if !self.setup.link.trim().is_empty() {
+                        return Task::perform(
+                            async move {
+                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                revision
+                            },
+                            |revision| Message::Setup(setup::Message::ReadSheet(revision)),
+                        );
+                    }
+                }
+            }
             Message::Setup(setup::Message::MarkerDraft(value)) => self.setup.marker_draft = value,
             Message::Setup(setup::Message::AddMarker | setup::Message::RemoveMarker(_)) => {
                 let Some(state) = &self.setup.state else {
@@ -1976,10 +2015,19 @@ impl NativeApp {
                     )))
                 });
             }
+            Message::Setup(setup::Message::Template(template::Message::Tab(tab))) => {
+                self.setup.sheet_tab = Some(tab);
+                self.setup.sheet_revision += 1;
+                return self.read_sheet(self.setup.sheet_revision);
+            }
             Message::Setup(setup::Message::Template(message)) => {
                 self.setup.template.update(message);
             }
-            Message::Setup(setup::Message::SelectHelper(_)) => {
+            Message::Setup(
+                setup::Message::SelectHelper(_)
+                | setup::Message::ReadSheet(_)
+                | setup::Message::SheetRead(..),
+            ) => {
                 // Already handled before the busy guard; kept for exhaustiveness.
             }
             Message::Setup(setup::Message::ToggleProvider(id)) => {
@@ -2107,15 +2155,15 @@ impl NativeApp {
                 // Cancelling the dialog keeps what was there.
                 if path.is_some() {
                     self.setup.sheet_file = path;
-                    self.setup.sheet_tab = None;
                     self.setup.link.clear();
+                    let revision = self.new_sheet();
+                    return self.read_sheet(revision);
                 }
             }
             Message::Setup(setup::Message::ClearFile) => {
                 self.setup.sheet_file = None;
-                self.setup.sheet_tab = None;
+                self.new_sheet();
             }
-            Message::Setup(setup::Message::SheetTab(tab)) => self.setup.sheet_tab = Some(tab),
             Message::Setup(setup::Message::Action(action, params)) => {
                 if matches!(action, "source" | "choose_source") {
                     self.helpers_auto_fetch_attempted = false;
@@ -2155,7 +2203,7 @@ impl NativeApp {
                             self.setup.link.clear();
                             self.setup.key.clear();
                             self.setup.sheet_file = None;
-                            self.setup.sheet_tab = None;
+                            self.new_sheet();
                             self.setup.ical_links.clear();
                         }
                         self.setup.load_ical(&state);
@@ -2739,6 +2787,40 @@ impl NativeApp {
         }
         task
     }
+    /// Forget the sheet read for setup and its picks, and any read still
+    /// running. Returns the revision for reading the next one.
+    fn new_sheet(&mut self) -> u64 {
+        self.setup.sheet_revision += 1;
+        self.setup.sheet_tab = None;
+        self.setup.template = template::Template::default();
+        self.setup.sheet_revision
+    }
+
+    /// Read the chosen file or link for picking the example shift.
+    fn read_sheet(&mut self, revision: u64) -> Task<Message> {
+        use teamup_shift_sync_core::live::SheetSource;
+        if revision != self.setup.sheet_revision {
+            return Task::none();
+        }
+        let source = match &self.setup.sheet_file {
+            Some(path) => SheetSource::File(path.clone()),
+            None if !self.setup.link.trim().is_empty() => {
+                SheetSource::Link(self.setup.link.clone())
+            }
+            None => return Task::none(),
+        };
+        let tab = self.setup.sheet_tab.clone();
+        self.setup.template.reading();
+        Task::perform(
+            async move {
+                teamup_shift_sync_core::live::preview_sheet(&source, tab.as_deref())
+                    .await
+                    .map_err(|error| error.to_string())
+            },
+            move |result| Message::Setup(setup::Message::SheetRead(revision, result)),
+        )
+    }
+
     fn invalidate(&mut self) {
         self.preview = None;
         self.status = None;
@@ -3515,6 +3597,61 @@ mod tests {
         assert!(app.setup.link.is_empty());
         assert!(app.setup.key.is_empty());
         assert_eq!(app.activity, Activity::Idle);
+    }
+
+    /// Step 2 shows the sheet as soon as it is chosen. A read that a newer
+    /// choice replaced is dropped, and connecting takes the tab that was read.
+    #[test]
+    fn a_chosen_sheet_is_read_for_picking_and_a_stale_read_is_dropped() {
+        use teamup_shift_sync_core::live::SheetPreview;
+        let mut app = app();
+        let mut state = setup_state("source");
+        state.source = "sheets".into();
+        app.setup.state = Some(state);
+        let preview = |tab: &str, date: &str| SheetPreview {
+            tabs: vec!["Uge".into(), "Tider".into()],
+            tab: Some(tab.into()),
+            cells: vec![vec![date.into()], vec!["Alex".into()], vec!["8-24".into()]],
+        };
+
+        let _ = app.update(Message::Setup(setup::Message::FileChosen(Some(
+            "/tmp/vagtplan.xlsx".into(),
+        ))));
+        let first = app.setup.sheet_revision;
+        // Typing a link replaces the file and its read.
+        let _ = app.update(Message::Setup(setup::Message::ClearFile));
+        let _ = app.update(Message::Setup(setup::Message::Link(
+            "https://example.com/plan.xlsx".into(),
+        )));
+        let _ = app.update(Message::Setup(setup::Message::SheetRead(
+            first,
+            Ok(preview("Uge", "01/11/26")),
+        )));
+        assert_eq!(app.setup.sheet_tab, None, "a stale read is dropped");
+
+        let current = app.setup.sheet_revision;
+        let _ = app.update(Message::Setup(setup::Message::SheetRead(
+            current,
+            Ok(preview("Tider", "02/11/26")),
+        )));
+        assert_eq!(app.setup.sheet_tab.as_deref(), Some("Tider"));
+        for cell in [(0, 0), (1, 0), (2, 0)] {
+            let _ = app.update(Message::Setup(setup::Message::Template(
+                template::Message::Pick(cell.0, cell.1),
+            )));
+        }
+        for _ in 0..2 {
+            let _ = app.update(Message::Setup(setup::Message::Template(
+                template::Message::Skip,
+            )));
+        }
+        assert!(app.setup.sheet_layout().is_ok());
+
+        // Connecting stores the link, so the sheet and its picks are dropped.
+        app.activity = Activity::Setup;
+        let _ = app.update(Message::SetupUpdated(Ok(setup_state("destinations"))));
+        assert!(app.setup.template.untouched());
+        assert_eq!(app.setup.sheet_tab, None);
     }
 
     #[test]
@@ -4411,6 +4548,7 @@ mod tests {
             },
             helper_key: "anna".into(),
             text: "digest".into(),
+            shared_with: vec![],
         };
         shown.shifts.insert(
             "cal:event:1".into(),
@@ -4420,6 +4558,7 @@ mod tests {
                 helper_key: "anna".into(),
                 source: source.clone(),
                 edit: None,
+                shared_with: vec![],
             },
         );
         app.preview = Some(shown);
@@ -4442,7 +4581,7 @@ mod tests {
             .unwrap()
             .block_on(app.engine.save_shift(
                 state_path.clone(),
-                shift_edit::Change::Save(ShiftEdit {
+                shift_edit::Change::Save(Box::new(ShiftEdit {
                     source_key: "cal:event:1".into(),
                     source,
                     times: Some((
@@ -4452,7 +4591,8 @@ mod tests {
                     helper_key: None,
                     sps: vec![],
                     absence: None,
-                }),
+                    confirmed: false,
+                })),
             ));
         let _ = app.update(Message::ShiftSaved(saved));
         assert_eq!(app.activity, Activity::Idle);

@@ -5,7 +5,9 @@ use chrono::{DateTime, FixedOffset};
 use serde_json::{json, Map, Value};
 
 use crate::{
-    classify_source_title, parse_absences, parse_sps_instructions,
+    classify_source_title,
+    edits::APP_COMMENT_ID,
+    parse_absences, parse_sps_instructions,
     reconciliation::{duos_payload, reconcile_duos, reconcile_mithf, shift_payload},
     segment_step,
     state::isoformat,
@@ -110,7 +112,25 @@ fn plan_shifts(
         .filter(|s| !s.sick)
         .cloned()
         .collect();
-    for &shift in shifts {
+    // Read once, keeping all errors visible rather than treating bad state as absent.
+    let recorded = shifts
+        .iter()
+        .map(|shift| state.steps_for_source(&shift.key()))
+        .collect::<Result<Vec<_>, _>>()?;
+    // A MitHF shift recorded for one source shift is never another's, so two
+    // helpers on the same time each keep their own.
+    let claims: HashMap<String, String> = shifts
+        .iter()
+        .zip(&recorded)
+        .flat_map(|(shift, records)| {
+            records
+                .iter()
+                .filter(|r| r.step_key.starts_with("mithf.create_shift"))
+                .filter_map(|r| r.destination_id.clone())
+                .map(|id| (id, shift.key()))
+        })
+        .collect();
+    for (&shift, records) in shifts.iter().zip(recorded) {
         if classify_source_title(&shift.title) == SourceTitle::Reminder {
             items.push(item(
                 shift,
@@ -122,7 +142,25 @@ fn plan_shifts(
             ));
             continue;
         }
-        let parsed = parse_sps_instructions(shift, request.config.timezone);
+        // Several helpers share the source's notes, which cannot say whose
+        // SPS or absence a line is. Only the lines added in the app count.
+        let own_lines;
+        let readable = if shift.shared_with.is_empty() {
+            shift
+        } else {
+            own_lines = SourceShift {
+                notes: String::new(),
+                comments: shift
+                    .comments
+                    .iter()
+                    .filter(|comment| comment.id == APP_COMMENT_ID)
+                    .cloned()
+                    .collect(),
+                ..shift.clone()
+            };
+            &own_lines
+        };
+        let parsed = parse_sps_instructions(readable, request.config.timezone);
         if !request.config.duos_enabled && !parsed.intervals.is_empty() {
             items.push(item(
                 shift,
@@ -134,7 +172,7 @@ fn plan_shifts(
             ));
         }
         let absences = parse_absences(
-            shift,
+            readable,
             &request.config.absences,
             &request.config.helpers,
             request.config.timezone,
@@ -182,8 +220,17 @@ fn plan_shifts(
             ));
             continue;
         };
-        // Read once, keeping all errors visible rather than treating bad state as absent.
-        let records = state.steps_for_source(&shift.key())?;
+        if !shift.shared_with.is_empty() && !shift.confirmed {
+            items.push(item(
+                shift,
+                PlanSystem::Source,
+                "source.shared",
+                Outcome::Review,
+                "The shift names several helpers; check this helper's part in the app",
+                "shared_shift",
+            ));
+            continue;
+        }
         let blocked = crossing
             || !absences.issues.is_empty()
             || parsed
@@ -197,7 +244,8 @@ fn plan_shifts(
                 absent_segments.insert(segment_step("mithf.report_sick", index));
             }
             plan_segment(
-                request, shift, &records, index, segment, blocked, &healthy, moves, &mut items,
+                request, shift, &records, &claims, index, segment, blocked, &healthy, moves,
+                &mut items,
             );
         }
         for record in &records {
@@ -505,6 +553,7 @@ fn plan_segment(
     request: &PlanRequest<'_>,
     shift: &SourceShift,
     records: &[StepRecord],
+    claims: &HashMap<String, String>,
     index: usize,
     segment: &Segment<'_>,
     blocked: bool,
@@ -560,7 +609,15 @@ fn plan_segment(
         &mapping.mithf_name,
         record(records, &shift_key),
         candidates,
-        &owned_by_others(records, "mithf.create_shift", &shift_key),
+        &owned_by_others(records, "mithf.create_shift", &shift_key)
+            .into_iter()
+            .chain(
+                claims
+                    .iter()
+                    .filter(|(_, source)| **source != shift.key())
+                    .map(|(id, _)| id.clone()),
+            )
+            .collect(),
         &moved,
     );
     let matched = reconciled.matched;

@@ -327,9 +327,18 @@ pub(crate) fn tabs(bytes: &[u8]) -> Result<Vec<String>, LiveError> {
 
 /// The displayed text of the chosen tab.
 pub(crate) fn grid(access: &SheetAccess, bytes: &[u8]) -> Result<Vec<Vec<String>>, LiveError> {
-    let tab = match access.location {
+    tab_cells(&access.location, access.tab.as_deref(), bytes)
+}
+
+/// The displayed text of `tab`. A Google Sheets link already names its tab.
+pub(crate) fn tab_cells(
+    location: &Location,
+    tab: Option<&str>,
+    bytes: &[u8],
+) -> Result<Vec<Vec<String>>, LiveError> {
+    let tab = match location {
         Location::Google { .. } => None,
-        _ => access.tab.as_deref(),
+        _ => tab,
     };
     workbook::cells(bytes, tab).map_err(LiveError)
 }

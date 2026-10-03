@@ -306,13 +306,14 @@ pub(crate) async fn read(
     Ok(shifts)
 }
 
-/// An issue on an excluded helper's event does not block the week.
+/// An issue on an event of only excluded helpers does not block the week.
 fn skipped(access: &IcalAccess, issue: &FeedIssue) -> bool {
     matches!(access.rule, HelperRule::Title { .. })
-        && issue
-            .helper
-            .as_deref()
-            .is_some_and(|name| access.excluded.contains(&crate::ical::helper_key(name)))
+        && issue.helper.as_deref().is_some_and(|names| {
+            crate::helper_names(names)
+                .iter()
+                .all(|name| access.excluded.contains(&crate::ical::helper_key(name)))
+        })
 }
 
 #[cfg(test)]

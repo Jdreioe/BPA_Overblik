@@ -113,6 +113,47 @@ pub enum SheetSource {
     File(String),
 }
 
+impl SheetSource {
+    fn location(&self) -> Result<sheets::Location, LiveError> {
+        match self {
+            SheetSource::Link(link) => sheets::parse_link(link),
+            SheetSource::File(path) => sheets::parse_file(path),
+        }
+    }
+}
+
+/// One tab of a spreadsheet, read before connecting so the example shift can
+/// be picked in it. It holds shift contents, so it has no `Debug` and is
+/// never saved.
+#[derive(Clone)]
+pub struct SheetPreview {
+    /// The workbook's tabs. A CSV file or a Google Sheets link has none.
+    pub tabs: Vec<String>,
+    /// The tab read, when there are tabs.
+    pub tab: Option<String>,
+    pub cells: Vec<Vec<String>>,
+}
+
+/// Read a spreadsheet without connecting it or storing anything. A missing
+/// or unknown `tab` reads the first one.
+pub async fn preview_sheet(
+    source: &SheetSource,
+    tab: Option<&str>,
+) -> Result<SheetPreview, LiveError> {
+    let location = source.location()?;
+    let bytes = sheets::fetch(&location).await?;
+    let tabs = match location {
+        sheets::Location::Google { .. } => Vec::new(),
+        _ => sheets::tabs(&bytes)?,
+    };
+    let tab = tab
+        .filter(|tab| tabs.iter().any(|name| name == tab))
+        .or(tabs.first().map(String::as_str))
+        .map(str::to_owned);
+    let cells = sheets::tab_cells(&location, tab.as_deref(), &bytes)?;
+    Ok(SheetPreview { tabs, tab, cells })
+}
+
 /// The setup document and the operations that advance it.
 ///
 /// Every mutating operation saves before returning, so an interrupted setup
@@ -403,9 +444,10 @@ impl Setup {
         if self.data["source"] != "sheets" {
             return Err(LiveError("Vælg Regneark som kilde først."));
         }
-        let (location, mut secret) = match source {
-            SheetSource::Link(link) => (sheets::parse_link(link)?, json!({"link": link.trim()})),
-            SheetSource::File(path) => (sheets::parse_file(path)?, json!({"file": path.trim()})),
+        let location = source.location()?;
+        let mut secret = match source {
+            SheetSource::Link(link) => json!({"link": link.trim()}),
+            SheetSource::File(path) => json!({"file": path.trim()}),
         };
         let bytes = sheets::fetch(&location).await?;
         let tabs = match location {
@@ -753,7 +795,6 @@ impl Setup {
         } else {
             vec!["mithf"]
         } {
-            let mut chosen = std::collections::BTreeSet::new();
             for row in &included {
                 // Not chosen yet is a step left, not a stale choice.
                 if row[service] == "" {
@@ -775,8 +816,19 @@ impl Setup {
                 {
                     return Err(LiveError("MitHF har flere hjælpere med samme navn. Få navnene gjort entydige i MitHF, før de kan overføres sikkert."));
                 }
-                if !chosen.insert(person["id"].to_string()) {
-                    return Err(LiveError("Flere kalendere er valgt til samme hjælper. Ret valgene, eller udelad en kalender."));
+            }
+        }
+        // Several names may be the same helper, such as »Anna« and »Anna A«,
+        // but a MitHF helper is always the same DUOS helper.
+        if self.duos_enabled() {
+            let mut people = std::collections::BTreeMap::new();
+            let mut registered = std::collections::BTreeMap::new();
+            for row in &included {
+                let (mithf, duos) = (row["mithf"].to_string(), row["duos"].to_string());
+                if *people.entry(mithf.clone()).or_insert(duos.clone()) != duos
+                    || *registered.entry(duos).or_insert(mithf.clone()) != mithf
+                {
+                    return Err(LiveError("Navne for samme hjælper skal have samme MitHF- og DUOS-hjælper. Ret valgene, eller udelad en kalender."));
                 }
             }
         }
@@ -1058,6 +1110,39 @@ mod tests {
         assert_eq!(setup.data["stage"], "source");
     }
 
+    /// The preview reads a tab before anything is connected: the first one
+    /// unless another is asked for, and the first again for a tab that is gone.
+    #[test]
+    fn a_sheet_is_previewed_without_connecting() {
+        let file = format!(
+            "{}/tests/sheets/libreoffice.xlsx",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let source = SheetSource::File(file);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let first = runtime.block_on(preview_sheet(&source, None)).unwrap();
+        assert_eq!(first.tabs, ["Uge", "Tider"]);
+        assert_eq!(first.tab.as_deref(), Some("Uge"));
+        assert!(!first.cells.is_empty());
+        let other = runtime
+            .block_on(preview_sheet(&source, Some("Tider")))
+            .unwrap();
+        assert_eq!(other.tab.as_deref(), Some("Tider"));
+        let gone = runtime
+            .block_on(preview_sheet(&source, Some("Slettet")))
+            .unwrap();
+        assert_eq!(gone.tab.as_deref(), Some("Uge"));
+        assert!(runtime
+            .block_on(preview_sheet(
+                &SheetSource::Link("http://x.dk/a.csv".into()),
+                None
+            ))
+            .is_err());
+    }
+
     #[test]
     fn editing_rejects_unknown_calendars_and_non_boolean_exclusions() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -1100,11 +1185,20 @@ mod tests {
             json!([{"source": "c1", "mithf": "m1", "duos": "d1", "excluded": false}]);
         assert!(setup.validate_choices().is_err());
 
-        // Both calendars pointing at the same helper.
+        // Two names for the same helper, such as »Anna« and »Anna A«.
         setup.data["mappings"] = json!([
             {"source": "c1", "mithf": "m1", "duos": "d1", "excluded": false},
             {"source": "c2", "mithf": "m1", "duos": "d1", "excluded": false},
         ]);
+        setup
+            .validate_choices()
+            .expect("one helper may have two names");
+
+        // The same MitHF helper as two different DUOS helpers, or the reverse.
+        setup.data["mappings"][1]["duos"] = json!("d2");
+        assert!(setup.validate_choices().is_err());
+        setup.data["mappings"][1]["mithf"] = json!("m2");
+        setup.data["mappings"][1]["duos"] = json!("d1");
         assert!(setup.validate_choices().is_err());
 
         setup.data["mappings"] = json!([

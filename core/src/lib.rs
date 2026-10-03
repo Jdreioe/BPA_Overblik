@@ -36,7 +36,7 @@ pub use models::{
 };
 pub use parser::{parse_sps_instructions, NOTES_SOURCE_ID};
 pub use source_rules::{
-    classify_source_title, is_marker, marker_titles, MeetingCategory, SourceTitle,
+    classify_source_title, helper_names, is_marker, marker_titles, MeetingCategory, SourceTitle,
 };
 pub use state::{ApplyGuard, StateError, StepRecord, SyncState};
 

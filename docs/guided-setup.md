@@ -110,19 +110,34 @@ another provider, file or tab starts a new history. Its earlier transfers are
 then not recognised, so check the first week carefully.
 
 Setup is three steps: **1. Hvor ligger dit regneark?** (a link or a file),
-**2. Hvordan ser en vagt ud for dig?**, and **3. Tilslut**. Each step appears
-once the one before is done. In step 2, copy the cells of one filled shift
-(for a weekly grid, one day's column: date, weekday, helper, time, SPS) and
-choose **Indsæt vagt**. The app then asks one question at a time, such as
-"Hvor står datoen?", answered by clicking the cell. SPS hours and a title such
-as `P-MØDE` can be answered with **Ingen SPS** or **Ingen titel**. A sheet
-that holds only the helper answers the time with **Arket har ingen tider**, and
-every shift takes the time under **Vagter uden tid**. If the time cell holds
-only a start time, the app also asks for the end time. **Start
-forfra** goes back to pasting. A workbook with several tabs asks for one in
-step 3.
+**2. Hvad er en vagt?**, and **3. Tilslut**. Each step appears once the one
+before is done. As soon as a file is chosen, or half a second after a link is
+typed or pasted, step 2 reads the sheet and shows it from cell A1, with column
+letters and row numbers. A workbook with several tabs shows a **Fane** list
+above it, starting with the first tab; choosing another tab reads it and clears
+the picks. Nothing is stored before **Tilslut**.
+
+![Step 2 with the date and helper picked](screenshots/sheet-pick-in-grid.png)
+
+Step 2 asks one question at a time, starting with "Klik på en dato.", answered
+by clicking the cell of one filled shift. A picked cell shows what it is, and
+clicking it again frees it. SPS hours and a title such as `P-MØDE` can be
+answered with **Ingen SPS** or **Ingen titel**. A sheet that holds only the
+helper answers the time with **Arket har ingen tider**, and every shift takes
+the time under **Vagter uden tid**. If the time cell holds only a start time,
+the app also asks for the end time. The picked cells must fit within 12 rows
+and 12 columns, as one shift does; otherwise the app says "Vælg cellerne for
+én vagt.". **Start forfra** clears the picks. The grid shows the first 100
+rows and 26 columns.
+
+When the sheet cannot be read, step 2 shows why. **Sæt kopierede celler ind**,
+below the grid or the error, is the fallback: copy the cells of one shift in
+the spreadsheet (for a weekly grid, one day's column) and paste them, and the
+same questions are asked about the pasted cells. **Start forfra** goes back to
+the sheet. The clipboard is read only when that button is pressed.
 The app learns the date format and the word before SPS hours (such as `Sps`)
-from the example, and checks that the example reads as one shift. Only the
+from the smallest block holding the picked cells, exactly what copying that
+block would have pasted, and checks that it reads as one shift. Only the
 cells' positions relative to the date are saved, never their contents.
 
 When reading, every cell holding a date in that format anchors one shift, so
