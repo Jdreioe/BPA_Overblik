@@ -343,6 +343,16 @@ pub fn date_picker<'a, M: Clone + 'a>(
         .into()
 }
 
+/// A clock time as a button with a ▾, like [`date_picker`]'s field. Pressing
+/// it opens a [`crate::clock::Dial`].
+pub fn time_field<'a, M: Clone + 'a>((hour, minute): (u32, u32), open: M) -> Element<'a, M> {
+    button(text(format!("{hour:02}:{minute:02}  ▾")))
+        .style(outlined)
+        .padding([8, 12])
+        .on_press(open)
+        .into()
+}
+
 fn group_box(theme: &iced::Theme) -> container::Style {
     let palette = theme.extended_palette();
     container::Style {
@@ -528,7 +538,7 @@ fn block_body<'a, M: 'a>(block: &'a Block) -> Element<'a, M> {
         marks.push("✚ fravær");
     }
     if block.standard_time {
-        marks.push("standardtid");
+        marks.push("uden tid");
     }
     if !block.part_label.is_empty() {
         marks.push(&block.part_label);
@@ -572,9 +582,6 @@ pub fn shift_details<'a, M: 'a>(block: &'a Block) -> Element<'a, M> {
     if !block.part_label.is_empty() {
         facts.push(&block.part_label);
     }
-    if block.standard_time {
-        facts.push("standardtid");
-    }
     let mut lines = column![
         text(&block.helper).size(16).font(iced::Font {
             weight: iced::font::Weight::Bold,
@@ -583,6 +590,12 @@ pub fn shift_details<'a, M: 'a>(block: &'a Block) -> Element<'a, M> {
         text(facts.join(" · ")).size(13),
     ]
     .spacing(4);
+    if block.standard_time {
+        lines = lines.push(text("Tid fra Vagter uden tid.").size(13));
+    }
+    if !block.changed.is_empty() {
+        lines = lines.push(text(&block.changed).size(13));
+    }
     if !block.sps_label.is_empty() {
         lines = lines.push(text(format!("SPS {}", block.sps_label)).size(13));
     }

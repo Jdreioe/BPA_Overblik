@@ -41,9 +41,6 @@ pub struct SetupState {
     pub source: String,
     #[serde(default)]
     pub sheet_layout: Option<SheetLayout>,
-    /// The tabs of the last workbook read, when it has any.
-    #[serde(default)]
-    pub sheet_tabs: Vec<String>,
     #[serde(default)]
     pub ical_rule: Option<HelperRule>,
     #[serde(default)]
@@ -95,8 +92,16 @@ pub enum Message {
     Link(String),
     Key(String),
     Template(template::Message),
+    /// A new common or weekday time for shifts without one, as the text the
+    /// core reads. The pickers below produce these.
     StandardDefault(String),
     StandardDay(usize, String),
+    UntimedOn(bool),
+    UntimedDay(usize, crate::untimed::DayMode),
+    ShowUntimedDays,
+    OpenTime(Option<crate::untimed::Slot>),
+    /// The open time picker's dial or buttons.
+    Dial(crate::clock::DialMessage),
     MarkerDraft(String),
     AddMarker,
     RemoveMarker(usize),
@@ -116,7 +121,13 @@ pub enum Message {
     FileChosen(Option<String>),
     /// Go back from a chosen file to pasting a link.
     ClearFile,
-    SheetTab(String),
+    /// Read the sheet in step 1 if nothing newer replaced this request.
+    ReadSheet(u64),
+    /// The sheet read for that request. It holds shift contents.
+    SheetRead(
+        u64,
+        Result<teamup_shift_sync_core::live::SheetPreview, String>,
+    ),
     OpenTeamupKeys,
     CopyOrganization,
     CopyPurpose,
@@ -156,16 +167,6 @@ const MITHF_ICON: &[u8] = include_bytes!("../assets/mithf-icon.png");
 /// Stable input ids. Iced tracks focus by widget position, so an error line
 /// appearing under a field would otherwise move every field and drop focus
 /// on each keystroke.
-const STANDARD_DEFAULT_ID: &str = "standard-falles";
-const STANDARD_DAY_IDS: [&str; 7] = [
-    "standard-mandag",
-    "standard-tirsdag",
-    "standard-onsdag",
-    "standard-torsdag",
-    "standard-fredag",
-    "standard-lordag",
-    "standard-sondag",
-];
 const SOURCE_LINK_ID: &str = "source-link";
 const ICAL_SEPARATOR_ID: &str = "ical-separator";
 const MARKER_DRAFT_ID: &str = "marker-draft";
@@ -186,13 +187,24 @@ pub struct SetupUi {
     /// A local spreadsheet chosen instead of a link. Its path is shown only
     /// as a file name and stored only in the OS keyring.
     pub sheet_file: Option<String>,
-    /// The workbook tab picked from [`SetupState::sheet_tabs`].
+    /// The workbook tab to read, and then the tab read and connected.
     pub sheet_tab: Option<String>,
-    /// Why the typed standard times cannot be saved. Shown beside the fields;
-    /// action results and errors go to the app's status notice instead.
+    /// Counts sheet reads, so a slow read never replaces a newer one and a
+    /// link is only read once typing pauses.
+    pub sheet_revision: u64,
+    /// Why the picked times for shifts without one cannot be saved. Shown
+    /// beside the fields; action results and errors go to the app's status
+    /// notice instead.
     pub error: Option<String>,
+    /// The time for shifts without one, as the core reads it: a range, or
+    /// empty for none. Each weekday is empty to follow it, `ingen` for none,
+    /// or its own range.
     pub standard_default: String,
     pub standard_days: [String; 7],
+    /// The open time picker, if any.
+    pub open_time: Option<(crate::untimed::Slot, crate::clock::Dial)>,
+    /// The weekday list was asked for while no day has a time yet.
+    pub untimed_days_open: bool,
     /// A marker title being typed, not saved until added.
     pub marker_draft: String,
     /// Each absence reason's words as typed, comma separated, in
@@ -316,67 +328,18 @@ impl SetupUi {
         }
     }
 
-    /// The layout learned from the pasted shift, or the saved one while no
-    /// new shift has been pasted.
+    /// The layout learned from the picked shift, or the saved one while
+    /// nothing is picked.
     pub fn sheet_layout(&self) -> Result<SheetLayout, String> {
         match self.template.layout() {
             Some(result) => result.map_err(str::to_owned),
-            None if self.template.is_empty() => self
+            None if self.template.untouched() => self
                 .state
                 .as_ref()
                 .and_then(|state| state.sheet_layout.clone())
-                .ok_or_else(|| "Indsæt en vagt fra regnearket først.".to_owned()),
+                .ok_or_else(|| "Vælg en vagt i regnearket først.".to_owned()),
             None => Err("Vælg vagtens celler først.".to_owned()),
         }
-    }
-
-    pub fn standard_view(&self) -> Element<'_, Message> {
-        column![
-            text("Standardtider").size(20),
-            text("Bruges når en vagt ikke har egne tider.").size(13),
-            self.standard_fields(),
-        ]
-        .spacing(10)
-        .into()
-    }
-
-    /// The standard time fields without a heading, for the guide's own.
-    pub fn standard_fields(&self) -> Element<'_, Message> {
-        let mut content = column![].spacing(10);
-        content = content
-            .push(text("Standardtid for alle dage").size(14))
-            .push(
-                text_input("F.eks. 6-22", &self.standard_default)
-                    .id(iced::widget::Id::new(STANDARD_DEFAULT_ID))
-                    .on_input(Message::StandardDefault)
-                    .padding(10),
-            )
-            .push(
-                text("Lad en dag stå tom for at bruge tiden ovenfor. Skriv »ingen« for ingen standardtid.")
-                    .size(12),
-            );
-        for (index, day) in [
-            "Mandag", "Tirsdag", "Onsdag", "Torsdag", "Fredag", "Lørdag", "Søndag",
-        ]
-        .iter()
-        .enumerate()
-        {
-            content = content.push(
-                row![
-                    text(*day).width(Length::Fixed(90.0)),
-                    text_input("Brug tiden ovenfor", &self.standard_days[index])
-                        .id(iced::widget::Id::new(STANDARD_DAY_IDS[index]))
-                        .on_input(move |value| Message::StandardDay(index, value))
-                        .padding(10)
-                        .width(Length::Fixed(200.0)),
-                ]
-                .spacing(10),
-            );
-        }
-        content
-            .push(text(self.error.as_deref().unwrap_or("")).size(13))
-            .push(text("Gyldige tider gemmes automatisk.").size(12))
-            .into()
     }
 
     /// Show the absence words of a state about to replace `self.state`,
@@ -643,7 +606,7 @@ impl SetupUi {
         if mapping.excluded {
             return column![
                 heading,
-                text("Kalenderen er udeladt, så dens vagter overføres ikke."),
+                text("Udeladt – overføres ikke."),
                 row![quiet_button(
                     "Medtag igen",
                     Message::Action("edit", json!({"source": source_id, "excluded": false})),
@@ -699,10 +662,6 @@ impl SetupUi {
         column![
             heading,
             flow,
-            text(format!(
-                "Vagter i »{calendar}« overføres til disse personer. Vælg en anden, hvis et navn er forkert."
-            ))
-            .size(13),
             row![quiet_button(
                 "Udelad kalenderen",
                 Message::Action("edit", json!({"source": source_id, "excluded": true})),
@@ -846,28 +805,17 @@ impl SetupUi {
             if self.sheet_file.is_none() && self.link.trim().is_empty() {
                 return content.into();
             }
-            content = content
-                .push(step("2. Hvordan ser en vagt ud for dig?"))
-                .push(
-                    self.template
-                        .view(state.sheet_layout.is_some())
-                        .map(Message::Template),
-                );
+            content = content.push(step("2. Hvad er en vagt?")).push(
+                self.template
+                    .view(state.sheet_layout.is_some())
+                    .map(Message::Template),
+            );
             if self.sheet_layout().is_err() {
                 return content.into();
             }
-            content = content.push(step("3. Tilslut"));
-            if state.sheet_tabs.len() > 1 {
-                content = content.push(
-                    pick_list(
-                        state.sheet_tabs.as_slice(),
-                        self.sheet_tab.as_ref(),
-                        Message::SheetTab,
-                    )
-                    .placeholder("Vælg fanen med vagtplanen"),
-                );
-            }
-            content = content.push(primary_button("Tilslut regneark", Message::ConnectSheets));
+            content = content
+                .push(step("3. Tilslut"))
+                .push(primary_button("Tilslut regneark", Message::ConnectSheets));
         } else {
             content = content
                 .push(text("På PC: TeamUp → ☰ → Settings → Shared").size(12))
@@ -1109,7 +1057,10 @@ fn primary_button<'a>(label: &'a str, message: Message) -> iced::widget::Button<
 
 /// Low-emphasis setup action. Outlined like the quiet buttons in `native.rs`,
 /// so a row of them reads as buttons rather than as labels.
-fn quiet_button<'a>(label: &'a str, message: Message) -> iced::widget::Button<'a, Message> {
+pub(crate) fn quiet_button<'a>(
+    label: &'a str,
+    message: Message,
+) -> iced::widget::Button<'a, Message> {
     button(text(label).size(14))
         .style(crate::widgets::outlined)
         .padding([7, 12])
@@ -1221,7 +1172,6 @@ mod tests {
         SetupState {
             source: "teamup".into(),
             sheet_layout: None,
-            sheet_tabs: vec![],
             standard_times: Default::default(),
             markers: vec![],
             absences: teamup_shift_sync_core::default_absences(),

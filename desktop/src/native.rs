@@ -1,5 +1,6 @@
 //! Native Iced workflow using the Rust core and app-owned browser sessions.
 //! Setup editing remains in the existing application during migration.
+use crate::shift_edit::{self, ShiftTimes};
 use crate::widgets::{shift, step_shift, ShiftRef};
 use crate::{compensation, guide, setup, template, update};
 use chrono::{DateTime, Datelike, Duration, FixedOffset, NaiveDate, TimeZone, Timelike, Utc};
@@ -23,11 +24,11 @@ use teamup_shift_sync_core::{
         redacted_report, BrowserSessions, LiveConfig, LiveDestinations, Service, Setup, Visibility,
     },
     plan_digest, AbsenceReason, ApplyOutcome, ApplyRequest, Outcome, PlanItem, PlanRequest,
-    PlanSystem, SyncState, TransferEvent, TransferOperation,
+    PlanSystem, ShiftEdit, SourceSnapshot, SyncState, TransferEvent, TransferOperation,
 };
 use teamup_shift_sync_gui::{
     files::app_data_dir,
-    preview::build_week,
+    preview::{build_week, date_label, span},
     protocol::{Notice, SettingsLink, Tone, Week},
 };
 use tokio::sync::{Mutex, MutexGuard};
@@ -639,7 +640,9 @@ impl Engine {
                 .and_then(|titles| document.set_markers(&titles)),
             "standard_times" => serde_json::from_value(params)
                 .map_err(|_| {
-                    teamup_shift_sync_core::live::LiveError("Standardtiderne kunne ikke læses.")
+                    teamup_shift_sync_core::live::LiveError(
+                        "Tiderne for vagter uden tid kunne ikke læses.",
+                    )
                 })
                 .and_then(|standard| document.set_standard_times(standard)),
             "absences" => {
@@ -839,7 +842,7 @@ impl Engine {
                 &state,
             )
             .map_err(|_| "Ugens plan kunne ikke beregnes sikkert.".to_owned())?;
-            let week = build_week(
+            let mut week = build_week(
                 &account.planning,
                 &account.helper_names,
                 &account.helper_colors,
@@ -850,6 +853,58 @@ impl Engine {
                 true,
             )
             .map_err(str::to_owned)?;
+            let zone = account.planning.timezone;
+            let edits: BTreeMap<_, _> = source
+                .edits
+                .iter()
+                .map(|edit| (edit.source_key.as_str(), edit))
+                .collect();
+            for block in week.days.iter_mut().flat_map(|day| &mut day.blocks) {
+                if let Some(edit) = edits.get(block.source_key.as_str()) {
+                    block.changed = changed_label(edit, zone);
+                }
+            }
+            let shifts = source
+                .shifts
+                .iter()
+                .map(|shift| {
+                    let key = shift.key();
+                    let edit = edits.get(key.as_str()).map(|edit| (*edit).clone());
+                    let times = ShiftTimes {
+                        starts_at: shift.starts_at,
+                        ends_at: shift.ends_at,
+                        helper_key: shift.helper_key.clone(),
+                        source: edit
+                            .as_ref()
+                            .map_or_else(|| SourceSnapshot::of(shift), |edit| edit.source.clone()),
+                        edit,
+                    };
+                    (key, times)
+                })
+                .collect();
+            let mut helpers: Vec<_> = account
+                .planning
+                .helpers
+                .iter()
+                .map(|(key, helper)| shift_edit::Helper {
+                    key: key.clone(),
+                    name: helper.mithf_name.clone(),
+                })
+                .collect();
+            helpers.sort_by(|a, b| a.name.cmp(&b.name));
+            let choices = shift_edit::Choices {
+                helpers,
+                reasons: AbsenceReason::ALL
+                    .into_iter()
+                    .filter(|reason| {
+                        account
+                            .planning
+                            .absences
+                            .iter()
+                            .any(|m| m.reason == *reason && !m.words.is_empty())
+                    })
+                    .collect(),
+            };
             let digest = plan_digest(&plan)
                 .map_err(|_| "Ugens godkendelse kunne ikke beregnes.".to_owned())?;
             Ok(Preview {
@@ -861,10 +916,32 @@ impl Engine {
                 standard_times: account.standard_times.clone(),
                 markers: account.markers.clone(),
                 items: plan.items.clone(),
+                zone,
+                shifts,
+                choices,
+                editor: None,
+                replaced: source.replaced,
             })
         })
         .await
         .map_err(|_| "Ugens plan kunne ikke indlæses.".to_owned())?
+    }
+    /// Store a shift time changed in the app, or forget it. The week has to
+    /// be fetched again to show and approve it.
+    async fn save_shift(&self, state_path: PathBuf, change: shift_edit::Change) -> Result<()> {
+        tokio::task::spawn_blocking(move || {
+            let mut state = SyncState::open(&state_path)?;
+            match change {
+                shift_edit::Change::Save(edit) => {
+                    state.save_shift_edit(&edit, Utc::now().fixed_offset())
+                }
+                shift_edit::Change::Forget(key) => state.forget_shift_edits(&[key]),
+            }
+        })
+        .await
+        .ok()
+        .and_then(|saved| saved.ok())
+        .ok_or_else(|| "Vagtens tid kunne ikke gemmes.".to_owned())
     }
     /// The last fully verified transfer, if any. Snapshots are only stored
     /// after the final read-back, so this never reports a partial attempt.
@@ -1107,6 +1184,80 @@ struct Preview {
     /// an event into a shift or back, so it revokes approval like standard times.
     markers: Vec<String>,
     items: Vec<PlanItem>,
+    zone: chrono_tz::Tz,
+    /// Every shift as it is, its source and its edit, by source key, for
+    /// Ret vagt.
+    shifts: BTreeMap<String, ShiftTimes>,
+    choices: shift_edit::Choices,
+    /// The open Ret vagt form for the selected shift. View state only.
+    editor: Option<shift_edit::Editor>,
+    /// How many shifts' changes made here a newer source replaced.
+    replaced: usize,
+}
+
+impl Preview {
+    fn close_editor(&mut self) {
+        let shown = self
+            .selected
+            .and_then(|at| shift(&self.week, at))
+            .map(|block| block.source_key.as_str());
+        if self.editor.as_ref().map(|e| e.source_key()) != shown {
+            self.editor = None;
+        }
+    }
+    /// Open, change or close the Ret vagt form. Gem and Brug kildens
+    /// return what to store.
+    fn edit_shift(&mut self, message: shift_edit::Message) -> Option<shift_edit::Change> {
+        match message {
+            shift_edit::Message::Open => {
+                let block = shift(&self.week, self.selected?)?;
+                let times = self.shifts.get(&block.source_key)?;
+                self.editor = Some(shift_edit::Editor::open(
+                    &block.source_key,
+                    times,
+                    self.from,
+                    self.zone,
+                    &self.choices,
+                ));
+                None
+            }
+            shift_edit::Message::Cancel => {
+                self.editor = None;
+                None
+            }
+            message => self.editor.as_mut()?.update(message, self.zone),
+        }
+    }
+}
+
+/// What was changed in the app, and the source's time when that changed.
+fn changed_label(edit: &ShiftEdit, zone: chrono_tz::Tz) -> String {
+    let mut parts = Vec::new();
+    if edit.times.is_some() {
+        parts.push("tid");
+    }
+    if edit.helper_key.is_some() {
+        parts.push("hjælper");
+    }
+    if !edit.sps.is_empty() {
+        parts.push("SPS");
+    }
+    if edit.absence.is_some() {
+        parts.push("fravær");
+    }
+    let mut label = format!("Rettet i appen: {}.", parts.join(", "));
+    if edit.times.is_some() {
+        let times = &edit.source.times;
+        let start = times.starts_at.with_timezone(&zone);
+        let day = date_label(start.date_naive());
+        if times.standard_time {
+            label.push_str(&format!(" Kilden: {day} uden tid."));
+        } else {
+            let span = span(start, times.ends_at.with_timezone(&zone));
+            label.push_str(&format!(" Kilden: {day} {span}."));
+        }
+    }
+    label
 }
 
 #[derive(Clone)]
@@ -1124,6 +1275,9 @@ enum Message {
     SelectShift(Option<ShiftRef>),
     /// Move the selection by this many shifts (arrow keys).
     StepShift(isize),
+    /// The Ret vagt form of the selected shift.
+    EditShift(shift_edit::Message),
+    ShiftSaved(Result<()>),
     SelectSettings(SettingsSection),
     AutosaveStandard(u64),
     Navigate(i64),
@@ -1198,7 +1352,7 @@ const PANEL_WIDTH: f32 = 280.0;
 const HELP: [&str; 5] = [
     "1. Log ind i MitHF og eventuelt DUOS under Udbydere. Login holder, indtil tjenesten selv logger dig ud.",
     "2. Vælg ugen på forsiden, og vælg Se vagtplan.",
-    "3. Løs først advarslerne ved siden af ugen. Vælg en vagt for at se, hvad der sker med den. Rettelser laves i kilden eller i tjenesten, ikke i appen.",
+    "3. Løs først advarslerne ved siden af ugen. Vælg en vagt for at se, hvad der sker med den. Ret vagt ændrer den i appen, indtil kilden selv ændrer det samme.",
     "4. Vælg Godkend ændringer. Hver ændring læses tilbage og bekræftes, før den næste begynder.",
     "Appen sletter aldrig noget i MitHF eller DUOS, og den godkender ikke registreringer for hjælperen.",
 ];
@@ -1493,6 +1647,7 @@ impl NativeApp {
                 | Message::UpdateChecked(_)
                 | Message::UpdateApplied(_)
                 | Message::AutosaveStandard(_)
+                | Message::ShiftSaved(_)
         );
         if matches!(message, Message::UpdateTick) {
             if self.activity == Activity::Update {
@@ -1566,6 +1721,34 @@ impl NativeApp {
         if let Message::SelectShift(at) = message {
             if let Some(preview) = &mut self.preview {
                 preview.selected = at.filter(|&at| shift(&preview.week, at).is_some());
+                preview.close_editor();
+            }
+            return Task::none();
+        }
+        // The form itself is view state. Only Gem and Brug kildens store
+        // anything, so they wait for the busy guard below.
+        if let Message::EditShift(edit) = &message {
+            if !matches!(
+                edit,
+                shift_edit::Message::Save | shift_edit::Message::Revert
+            ) {
+                if let Some(preview) = &mut self.preview {
+                    preview.edit_shift(edit.clone());
+                }
+                return Task::none();
+            }
+        }
+        // Reading the sheet for its example shift only reads and stores
+        // nothing, so it never waits for, or blocks, another operation.
+        if let Message::Setup(setup::Message::ReadSheet(revision)) = message {
+            return self.read_sheet(revision);
+        }
+        if let Message::Setup(setup::Message::SheetRead(revision, result)) = message {
+            if revision == self.setup.sheet_revision {
+                if let Ok(preview) = &result {
+                    self.setup.sheet_tab.clone_from(&preview.tab);
+                }
+                self.setup.template.read(result);
             }
             return Task::none();
         }
@@ -1578,6 +1761,7 @@ impl NativeApp {
         if let Message::StepShift(by) = message {
             if let Some(preview) = &mut self.preview {
                 preview.selected = step_shift(&preview.week, preview.selected, by);
+                preview.close_editor();
             }
             return Task::none();
         }
@@ -1590,8 +1774,15 @@ impl NativeApp {
         let standard_input_during_save = self.activity == Activity::Save
             && matches!(
                 message,
-                Message::Setup(setup::Message::StandardDefault(_))
-                    | Message::Setup(setup::Message::StandardDay(_, _))
+                Message::Setup(
+                    setup::Message::StandardDefault(_)
+                        | setup::Message::StandardDay(_, _)
+                        | setup::Message::UntimedOn(_)
+                        | setup::Message::UntimedDay(..)
+                        | setup::Message::ShowUntimedDays
+                        | setup::Message::OpenTime(_)
+                        | setup::Message::Dial(_)
+                )
             );
         if self.activity != Activity::Idle
             && !completion
@@ -1672,7 +1863,27 @@ impl NativeApp {
                     self.last_verified = label;
                 }
             }
-            Message::Setup(setup::Message::Link(link)) => self.setup.link = link,
+            Message::Setup(setup::Message::Link(link)) => {
+                self.setup.link = link;
+                let sheets = self
+                    .setup
+                    .state
+                    .as_ref()
+                    .is_some_and(|state| state.source == "sheets");
+                if sheets && self.setup.sheet_file.is_none() {
+                    // Read once typing or pasting pauses, not per keystroke.
+                    let revision = self.new_sheet();
+                    if !self.setup.link.trim().is_empty() {
+                        return Task::perform(
+                            async move {
+                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                revision
+                            },
+                            |revision| Message::Setup(setup::Message::ReadSheet(revision)),
+                        );
+                    }
+                }
+            }
             Message::Setup(setup::Message::MarkerDraft(value)) => self.setup.marker_draft = value,
             Message::Setup(setup::Message::AddMarker | setup::Message::RemoveMarker(_)) => {
                 let Some(state) = &self.setup.state else {
@@ -1720,6 +1931,17 @@ impl NativeApp {
                 | setup::Message::IcalShared(_)
                 | setup::Message::IcalSeparator(_)),
             ) => self.setup.update_ical(&message),
+            Message::Setup(
+                message @ (setup::Message::UntimedOn(_)
+                | setup::Message::UntimedDay(..)
+                | setup::Message::ShowUntimedDays
+                | setup::Message::OpenTime(_)
+                | setup::Message::Dial(_)),
+            ) => {
+                if let Some(change) = self.setup.update_untimed(&message) {
+                    return self.update(Message::Setup(change));
+                }
+            }
             Message::Setup(setup::Message::StandardDefault(value)) => {
                 self.setup.standard_default = value;
                 self.setup.error = None;
@@ -1788,10 +2010,19 @@ impl NativeApp {
                     )))
                 });
             }
+            Message::Setup(setup::Message::Template(template::Message::Tab(tab))) => {
+                self.setup.sheet_tab = Some(tab);
+                self.setup.sheet_revision += 1;
+                return self.read_sheet(self.setup.sheet_revision);
+            }
             Message::Setup(setup::Message::Template(message)) => {
                 self.setup.template.update(message);
             }
-            Message::Setup(setup::Message::SelectHelper(_)) => {
+            Message::Setup(
+                setup::Message::SelectHelper(_)
+                | setup::Message::ReadSheet(_)
+                | setup::Message::SheetRead(..),
+            ) => {
                 // Already handled before the busy guard; kept for exhaustiveness.
             }
             Message::Setup(setup::Message::ToggleProvider(id)) => {
@@ -1812,6 +2043,38 @@ impl NativeApp {
             }
             Message::Setup(setup::Message::CopyOrganization) => {
                 // Already handled before the busy guard; kept for exhaustiveness.
+            }
+            Message::EditShift(edit) => {
+                let Some(preview) = &mut self.preview else {
+                    return Task::none();
+                };
+                let Some(change) = preview.edit_shift(edit) else {
+                    return Task::none();
+                };
+                self.activity = Activity::Save;
+                let engine = self.engine.clone();
+                let state_path = preview.state_path.clone();
+                return Task::perform(
+                    async move { engine.save_shift(state_path, change).await },
+                    Message::ShiftSaved,
+                );
+            }
+            Message::ShiftSaved(result) => {
+                if self.activity != Activity::Save {
+                    return Task::none();
+                }
+                self.activity = Activity::Idle;
+                return match result {
+                    // The plan and its approval follow the new time.
+                    Ok(()) => {
+                        self.invalidate();
+                        self.update(Message::Preview)
+                    }
+                    Err(error) => {
+                        self.status = Some(Notice::from_message(Tone::Error, &error));
+                        Task::none()
+                    }
+                };
             }
             Message::DismissStatus
             | Message::SelectShift(_)
@@ -1887,15 +2150,15 @@ impl NativeApp {
                 // Cancelling the dialog keeps what was there.
                 if path.is_some() {
                     self.setup.sheet_file = path;
-                    self.setup.sheet_tab = None;
                     self.setup.link.clear();
+                    let revision = self.new_sheet();
+                    return self.read_sheet(revision);
                 }
             }
             Message::Setup(setup::Message::ClearFile) => {
                 self.setup.sheet_file = None;
-                self.setup.sheet_tab = None;
+                self.new_sheet();
             }
-            Message::Setup(setup::Message::SheetTab(tab)) => self.setup.sheet_tab = Some(tab),
             Message::Setup(setup::Message::Action(action, params)) => {
                 if matches!(action, "source" | "choose_source") {
                     self.helpers_auto_fetch_attempted = false;
@@ -1935,7 +2198,7 @@ impl NativeApp {
                             self.setup.link.clear();
                             self.setup.key.clear();
                             self.setup.sheet_file = None;
-                            self.setup.sheet_tab = None;
+                            self.new_sheet();
                             self.setup.ical_links.clear();
                         }
                         self.setup.load_ical(&state);
@@ -2269,7 +2532,21 @@ impl NativeApp {
                 self.fetch = None;
                 self.activity = Activity::Idle;
                 match result {
-                    Ok(preview) if preview.from == self.monday => self.preview = Some(*preview),
+                    Ok(preview) if preview.from == self.monday => {
+                        if preview.replaced > 0 {
+                            self.status =
+                                Some(Notice::new(
+                                    Tone::Info,
+                                    "Kilden er ændret",
+                                    format!(
+                                    "Kildens nye værdier erstatter rettelser fra appen på {} {}.",
+                                    preview.replaced,
+                                    if preview.replaced == 1 { "vagt" } else { "vagter" }
+                                ),
+                                ));
+                        }
+                        self.preview = Some(*preview);
+                    }
                     Ok(_) => {}
                     Err(e) => self.status = Some(Notice::from_message(Tone::Error, &e)),
                 }
@@ -2505,6 +2782,40 @@ impl NativeApp {
         }
         task
     }
+    /// Forget the sheet read for setup and its picks, and any read still
+    /// running. Returns the revision for reading the next one.
+    fn new_sheet(&mut self) -> u64 {
+        self.setup.sheet_revision += 1;
+        self.setup.sheet_tab = None;
+        self.setup.template = template::Template::default();
+        self.setup.sheet_revision
+    }
+
+    /// Read the chosen file or link for picking the example shift.
+    fn read_sheet(&mut self, revision: u64) -> Task<Message> {
+        use teamup_shift_sync_core::live::SheetSource;
+        if revision != self.setup.sheet_revision {
+            return Task::none();
+        }
+        let source = match &self.setup.sheet_file {
+            Some(path) => SheetSource::File(path.clone()),
+            None if !self.setup.link.trim().is_empty() => {
+                SheetSource::Link(self.setup.link.clone())
+            }
+            None => return Task::none(),
+        };
+        let tab = self.setup.sheet_tab.clone();
+        self.setup.template.reading();
+        Task::perform(
+            async move {
+                teamup_shift_sync_core::live::preview_sheet(&source, tab.as_deref())
+                    .await
+                    .map_err(|error| error.to_string())
+            },
+            move |result| Message::Setup(setup::Message::SheetRead(revision, result)),
+        )
+    }
+
     fn invalidate(&mut self) {
         self.preview = None;
         self.status = None;
@@ -2576,7 +2887,12 @@ impl NativeApp {
             iced::window::close_requests().map(Message::CloseRequested),
             // Arrow keys move through the week's shifts. Only keys no widget
             // took reach this, so typing in a field is never affected.
-            if self.visible_screen() == Screen::Home && self.preview.is_some() {
+            if self.visible_screen() == Screen::Home
+                && self
+                    .preview
+                    .as_ref()
+                    .is_some_and(|preview| preview.editor.is_none())
+            {
                 iced::keyboard::listen().filter_map(shift_key)
             } else {
                 Subscription::none()
@@ -2667,14 +2983,46 @@ impl NativeApp {
                 Some(Message::DismissStatus),
             ));
         }
-        iced::widget::stack![
+        let mut layers = iced::widget::stack![
             base,
             container(notices)
                 .align_right(Length::Fill)
                 .align_bottom(Length::Fill)
                 .padding(20),
-        ]
-        .into()
+        ];
+        // An open time picker dims the page, and a click beside it cancels.
+        let shift_dialog = self
+            .preview
+            .as_ref()
+            .and_then(|preview| preview.editor.as_ref())
+            .filter(|_| screen == Screen::Home)
+            .and_then(|editor| editor.time_dialog())
+            .map(|dialog| {
+                (
+                    dialog.map(Message::EditShift),
+                    Message::EditShift(shift_edit::Message::Dial(
+                        crate::clock::DialMessage::Cancel,
+                    )),
+                )
+            });
+        let setup_dialog = self.setup.time_dialog().map(|dialog| {
+            (
+                dialog.map(Message::Setup),
+                Message::Setup(setup::Message::Dial(crate::clock::DialMessage::Cancel)),
+            )
+        });
+        if let Some((dialog, cancel)) = shift_dialog.or(setup_dialog) {
+            layers = layers.push(iced::widget::opaque(
+                iced::widget::mouse_area(iced::widget::center(iced::widget::opaque(dialog)).style(
+                    |_theme| container::Style {
+                        background: Some(iced::Color::BLACK.scale_alpha(0.5).into()),
+                        ..container::Style::default()
+                    },
+                ))
+                .on_press(cancel),
+            ));
+        }
+        layers.into()
     }
 
     /// Vagtplan and Kompensationsydelse as chips, with Support and
@@ -2912,14 +3260,32 @@ impl NativeApp {
             panel = panel.push(self.reminder_cards());
         }
         if let Some(preview) = &self.preview {
-            let selected = preview
-                .selected
-                .and_then(|at| shift(&preview.week, at).map(super::widgets::shift_details));
+            let selected = preview.selected.and_then(|at| shift(&preview.week, at));
             let has_shifts = preview.week.days.iter().any(|d| !d.blocks.is_empty());
-            if let Some(details) = selected {
-                panel = panel.push(super::widgets::card(
-                    column![text("Valgt vagt").size(12), details].spacing(4),
-                ));
+            if let Some(block) = selected {
+                let mut card = column![
+                    text("Valgt vagt").size(12),
+                    super::widgets::shift_details(block)
+                ]
+                .spacing(4);
+                card = match &preview.editor {
+                    Some(editor) => card.push(
+                        column![
+                            text("Ret vagt").size(14),
+                            editor.view(self.buttons_enabled()).map(Message::EditShift)
+                        ]
+                        .spacing(8)
+                        .padding(iced::Padding::ZERO.top(8)),
+                    ),
+                    None if preview.shifts.contains_key(&block.source_key) => card.push(
+                        container(
+                            self.quiet("Ret vagt", Message::EditShift(shift_edit::Message::Open)),
+                        )
+                        .padding(iced::Padding::ZERO.top(8)),
+                    ),
+                    None => card,
+                };
+                panel = panel.push(super::widgets::card(card));
             } else if has_shifts {
                 panel = panel.push(
                     text(
@@ -2998,7 +3364,7 @@ impl NativeApp {
         let mut sections = row![].spacing(8);
         for (section, label) in [
             (SettingsSection::Helpers, "Hjælpere"),
-            (SettingsSection::StandardTimes, "Standardtider"),
+            (SettingsSection::StandardTimes, crate::untimed::NAME),
             (SettingsSection::Markers, "Markeringer"),
             (SettingsSection::Absences, "Fravær"),
             (SettingsSection::Integrations, "Udbydere"),
@@ -3037,7 +3403,7 @@ impl NativeApp {
             ]
             .spacing(12),
             SettingsSection::StandardTimes => {
-                column![self.setup.standard_view().map(Message::Setup)].spacing(12)
+                column![self.setup.untimed_view().map(Message::Setup)].spacing(12)
             }
             SettingsSection::Markers => {
                 column![self.setup.markers_view().map(Message::Setup)].spacing(12)
@@ -3228,6 +3594,61 @@ mod tests {
         assert_eq!(app.activity, Activity::Idle);
     }
 
+    /// Step 2 shows the sheet as soon as it is chosen. A read that a newer
+    /// choice replaced is dropped, and connecting takes the tab that was read.
+    #[test]
+    fn a_chosen_sheet_is_read_for_picking_and_a_stale_read_is_dropped() {
+        use teamup_shift_sync_core::live::SheetPreview;
+        let mut app = app();
+        let mut state = setup_state("source");
+        state.source = "sheets".into();
+        app.setup.state = Some(state);
+        let preview = |tab: &str, date: &str| SheetPreview {
+            tabs: vec!["Uge".into(), "Tider".into()],
+            tab: Some(tab.into()),
+            cells: vec![vec![date.into()], vec!["Alex".into()], vec!["8-24".into()]],
+        };
+
+        let _ = app.update(Message::Setup(setup::Message::FileChosen(Some(
+            "/tmp/vagtplan.xlsx".into(),
+        ))));
+        let first = app.setup.sheet_revision;
+        // Typing a link replaces the file and its read.
+        let _ = app.update(Message::Setup(setup::Message::ClearFile));
+        let _ = app.update(Message::Setup(setup::Message::Link(
+            "https://example.com/plan.xlsx".into(),
+        )));
+        let _ = app.update(Message::Setup(setup::Message::SheetRead(
+            first,
+            Ok(preview("Uge", "01/11/26")),
+        )));
+        assert_eq!(app.setup.sheet_tab, None, "a stale read is dropped");
+
+        let current = app.setup.sheet_revision;
+        let _ = app.update(Message::Setup(setup::Message::SheetRead(
+            current,
+            Ok(preview("Tider", "02/11/26")),
+        )));
+        assert_eq!(app.setup.sheet_tab.as_deref(), Some("Tider"));
+        for cell in [(0, 0), (1, 0), (2, 0)] {
+            let _ = app.update(Message::Setup(setup::Message::Template(
+                template::Message::Pick(cell.0, cell.1),
+            )));
+        }
+        for _ in 0..2 {
+            let _ = app.update(Message::Setup(setup::Message::Template(
+                template::Message::Skip,
+            )));
+        }
+        assert!(app.setup.sheet_layout().is_ok());
+
+        // Connecting stores the link, so the sheet and its picks are dropped.
+        app.activity = Activity::Setup;
+        let _ = app.update(Message::SetupUpdated(Ok(setup_state("destinations"))));
+        assert!(app.setup.template.untouched());
+        assert_eq!(app.setup.sheet_tab, None);
+    }
+
     #[test]
     fn a_local_setup_edit_keeps_the_screen_still_but_blocks_other_work() {
         let mut app = app();
@@ -3397,6 +3818,11 @@ mod tests {
                 write_item("s", "mithf.create_shift"),
                 write_item("s", "mithf.assign_helper"),
             ],
+            zone: chrono_tz::Europe::Copenhagen,
+            shifts: BTreeMap::new(),
+            choices: Default::default(),
+            editor: None,
+            replaced: 0,
         }
     }
     fn done() -> ApplyDone {
@@ -3673,6 +4099,43 @@ mod tests {
         assert_eq!(app.activity, Activity::Idle);
         let _ = app.update(Message::AutosaveStandard(1));
         assert_eq!(app.activity, Activity::Save);
+    }
+    #[test]
+    fn a_picked_time_saves_like_a_typed_one_even_during_a_save() {
+        use crate::clock::DialMessage;
+        use crate::untimed::{DayMode, Slot};
+        let mut app = app();
+        app.setup.state = Some(setup_state("ready"));
+        let _ = app.update(Message::Setup(setup::Message::UntimedOn(true)));
+        assert_eq!(app.setup.standard_default, "08:00-16:00");
+        assert_eq!(app.standard_revision, 1);
+        // A save is running: the pickers still answer.
+        app.activity = Activity::Save;
+        let end = Slot {
+            day: None,
+            end: true,
+        };
+        let _ = app.update(Message::Setup(setup::Message::OpenTime(Some(end))));
+        assert_eq!(app.setup.open_time.map(|(slot, _)| slot), Some(end));
+        let _ = app.view();
+        for message in [
+            DialMessage::Hour {
+                hour: 22,
+                next: true,
+            },
+            DialMessage::Minute(30),
+        ] {
+            let _ = app.update(Message::Setup(setup::Message::Dial(message)));
+        }
+        // Nothing saves until OK.
+        assert_eq!(app.setup.standard_default, "08:00-16:00");
+        let _ = app.update(Message::Setup(setup::Message::Dial(DialMessage::Confirm)));
+        assert_eq!(app.setup.standard_default, "08:00-22:30");
+        assert_eq!(app.setup.open_time, None);
+        let _ = app.update(Message::Setup(setup::Message::UntimedDay(6, DayMode::Off)));
+        assert_eq!(app.setup.standard_days[6], "ingen");
+        assert_eq!(app.standard_revision, 3);
+        assert!(app.setup.standard_times().validate().is_ok());
     }
     #[test]
     fn an_auto_save_keeps_the_settings_form_mounted() {
@@ -4050,6 +4513,85 @@ mod tests {
         let _ = app.update(Message::Navigate(7));
         assert!(app.preview.is_none());
     }
+    /// Ret vagt is a form beside the selected shift. Gem stores the change
+    /// and fetches the week again, so the approval follows it.
+    #[test]
+    fn ret_vagt_stores_the_change_and_revokes_the_approval() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_path = directory.path().join("sync.sqlite3");
+        let mut app = app();
+        let mut shown = preview(&app, true);
+        shown.state_path = state_path.clone();
+        shown.week = serde_json::from_value(json!({
+            "days": [{"date": "2026-09-14", "label": "man 14. sep", "blocks": [
+                {"helper": "Anna Hjælper", "status": "create", "status_label": "Oprettes",
+                 "minutes_from": 480, "minutes_to": 960, "time_label": "08:00–16:00",
+                 "sps_label": "", "part_label": "",
+                 "continues_before": false, "continues_after": false, "details": []}
+            ]}],
+            "can_apply": true,
+            "apply_summary": "Overfører 1 ny vagt til MitHF."
+        }))
+        .unwrap();
+        shown.week.days[0].blocks[0].source_key = "cal:event:1".into();
+        let at = |value| DateTime::parse_from_rfc3339(value).unwrap();
+        let source = SourceSnapshot {
+            times: teamup_shift_sync_core::SourceTimes {
+                starts_at: at("2026-09-14T08:00:00+02:00"),
+                ends_at: at("2026-09-14T16:00:00+02:00"),
+                standard_time: false,
+            },
+            helper_key: "anna".into(),
+            text: "digest".into(),
+        };
+        shown.shifts.insert(
+            "cal:event:1".into(),
+            ShiftTimes {
+                starts_at: source.times.starts_at,
+                ends_at: source.times.ends_at,
+                helper_key: "anna".into(),
+                source: source.clone(),
+                edit: None,
+            },
+        );
+        app.preview = Some(shown);
+        let first = ShiftRef { day: 0, block: 0 };
+        let _ = app.update(Message::SelectShift(Some(first)));
+        let _ = app.update(Message::EditShift(shift_edit::Message::Open));
+        assert!(app.preview.as_ref().unwrap().editor.is_some());
+        let _ = app.view();
+        // Choosing another shift closes the form.
+        let _ = app.update(Message::SelectShift(None));
+        assert!(app.preview.as_ref().unwrap().editor.is_none());
+        let _ = app.update(Message::SelectShift(Some(first)));
+        let _ = app.update(Message::EditShift(shift_edit::Message::Open));
+        let day = shift_edit::Day(app.monday.succ_opt().unwrap());
+        let _ = app.update(Message::EditShift(shift_edit::Message::Day(day)));
+        let _ = app.update(Message::EditShift(shift_edit::Message::Save));
+        assert_eq!(app.activity, Activity::Save);
+        let saved = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(app.engine.save_shift(
+                state_path.clone(),
+                shift_edit::Change::Save(ShiftEdit {
+                    source_key: "cal:event:1".into(),
+                    source,
+                    times: Some((
+                        at("2026-09-15T08:00:00+02:00"),
+                        at("2026-09-15T16:00:00+02:00"),
+                    )),
+                    helper_key: None,
+                    sps: vec![],
+                    absence: None,
+                }),
+            ));
+        let _ = app.update(Message::ShiftSaved(saved));
+        assert_eq!(app.activity, Activity::Idle);
+        assert!(app.preview.is_none(), "the old approval is gone");
+        let edits = SyncState::open(&state_path).unwrap().shift_edits().unwrap();
+        assert_eq!(edits[0].times.unwrap().0, at("2026-09-15T08:00:00+02:00"));
+    }
     #[test]
     fn verification_time_uses_the_configured_timezone() {
         let utc = DateTime::parse_from_rfc3339("2026-09-20T18:00:00+00:00").unwrap();
@@ -4131,6 +4673,11 @@ mod tests {
             markers: Vec::new(),
             selected: None,
             items: vec![],
+            zone: chrono_tz::Europe::Copenhagen,
+            shifts: BTreeMap::new(),
+            choices: Default::default(),
+            editor: None,
+            replaced: 0,
         });
         let _ = app.view();
         // Dette uge-knappen bærer ingen vægt, når ugen allerede er valgt.

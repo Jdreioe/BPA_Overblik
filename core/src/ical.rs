@@ -138,12 +138,8 @@ impl FeedIssue {
             IssueKind::MultiDay => {
                 format!("{shift} strækker sig over flere hele dage. Giv den egne tider.")
             }
-            IssueKind::NoStandardTime => format!(
-                "{shift} er heldags, og ugedagen har ingen standardtid. Tilføj en tid i Indstillinger."
-            ),
-            IssueKind::InvalidStandardTime => {
-                format!("{shift} har en standardtid, der ikke kan bruges på grund af sommertid.")
-            }
+            IssueKind::NoStandardTime => crate::standard_time::missing_message(&shift, date),
+            IssueKind::InvalidStandardTime => crate::standard_time::clock_change_message(&shift),
             IssueKind::AmbiguousTime => format!(
                 "{shift} har et tidspunkt, der ikke findes eller er tvetydigt på grund af sommertid."
             ),

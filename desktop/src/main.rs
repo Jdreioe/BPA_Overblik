@@ -5,12 +5,15 @@
 //! threads, never on the UI thread.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod clock;
 mod compensation;
 mod guide;
 mod native;
 mod selfcheck;
 mod setup;
+mod shift_edit;
 mod template;
+mod untimed;
 mod update;
 mod widgets;
 

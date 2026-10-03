@@ -13,7 +13,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
-use crate::SourceShift;
+use crate::{ShiftEdit, SourceShift};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {
@@ -206,6 +206,16 @@ impl SyncState {
                 ),
                 [&prefix],
             )?;
+            transaction.execute(
+                &format!(
+                    "INSERT INTO shift_edits (source_key, edit_json, edited_at)
+                     SELECT source_key, edit_json, edited_at FROM other.shift_edits
+                     WHERE {own} ON CONFLICT(source_key) DO UPDATE SET
+                     edit_json = excluded.edit_json, edited_at = excluded.edited_at
+                     WHERE excluded.edited_at > shift_edits.edited_at"
+                ),
+                [&prefix],
+            )?;
             transaction.commit()
         })();
         self.connection.execute("DETACH DATABASE other", [])?;
@@ -293,6 +303,44 @@ impl SyncState {
                  updated_at = excluded.updated_at, last_seen_at = excluded.last_seen_at",
                 params![source_key, comment.id, hash, comment.text, updated_at, observed_at],
             )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Every shift change made in the app. See [`crate::apply_shift_edits`].
+    pub fn shift_edits(&self) -> Result<Vec<ShiftEdit>, StateError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT edit_json FROM shift_edits ORDER BY source_key")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+    }
+
+    /// Save a shift's changes, replacing earlier ones.
+    pub fn save_shift_edit(
+        &self,
+        edit: &ShiftEdit,
+        edited_at: DateTime<FixedOffset>,
+    ) -> Result<(), StateError> {
+        self.connection.execute(
+            "INSERT INTO shift_edits (source_key, edit_json, edited_at) VALUES (?, ?, ?)
+             ON CONFLICT(source_key) DO UPDATE SET edit_json = excluded.edit_json,
+                 edited_at = excluded.edited_at",
+            params![
+                edit.source_key,
+                serde_json::to_string(edit)?,
+                isoformat(edited_at)
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Drop these shifts' edits, so they take the source's values again.
+    pub fn forget_shift_edits(&mut self, source_keys: &[String]) -> Result<(), StateError> {
+        let transaction = self.connection.transaction()?;
+        for key in source_keys {
+            transaction.execute("DELETE FROM shift_edits WHERE source_key = ?", [key])?;
         }
         transaction.commit()?;
         Ok(())
