@@ -19,14 +19,6 @@ defaults still require a policy choice before live submissions.
 The live employee dropdown showed:
 
 | Source helper | DUOS display | Employee number |
-| --- | --- | --- |
-| Bjarne Hougaard | Bjarne Vitting Hougaard | 195071 |
-| Mads Olesen | Mads Olesen | 281593 |
-| Anton Skadhede | Anton Skadhede | 281549 |
-| Jonas Sibast | Jonas Sibast | 281555 |
-| Jeppe Heltboe | Jeppe Heltboe | 281512 |
-| Ninke Hoekmann | Ninke Hoekman | 281501 |
-| Zain Ahmad Alnemr | Zain Alnemr | 281550 |
 
 Do not equate displayed employee numbers with HTML option values without
 reading those values. Stable registration IDs and list completeness still need
