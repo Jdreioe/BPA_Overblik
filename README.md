@@ -74,7 +74,7 @@ uses the ordinary shift type.
 One helper may go by several names, such as `Anna` and `Anna A`: pick the same
 MitHF and DUOS person for each. A spreadsheet helper cell or a shared iCal title
 that names several helpers, as in `Anna / Bo` or `Anna + Bo`, gives each of them
-the shift. The first name keeps the shift's sync history, so adding a second
+the shift. Notes in parentheses, as in `Anna (oplæring)`, are not part of a name. The first name keeps the shift's sync history, so adding a second
 helper beside the first leaves the first one's transfer in place.
 
 The desktop drives an installed Edge, Chrome, Chromium or Brave, or the

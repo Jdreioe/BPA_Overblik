@@ -844,7 +844,7 @@ mod tests {
         let sheet = csv_cells(
             b"21/9/26,22/9/26\n\
               Mandag,Tirsdag\n\
-              Zain / Ninke,Zain + Ninke\n\
+              Zain / Ninke,Zain (ny) + Ninke\n\
               7:30-12,8-16\n",
         )
         .unwrap();

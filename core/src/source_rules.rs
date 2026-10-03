@@ -4,6 +4,9 @@ use regex::Regex;
 
 static NAME_SEPARATOR: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"/|\s\+\s").expect("valid name separator regex"));
+// An unclosed parenthesis runs to the end of the text.
+static NAME_NOTE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\s*\([^)]*(?:\)|$)\s*").expect("valid name note regex"));
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MeetingCategory {
@@ -57,10 +60,13 @@ pub fn marker_titles(titles: &[String]) -> Result<Vec<String>, &'static str> {
 }
 
 /// The helpers a shift names, in order: `Anna / Bo` and `Anna + Bo` are two
-/// helpers working the same shift. Empty and repeated names are dropped.
+/// helpers working the same shift. A note in parentheses, as in
+/// `Anna (oplæring)`, is not part of a name. Empty and repeated names are
+/// dropped.
 pub fn helper_names(text: &str) -> Vec<String> {
+    let text = NAME_NOTE.replace_all(text, " ");
     let mut names: Vec<String> = Vec::new();
-    for name in NAME_SEPARATOR.split(text).map(str::trim) {
+    for name in NAME_SEPARATOR.split(&text).map(str::trim) {
         if !name.is_empty() && !names.iter().any(|seen| words(seen) == words(name)) {
             names.push(name.to_owned());
         }
@@ -108,6 +114,17 @@ mod tests {
         assert_eq!(helper_names("Anna+"), ["Anna+"]);
         assert_eq!(helper_names("Anna / anna / "), ["Anna"]);
         assert!(helper_names(" / ").is_empty());
+    }
+
+    #[test]
+    fn parentheses_are_not_part_of_a_name() {
+        assert_eq!(helper_names("Anna (oplæring)"), ["Anna"]);
+        assert_eq!(helper_names("Anna (ny) Hansen"), ["Anna Hansen"]);
+        assert_eq!(helper_names("Anna (8-12) / Bo (12-16)"), ["Anna", "Bo"]);
+        // A slash inside the parentheses names no one.
+        assert_eq!(helper_names("Anna (Bo/Cai)"), ["Anna"]);
+        assert_eq!(helper_names("Anna (ny"), ["Anna"]);
+        assert!(helper_names("(ledig)").is_empty());
     }
 
     #[test]
