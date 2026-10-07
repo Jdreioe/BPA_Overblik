@@ -3116,25 +3116,16 @@ impl NativeApp {
         } else {
             page.push(text(format!("{}.", self.apply_current)))
         };
-        // The button already says a stop waits for the current change, so
-        // the line beside it only adds that closing the app is just as safe.
         if self.apply_stopping {
             page.push(text(
                 "Stopper, når den igangværende ændring er kontrolleret …",
             ))
         } else {
             page.push(
-                row![
-                    button(text("Stop efter denne ændring"))
-                        .style(iced::widget::button::secondary)
-                        .padding([8, 12])
-                        .on_press(Message::StopApply),
-                    text("Det er også sikkert at lukke appen.").size(13),
-                ]
-                .spacing(12)
-                .align_y(iced::alignment::Vertical::Center)
-                .wrap()
-                .vertical_spacing(6),
+                button(text("Stop efter denne ændring"))
+                    .style(iced::widget::button::secondary)
+                    .padding([8, 12])
+                    .on_press(Message::StopApply),
             )
         }
     }

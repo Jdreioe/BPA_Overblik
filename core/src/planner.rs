@@ -269,7 +269,14 @@ fn plan_shifts(
                     .parse::<i64>()
                     .map_err(|_| PlanningError::InvalidSegmentKey)?
             };
-            if index >= segments.len() as i64 {
+            // Only while MitHF still has that shift: once someone deletes it
+            // there, nothing is left to review. An interrupted write left no
+            // ID to look for, so that part stays up for review.
+            let in_mithf = record
+                .destination_id
+                .as_ref()
+                .is_none_or(|id| request.destination.mithf_shifts.iter().any(|s| &s.id == id));
+            if index >= segments.len() as i64 && in_mithf {
                 let mut retired = item(shift, PlanSystem::Mithf, &record.step_key, Outcome::Review, "A previously synchronized MitHF shift part is no longer in the source; no removal planned", "extra_segment_removed");
                 retired.payload = record.synced_payload.clone();
                 retired.destination_id = record.destination_id.clone();

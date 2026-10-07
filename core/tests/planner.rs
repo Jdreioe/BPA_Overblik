@@ -379,3 +379,77 @@ fn a_shift_naming_several_helpers_waits_for_the_app_and_ignores_the_sources_note
         .collect();
     assert_eq!(duos, [(json!("2"), json!("2026-11-02T13:00:00+01:00"))]);
 }
+
+#[test]
+fn a_leftover_mithf_part_is_reviewed_only_until_it_is_deleted_there() {
+    use serde_json::json;
+    use teamup_shift_sync_core::MitHfShift;
+
+    let config: PlanningConfig = serde_json::from_value(json!({
+        "timezone": "Europe/Copenhagen", "default_helper_count": 1,
+        "duos_arrangement_id": "arrangement", "duos_registration_type": "Almindelig",
+        "helpers": {"helper": {"mithf_name": "Helper", "duos_employee_number": "123"}}
+    }))
+    .unwrap();
+    // The source once split this shift in two; now it is one part.
+    let shift: SourceShift = serde_json::from_value(json!({
+        "calendar_id": "calendar", "event_id": "event", "occurrence_id": "occurrence",
+        "title": "Shift", "helper_key": "helper",
+        "starts_at": "2026-10-06T07:30:00+02:00", "ends_at": "2026-10-06T12:30:00+02:00"
+    }))
+    .unwrap();
+    let now = DateTime::parse_from_rfc3339("2026-10-01T12:00:00+02:00").unwrap();
+    let state = SyncState::open(":memory:").unwrap();
+    state
+        .record_step(
+            &StepRecord {
+                source_key: shift.key(),
+                step_key: "mithf.create_shift#1".into(),
+                status: "verified".into(),
+                destination_id: Some("leftover".into()),
+                source_hash: "old-source".into(),
+                synced_payload: Map::new(),
+                error: None,
+            },
+            now,
+        )
+        .unwrap();
+    let leftover = MitHfShift {
+        id: "leftover".into(),
+        starts_at: DateTime::parse_from_rfc3339("2026-10-06T12:30:00+02:00").unwrap(),
+        ends_at: DateTime::parse_from_rfc3339("2026-10-07T07:30:00+02:00").unwrap(),
+        helper_count: 1,
+        helper_name: Some("Helper".into()),
+        sps_intervals: vec![],
+        meeting_intervals: vec![],
+        sps_record_ids: vec![],
+        meeting_record_ids: vec![],
+        sick: false,
+    };
+    let shifts = [shift];
+    let reviews = |mithf_shifts: Vec<MitHfShift>| {
+        let destination = DestinationSnapshot {
+            mithf_shifts,
+            ..Default::default()
+        };
+        build_plan(
+            &PlanRequest {
+                config: &config,
+                shifts: &shifts,
+                destination: &destination,
+                range_start: DateTime::parse_from_rfc3339("2026-10-05T00:00:00+02:00").unwrap(),
+                range_end: DateTime::parse_from_rfc3339("2026-10-12T00:00:00+02:00").unwrap(),
+                now,
+                live: true,
+            },
+            &state,
+        )
+        .unwrap()
+        .items
+        .iter()
+        .filter(|item| item.reason == "extra_segment_removed")
+        .count()
+    };
+    assert_eq!(reviews(vec![leftover]), 1);
+    assert_eq!(reviews(vec![]), 0);
+}
