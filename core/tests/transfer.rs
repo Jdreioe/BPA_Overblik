@@ -19,6 +19,8 @@ struct MemoryDestinations {
     snapshot: DestinationSnapshot,
     writes: Vec<String>,
     timeout_after_create: bool,
+    timeout_after_duos: bool,
+    reject_duos: bool,
     hang_on_write: bool,
     write_started: std::sync::Arc<std::sync::atomic::AtomicBool>,
     fail_read: Option<usize>,
@@ -69,6 +71,9 @@ impl Destinations for MemoryDestinations {
             Err(StateError::ApplyInProgress)
         ));
         self.writes.push(item.step_key.clone());
+        if item.system == teamup_shift_sync_core::PlanSystem::Duos && self.reject_duos {
+            return Err(io::Error::other("Registration rejected"));
+        }
         self.write_started
             .store(true, std::sync::atomic::Ordering::SeqCst);
         if self.hang_on_write {
@@ -172,6 +177,10 @@ impl Destinations for MemoryDestinations {
         self.snapshot.mithf_shifts = shifts;
         if base == "mithf.create_shift" && self.timeout_after_create {
             self.timeout_after_create = false;
+            return Err(io::Error::other("Response lost"));
+        }
+        if item.system == teamup_shift_sync_core::PlanSystem::Duos && self.timeout_after_duos {
+            self.timeout_after_duos = false;
             return Err(io::Error::other("Response lost"));
         }
         Ok(result)
@@ -661,6 +670,91 @@ fn split_transfers_verify_changed_ids_and_repeat_without_writes() {
 }
 
 #[test]
+fn saved_write_with_lost_response_verifies_and_continues() {
+    for lost_duos in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut adapter = MemoryDestinations {
+            state_path: temp.path().join("sync.sqlite3"),
+            timeout_after_duos: lost_duos,
+            timeout_after_create: !lost_duos,
+            ..Default::default()
+        };
+        let mut request = request();
+        approve(&mut request, &adapter);
+        let plan = runtime()
+            .block_on(apply_plan(
+                request.clone(),
+                adapter.state_path.clone(),
+                &mut adapter,
+                |_| {},
+            ))
+            .expect("a saved operation must be verified even if its response was lost");
+        assert!(plan
+            .items
+            .iter()
+            .all(|item| item.outcome == Outcome::AlreadyMatched));
+        assert_eq!(adapter.snapshot.duos_registrations.len(), 2);
+        assert_eq!(
+            adapter
+                .writes
+                .iter()
+                .filter(|key| key.starts_with("duos."))
+                .count(),
+            2
+        );
+        let state = SyncState::open(&adapter.state_path).unwrap();
+        assert_eq!(
+            state
+                .get_step(&request.shifts[0].key(), "duos.interval:notes:0")
+                .unwrap()
+                .unwrap()
+                .status,
+            "verified"
+        );
+    }
+}
+
+#[test]
+fn rejected_duos_registration_stops_without_claiming_success_or_retrying() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut adapter = MemoryDestinations {
+        state_path: temp.path().join("sync.sqlite3"),
+        reject_duos: true,
+        ..Default::default()
+    };
+    let mut request = request();
+    approve(&mut request, &adapter);
+    let mut verified_duos = 0;
+    let error = runtime().block_on(apply_plan(
+        request.clone(), adapter.state_path.clone(), &mut adapter, |event| {
+            if matches!(event, TransferEvent::Verified(op) if op.system == teamup_shift_sync_core::PlanSystem::Duos) {
+                verified_duos += 1;
+            }
+        }
+    )).unwrap_err();
+    assert!(matches!(error, TransferError::Destination(_)));
+    assert_eq!(verified_duos, 0);
+    assert!(adapter.snapshot.duos_registrations.is_empty());
+    assert_eq!(
+        adapter
+            .writes
+            .iter()
+            .filter(|key| key.starts_with("duos."))
+            .count(),
+        1
+    );
+    let state = SyncState::open(&adapter.state_path).unwrap();
+    assert_eq!(
+        state
+            .get_step(&request.shifts[0].key(), "duos.interval:notes:0")
+            .unwrap()
+            .unwrap()
+            .status,
+        "uncertain"
+    );
+}
+
+#[test]
 fn requested_stop_finishes_readback_and_stops_before_the_next_write() {
     let temp = tempfile::tempdir().unwrap();
     let mut adapter = MemoryDestinations {
@@ -711,6 +805,8 @@ fn lost_create_response_survives_reopening_and_resumes_without_duplicate() {
     let mut adapter = MemoryDestinations {
         state_path: temp.path().join("sync.sqlite3"),
         timeout_after_create: true,
+        // Both the response and the immediate read-back are unavailable.
+        fail_read: Some(3),
         ..Default::default()
     };
     let mut request = request();
@@ -921,11 +1017,16 @@ fn step_record(value: &Value) -> StepRecord {
 fn complete_rust_runs_match_recorded_writes_and_recovery_records() {
     // Frozen at the Python removal cutover: 10 recorded apply traces, less the
     // one that blocked a retry of an unconfirmed create the shift plan now makes.
+    // Lost-response traces expected an immediate stop. The tests above now
+    // cover verification in the same run and recovery when read-back fails.
     let oracle: Oracle = serde_json::from_str(include_str!("goldens/approval.json")).unwrap();
     assert!(oracle.traces.len() >= 6);
     let temp = tempfile::tempdir().unwrap();
     let runtime = runtime();
     for (index, trace) in oracle.traces.into_iter().enumerate() {
+        if trace.timeout_after_create {
+            continue;
+        }
         let path = temp.path().join(format!("run-{index}.sqlite3"));
         let state = SyncState::open(&path).unwrap();
         for record in &trace.records_before {

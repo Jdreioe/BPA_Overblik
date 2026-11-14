@@ -17,6 +17,7 @@ use crate::{
 
 /// Adapters must reject incomplete reads. A write may return a changed destination
 /// ID, but a successful response never replaces the runner's fresh read-back.
+/// An error also triggers read-back, since the server may have saved the write.
 /// Adapter errors must not contain credentials or private source content.
 pub trait Destinations {
     type Error: Error + Send + Sync + 'static;
@@ -180,11 +181,13 @@ pub async fn apply_plan_controlled(
         // cannot make an ambiguous request look safe to repeat.
         record(&state, item, "uncertain", item.destination_id.clone()).await?;
         progress(TransferEvent::Uncertain(operation.clone()));
-        let id = destinations
-            .write(item, &snapshot)
-            .await
-            .map_err(destination_error)?
-            .filter(|id| !id.is_empty());
+        // A response error does not mean the write failed. Read back even
+        // after an error, so a saved registration can be verified without
+        // submitting it again or stopping the remaining approved steps.
+        let (id, submission_error) = match destinations.write(item, &snapshot).await {
+            Ok(id) => (id.filter(|id| !id.is_empty()), None),
+            Err(error) => (None, Some(error)),
+        };
         if let Some(id) = &id {
             record(&state, item, "uncertain", Some(id.clone())).await?;
         }
@@ -220,7 +223,12 @@ pub async fn apply_plan_controlled(
             .await
             .map_err(destination_error)?;
         let verified_plan = plan(&state, &request, snapshot).await?;
-        let verified = approved.check_read_back(index, &verified_plan)?;
+        let verified = approved
+            .check_read_back(index, &verified_plan)
+            .map_err(|error| match submission_error {
+                Some(error) => destination_error(error),
+                None => TransferError::Approval(error),
+            })?;
         record(
             &state,
             verified,
