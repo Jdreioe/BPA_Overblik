@@ -373,6 +373,7 @@ pub fn parse_feed(
                 comments: vec![],
                 recurrence_start: repeats.then_some(original),
                 source_version: version(component),
+                teamup_event_changed_at: None,
                 standard_time: all_day,
                 shared_with: Vec::new(),
                 confirmed: false,

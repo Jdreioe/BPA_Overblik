@@ -112,6 +112,10 @@ fn listed(reason: &str, system: PlanSystem) -> Option<(&'static str, &'static st
             "MitHF har hjælperen meldt syg, men vagtplanen har ingen fraværslinje.",
             "Skriv fx »SYG: navn« på vagten, eller fortryd sygemeldingen i MitHF.",
         ),
+        ("acute_supplement_unavailable", _) => (
+            "MitHF tilbød ikke et entydigt akuttillæg for vikarens vagt.",
+            "Kontrollér de tilgængelige tillæg på vagten i MitHF, og hent ugen igen.",
+        ),
         ("absence_removed", _) => (
             "Fraværet står ikke længere i vagtplanen, men hjælperen er stadig meldt syg i MitHF.",
             "Fortryd sygemeldingen i MitHF, og hent ugen igen. Appen fortryder aldrig selv.",

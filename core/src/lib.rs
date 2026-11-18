@@ -42,8 +42,8 @@ pub use state::{ApplyGuard, StateError, StepRecord, SyncState};
 
 pub use planner::{build_plan, reconciliation_range, PlanRequest, PlanningError};
 pub use planning_models::{
-    segment_step, DestinationSnapshot, DuosRegistration, HelperMapping, MitHfShift, Outcome,
-    PlanItem, PlanSystem, PlanningConfig, SyncPlan,
+    segment_step, DestinationSnapshot, DuosRegistration, HelperMapping, MitHfShift,
+    MitHfSupplement, Outcome, PlanItem, PlanSystem, PlanningConfig, SyncPlan,
 };
 
 pub use approval::{payload_digest, plan_digest, ApprovalError, ApprovedPlan, StepAction};

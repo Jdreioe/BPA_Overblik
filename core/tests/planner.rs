@@ -424,6 +424,7 @@ fn a_leftover_mithf_part_is_reviewed_only_until_it_is_deleted_there() {
         meeting_intervals: vec![],
         sps_record_ids: vec![],
         meeting_record_ids: vec![],
+        supplements: vec![],
         sick: false,
     };
     let shifts = [shift];

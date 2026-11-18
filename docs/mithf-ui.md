@@ -79,6 +79,16 @@ also lists `4:4`–`4:13` (Feriebevilling, Ekstra bevilliget timer, Puljetimer,
 Tubeskift, Kurser, PA Timer, Fast hjælper ved oplæring, Egen betalte timer,
 Borger indlagt). Sickness is not a typetime.
 
+## Akut tillæg
+
+The shift detail script sends `a=gemkomp` with `eid` and `valgte`, a
+comma-separated list of all selected supplement IDs. `ekstra[eid].tillaeg`
+lists the available IDs, names and whether each is selected. The calendar
+recognizes the acute supplement by `akut` in its name. The importer adds the
+unique matching ID to the current selection and reads the shift back after
+saving. This contract was checked by reading the calendar script on
+2026-11-18.
+
 ## Still requires verification
 
 On 2026-09-23, Jonas reported a successful live time edit on a 24-hour shift

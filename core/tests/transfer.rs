@@ -16,6 +16,7 @@ use teamup_shift_sync_core::{
 
 #[derive(Default)]
 struct MemoryDestinations {
+    offer_acute_supplement: bool,
     snapshot: DestinationSnapshot,
     writes: Vec<String>,
     timeout_after_create: bool,
@@ -106,6 +107,7 @@ impl Destinations for MemoryDestinations {
                         meeting_intervals: vec![],
                         sps_record_ids: vec![],
                         meeting_record_ids: vec![],
+                        supplements: vec![],
                         sick: false,
                     });
                 }
@@ -118,6 +120,16 @@ impl Destinations for MemoryDestinations {
                     .unwrap();
                 shift.id = format!("booked-{}", shift.id);
                 shift.helper_name = Some(payload["helper_name"].as_str().unwrap().into());
+                if self.offer_acute_supplement && shift.helper_name.as_deref() == Some("Anna Holm")
+                {
+                    shift
+                        .supplements
+                        .push(teamup_shift_sync_core::MitHfSupplement {
+                            id: "7".into(),
+                            name: "Akut tillæg".into(),
+                            selected: false,
+                        });
+                }
                 Some(shift.id.clone())
             }
             "mithf.set_sps" => {
@@ -137,6 +149,22 @@ impl Destinations for MemoryDestinations {
                     starts_at: moment(payload["starts_at"].as_str().unwrap()),
                     ends_at: moment(payload["ends_at"].as_str().unwrap()),
                 }];
+                Some(shift.id.clone())
+            }
+            "mithf.set_acute_supplement" => {
+                let shift = shifts
+                    .iter_mut()
+                    .find(|s| Some(&s.id) == item.destination_id.as_ref())
+                    .unwrap();
+                assert!(!shift.sick);
+                assert_eq!(shift.helper_name.as_deref(), Some("Anna Holm"));
+                let supplement = shift
+                    .supplements
+                    .iter_mut()
+                    .find(|s| s.name == "Akut tillæg")
+                    .unwrap();
+                assert!(!supplement.selected);
+                supplement.selected = true;
                 Some(shift.id.clone())
             }
             "mithf.report_sick" => {
@@ -543,6 +571,7 @@ fn a_hand_entered_shift_is_shortened_before_another_helper_takes_its_hours() {
             meeting_intervals: vec![],
             sps_record_ids: vec![],
             meeting_record_ids: vec![],
+            supplements: vec![],
             sick: false,
         });
         let mut request = request();
@@ -1290,6 +1319,125 @@ fn an_absence_added_after_transfer_turns_the_booked_shift_sick() {
         .find(|s| s.sick)
         .unwrap();
     assert_eq!(sick.id, booked);
+}
+
+#[test]
+fn acute_supplement_uses_the_previous_days_local_cutoff_and_the_description() {
+    let temp = tempfile::tempdir().unwrap();
+    let adapter = MemoryDestinations {
+        state_path: temp.path().join("sync.sqlite3"),
+        ..Default::default()
+    };
+    let mut request = absence_request("Besked om vagten\r\n  SyG \t:   ANNA  ");
+    request.range_start = moment("2026-10-26T00:00:00+01:00");
+    request.range_end = moment("2026-10-27T00:00:00+01:00");
+    request.now = request.range_end;
+    request.shifts[0].starts_at = moment("2026-10-26T08:00:00+01:00");
+    request.shifts[0].ends_at = moment("2026-10-26T16:00:00+01:00");
+    let has_supplement = |request: &ApplyRequest| {
+        preview_plan(request, &adapter)
+            .items
+            .iter()
+            .any(|item| item.step_key.starts_with("mithf.set_acute_supplement"))
+    };
+
+    for (changed, expected) in [
+        (None, false),
+        (Some("2026-10-24T18:00:00Z"), false),
+        (Some("2026-10-25T11:59:59Z"), false),
+        (Some("2026-10-25T12:00:00Z"), false),
+        (Some("2026-10-25T12:00:01Z"), true),
+        (Some("2026-10-26T06:00:00Z"), true),
+        (Some("2026-10-26T07:00:00Z"), true),
+        (Some("2026-10-26T07:00:01Z"), false),
+    ] {
+        request.shifts[0].teamup_event_changed_at = changed.map(moment);
+        assert_eq!(has_supplement(&request), expected, "{changed:?}");
+    }
+
+    request.shifts[0].teamup_event_changed_at = Some(moment("2026-10-25T15:00:00Z"));
+    request.shifts[0].notes = "Barn syg: Anna".into();
+    assert!(!has_supplement(&request));
+
+    request.shifts[0].notes.clear();
+    let updated_at = request.shifts[0].teamup_event_changed_at;
+    request.shifts[0]
+        .comments
+        .push(teamup_shift_sync_core::SourceComment {
+            id: "comment".into(),
+            text: "SYG: Anna".into(),
+            updated_at,
+        });
+    assert!(!has_supplement(&request));
+}
+
+#[test]
+fn late_partial_cover_gets_an_acute_supplement_on_each_worked_part_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut adapter = MemoryDestinations {
+        state_path: temp.path().join("sync.sqlite3"),
+        ..Default::default()
+    };
+    let mut request = absence_request("sYg   12-16 :  Anna\nuni 12-13 & 14-15");
+    request.shifts[0].teamup_event_changed_at = Some(moment("2026-09-13T11:01:00Z"));
+    // Supply the MitHF catalog only when Anna is booked, as it can be
+    // unavailable on an open shift before the helper is assigned.
+    adapter.offer_acute_supplement = true;
+    apply(&mut request, &mut adapter);
+    let writes: Vec<_> = adapter
+        .writes
+        .iter()
+        .filter(|key| key.starts_with("mithf.set_acute_supplement"))
+        .collect();
+    assert_eq!(
+        writes,
+        [
+            "mithf.set_acute_supplement#2",
+            "mithf.set_acute_supplement#3"
+        ]
+    );
+    let receiving: Vec<_> = adapter
+        .snapshot
+        .mithf_shifts
+        .iter()
+        .filter(|shift| {
+            shift
+                .supplements
+                .iter()
+                .any(|supplement| supplement.selected)
+        })
+        .map(|shift| (shift.starts_at, shift.ends_at, shift.helper_name.as_deref()))
+        .collect();
+    assert_eq!(
+        receiving,
+        [
+            (
+                moment("2026-09-14T12:00:00+02:00"),
+                moment("2026-09-14T14:00:00+02:00"),
+                Some("Anna Holm")
+            ),
+            (
+                moment("2026-09-14T14:00:00+02:00"),
+                moment("2026-09-14T16:00:00+02:00"),
+                Some("Anna Holm")
+            ),
+        ]
+    );
+    adapter.writes.clear();
+    apply(&mut request, &mut adapter);
+    assert!(adapter.writes.is_empty());
+
+    // A booked substitute whose account does not offer the supplement needs review.
+    for shift in &mut adapter.snapshot.mithf_shifts {
+        shift.supplements.clear();
+    }
+    assert_eq!(
+        review_reasons(&request, &adapter),
+        [
+            "acute_supplement_unavailable",
+            "acute_supplement_unavailable"
+        ]
+    );
 }
 
 #[test]

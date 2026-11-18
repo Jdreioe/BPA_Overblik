@@ -466,15 +466,52 @@ fn parse_occurrence(config: &LiveConfig, raw: &Value) -> Result<SourceShift, Liv
         } else {
             Some(id(&raw["version"])?)
         },
+        teamup_event_changed_at: event_changed_at(raw, config.planning.timezone),
         standard_time: false,
         shared_with: Vec::new(),
         confirmed: false,
     })
 }
 
+fn event_changed_at(raw: &Value, zone: chrono_tz::Tz) -> Option<DateTime<FixedOffset>> {
+    let updated = &raw["update_dt"];
+    let changed = if updated.is_null() {
+        &raw["creation_dt"]
+    } else {
+        updated
+    };
+    // Metadata is optional for normal shift imports. An unreadable update
+    // cannot establish a takeover time and must not fall back to creation.
+    timestamp(changed, zone).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_the_event_update_or_creation_time() {
+        let zone = chrono_tz::Europe::Copenhagen;
+        let mut event = json!({
+            "creation_dt": "2026-09-01T08:00:00Z",
+            "update_dt": "2026-09-13T11:05:00Z",
+        });
+        let changed_at = |event: &Value| event_changed_at(event, zone).map(|t| t.to_rfc3339());
+        assert_eq!(
+            changed_at(&event).as_deref(),
+            Some("2026-09-13T11:05:00+00:00")
+        );
+
+        event["update_dt"] = Value::Null;
+        assert_eq!(
+            changed_at(&event).as_deref(),
+            Some("2026-09-01T08:00:00+00:00")
+        );
+
+        event["update_dt"] = json!("unknown");
+        assert_eq!(changed_at(&event), None);
+        assert_eq!(changed_at(&json!({})), None);
+    }
 
     fn all_day(start: &str, end: &str) -> SourceShift {
         SourceShift {
@@ -489,6 +526,7 @@ mod tests {
             comments: vec![],
             recurrence_start: None,
             source_version: None,
+            teamup_event_changed_at: None,
             standard_time: false,
             shared_with: Vec::new(),
             confirmed: false,

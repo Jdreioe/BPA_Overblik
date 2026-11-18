@@ -24,6 +24,9 @@ pub struct SourceShift {
     pub comments: Vec<SourceComment>,
     pub recurrence_start: Option<DateTime<FixedOffset>>,
     pub source_version: Option<String>,
+    /// When TeamUp last updated this event, or created it if never updated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub teamup_event_changed_at: Option<DateTime<FixedOffset>>,
     /// The source supplied no hours, so setup supplied this interval.
     #[serde(default, skip_serializing_if = "is_false")]
     pub standard_time: bool,

@@ -187,6 +187,12 @@ fn detail(item: &PlanItem, destination: &DestinationSnapshot, zone: Tz) -> Resul
         "mithf.set_meeting" if item.outcome == PendingIntegration => {
             "Vagtmøde kræver aflæsning af MitHF.".into()
         }
+        "mithf.set_acute_supplement" => match item.outcome {
+            WouldCreate | WouldUpdate => "Akuttillæg sættes på vikarens vagt.".into(),
+            AlreadyMatched => "Akuttillæg er allerede sat på vikarens vagt.".into(),
+            PendingIntegration => "Akuttillæg kræver aflæsning af MitHF.".into(),
+            _ => String::new(),
+        },
         _ if item.system == PlanSystem::Duos => {
             let (start, end) = bounds(&item.payload, zone)?;
             let label = span(start, end);
@@ -511,13 +517,13 @@ pub fn build_week(
     let can_apply = destination_read && attention.is_empty() && has_writes && !has_blockers;
     let summary = summary(&counts);
     let parts = labels(&counts);
-    let mithf = parts[..6]
+    let mithf = parts[..7]
         .iter()
         .filter(|v| !v.is_empty())
         .cloned()
         .collect::<Vec<_>>()
         .join(", ");
-    let duos = &parts[6];
+    let duos = &parts[7];
     let apply_summary = match (mithf.is_empty(), duos.is_empty()) {
         (false, false) => format!("Overfører {mithf} til MitHF og {duos} til DUOS."),
         (false, true) => format!("Overfører {mithf} til MitHF."),
@@ -588,9 +594,9 @@ pub fn build_week(
 fn plural(count: usize, one: &str, many: &str) -> String {
     format!("{count} {}", if count == 1 { one } else { many })
 }
-// created, updated, sps, assignments, meetings, absences, duos, matched
-fn counts(plan: &SyncPlan) -> Result<[usize; 8]> {
-    let mut counts = [0; 8];
+// created, updated, sps, assignments, meetings, absences, supplements, duos, matched
+fn counts(plan: &SyncPlan) -> Result<[usize; 9]> {
+    let mut counts = [0; 9];
     let mut changed = BTreeSet::new();
     let mut created = BTreeSet::new();
     for item in &plan.items {
@@ -607,7 +613,7 @@ fn counts(plan: &SyncPlan) -> Result<[usize; 8]> {
             "mithf.create_shift" => match item.outcome {
                 Outcome::WouldCreate => counts[0] += 1,
                 Outcome::WouldUpdate => counts[1] += 1,
-                Outcome::AlreadyMatched if !changed.contains(&key) => counts[7] += 1,
+                Outcome::AlreadyMatched if !changed.contains(&key) => counts[8] += 1,
                 _ => {}
             },
             "mithf.set_sps" if writes(item.outcome) => counts[2] += 1,
@@ -616,15 +622,16 @@ fn counts(plan: &SyncPlan) -> Result<[usize; 8]> {
             }
             "mithf.set_meeting" if writes(item.outcome) => counts[4] += 1,
             "mithf.report_sick" if writes(item.outcome) => counts[5] += 1,
+            "mithf.set_acute_supplement" if writes(item.outcome) => counts[6] += 1,
             _ if item.system == PlanSystem::Duos && writes(item.outcome) => {
-                counts[6] += 1;
+                counts[7] += 1;
             }
             _ => {}
         }
     }
     Ok(counts)
 }
-fn labels(counts: &[usize; 8]) -> Vec<String> {
+fn labels(counts: &[usize; 9]) -> Vec<String> {
     [
         ("ny vagt", "nye vagter"),
         ("ændret vagt", "ændrede vagter"),
@@ -632,6 +639,7 @@ fn labels(counts: &[usize; 8]) -> Vec<String> {
         ("hjælpertildeling", "hjælpertildelinger"),
         ("vagtmøde", "vagtmøder"),
         ("fraværsmelding", "fraværsmeldinger"),
+        ("akuttillæg", "akuttillæg"),
         ("registrering", "registreringer"),
         ("vagt", "vagter"),
     ]
@@ -646,7 +654,7 @@ fn labels(counts: &[usize; 8]) -> Vec<String> {
     })
     .collect()
 }
-fn summary(counts: &[usize; 8]) -> Vec<String> {
+fn summary(counts: &[usize; 9]) -> Vec<String> {
     labels(counts)
         .into_iter()
         .enumerate()
@@ -655,8 +663,8 @@ fn summary(counts: &[usize; 8]) -> Vec<String> {
             format!(
                 "{s}{}",
                 match i {
-                    0..=5 => " i MitHF",
-                    6 => " i DUOS",
+                    0..=6 => " i MitHF",
+                    7 => " i DUOS",
                     _ => " er allerede på plads",
                 }
             )
