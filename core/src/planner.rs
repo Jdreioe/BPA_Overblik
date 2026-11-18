@@ -14,7 +14,7 @@ use crate::{
     AbsencePart, AbsenceReason, DestinationSnapshot, DuosAbsence, DuosRegistration, HelperMapping,
     MitHfShift, Outcome, ParseIssue, ParseIssueCode, PlanItem, PlanSystem, PlanningConfig,
     SourceShift, SourceTitle, SpsInterval, StateError, StepRecord, SyncPlan, SyncState,
-    TimeInterval,
+    TimeInterval, NOTES_SOURCE_ID,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -387,6 +387,7 @@ struct Segment<'a> {
     /// set, of the planned helper MitHF reports absent for it.
     helper: &'a str,
     absence: Option<AbsenceReason>,
+    covered_absence: Option<&'a AbsencePart>,
 }
 
 /// Without absences, one segment per SPS interval as before. An absence
@@ -407,6 +408,7 @@ fn split_segments<'a>(
             all,
             &shift.helper_key,
             blocked,
+            None,
         );
     }
     let mut runs = Vec::new();
@@ -436,11 +438,12 @@ fn split_segments<'a>(
                     intervals: vec![],
                     helper: &shift.helper_key,
                     absence: Some(part.reason),
+                    covered_absence: None,
                 });
                 part.substitute.as_str()
             }
         };
-        segments.extend(worked(starts_at, ends_at, inside, helper, false));
+        segments.extend(worked(starts_at, ends_at, inside, helper, false, part));
     }
     segments
 }
@@ -453,6 +456,7 @@ fn worked<'a>(
     intervals: Vec<&'a SpsInterval>,
     helper: &'a str,
     blocked: bool,
+    covered_absence: Option<&'a AbsencePart>,
 ) -> Vec<Segment<'a>> {
     if blocked || intervals.len() <= 1 {
         return vec![Segment {
@@ -461,6 +465,7 @@ fn worked<'a>(
             intervals,
             helper,
             absence: None,
+            covered_absence,
         }];
     }
     intervals
@@ -479,8 +484,29 @@ fn worked<'a>(
             intervals: vec![*sps],
             helper,
             absence: None,
+            covered_absence,
         })
         .collect()
+}
+
+/// TeamUp only exposes the event's last change, so count it as a takeover
+/// when it falls after 13:00 the previous local day and by the start of cover.
+fn is_acute_takeover(shift: &SourceShift, part: &AbsencePart, zone: chrono_tz::Tz) -> bool {
+    if part.reason != AbsenceReason::OwnIllness || part.source_id != NOTES_SOURCE_ID {
+        return false;
+    }
+    let Some(changed) = shift.teamup_event_changed_at else {
+        return false;
+    };
+    let cutoff = part
+        .interval
+        .starts_at
+        .with_timezone(&zone)
+        .date_naive()
+        .pred_opt()
+        .and_then(|day| day.and_hms_opt(13, 0, 0));
+    changed <= part.interval.starts_at
+        && cutoff.is_some_and(|cutoff| changed.with_timezone(&zone).naive_local() > cutoff)
 }
 
 /// An SPS interval that an absence boundary cuts through cannot be given to
@@ -820,6 +846,52 @@ fn plan_segment(
         removed.payload = record.synced_payload.clone();
         removed.destination_id = record.destination_id.clone();
         items.push(removed);
+    }
+
+    if segment
+        .covered_absence
+        .is_some_and(|part| is_acute_takeover(shift, part, request.config.timezone))
+    {
+        let supplement = matched.and_then(MitHfShift::acute_supplement);
+        let (outcome, summary, reason) = if reconciled.outcome == Conflicted
+            || assignment_outcome == Conflicted
+        {
+            (
+                Conflicted,
+                "The acute supplement is blocked by the shift or helper conflict",
+                "blocked_by_shift",
+            )
+        } else if assignment_outcome == AlreadyMatched && supplement.is_some_and(|s| s.selected) {
+            (AlreadyMatched, "MitHF already has the acute supplement", "")
+        } else if !request.live {
+            (
+                PendingIntegration,
+                "The acute supplement requires reading MitHF",
+                "offline_preview",
+            )
+        } else if assignment_outcome == AlreadyMatched && supplement.is_none() {
+            (
+                Review,
+                "MitHF did not offer a unique acute supplement for the shift",
+                "acute_supplement_unavailable",
+            )
+        } else {
+            (
+                WouldCreate,
+                "Would add the acute supplement to the substitute's shift",
+                "",
+            )
+        };
+        let mut acute = item(
+            shift,
+            PlanSystem::Mithf,
+            &segment_step("mithf.set_acute_supplement", index),
+            outcome,
+            summary,
+            reason,
+        );
+        acute.destination_id = destination_id.clone();
+        items.push(acute);
     }
 
     if let (SourceTitle::Meeting(category), None) =

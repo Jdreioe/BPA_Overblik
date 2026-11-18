@@ -50,9 +50,30 @@ pub struct MitHfShift {
     pub sps_record_ids: Vec<String>,
     #[serde(default)]
     pub meeting_record_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supplements: Vec<MitHfSupplement>,
     /// MitHF has reported the booked helper sick on this shift.
     #[serde(default)]
     pub sick: bool,
+}
+
+impl MitHfShift {
+    /// Match the acute supplement the same way as the MitHF calendar.
+    pub(crate) fn acute_supplement(&self) -> Option<&MitHfSupplement> {
+        let mut acute = self
+            .supplements
+            .iter()
+            .filter(|s| s.name.to_lowercase().contains("akut"));
+        let supplement = acute.next()?;
+        acute.next().is_none().then_some(supplement)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MitHfSupplement {
+    pub id: String,
+    pub name: String,
+    pub selected: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

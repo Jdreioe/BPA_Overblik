@@ -292,6 +292,7 @@ mod tests {
             comments: vec![],
             recurrence_start: None,
             source_version: None,
+            teamup_event_changed_at: None,
             standard_time,
             shared_with: Vec::new(),
             confirmed: false,

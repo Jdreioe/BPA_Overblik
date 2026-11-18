@@ -281,6 +281,15 @@ The absent helper's missed SPS hours use the type chosen for that reason
 under **Fravær**, or are not registered. The chosen type must be one the DUOS
 arrangement offers.
 
+For an own-illness line such as `SYG: Anna` in a TeamUp event description,
+the preview includes **Akut tillæg** on the substitute's MitHF shift if
+TeamUp last changed the event after 13:00 on the day before cover starts and
+by the start of that cover. The cutoff uses the calendar's local time. An
+event created with the line and never edited uses its creation time. TeamUp
+reports when the event changed, so an unrelated edit within that window can
+be mistaken for the takeover. For partial absences, the supplement covers
+only the substitute's hours. The app leaves existing supplements in place.
+
 Lines that start with a marking word but cannot be read are never ignored.
 The same goes for an unknown or ambiguous name, the shift's own helper, a time
 outside the shift, overlapping absences or an SPS interval cut by an absence.

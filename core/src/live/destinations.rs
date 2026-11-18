@@ -11,7 +11,8 @@ use super::{
     BrowserSessions, LiveConfig, LiveError, Service, INVALID,
 };
 use crate::{
-    DestinationSnapshot, DuosRegistration, MitHfShift, PlanItem, PlanSystem, TimeInterval,
+    DestinationSnapshot, DuosRegistration, MitHfShift, MitHfSupplement, PlanItem, PlanSystem,
+    TimeInterval,
 };
 
 /// How many shifts one MitHF extras call asks about. The endpoint takes a
@@ -465,9 +466,20 @@ fn mithf_shift(
         meeting_intervals: vec![],
         sps_record_ids: vec![],
         meeting_record_ids: vec![],
+        supplements: vec![],
         sick: row.get("syge").map(truthy).ok_or(INVALID)?,
     };
-    for record in rows(&extra["ekstra"][identifier]["paa"])? {
+    let extras = &extra["ekstra"][identifier];
+    if let Some(supplements) = extras.get("tillaeg").filter(|v| !v.is_null()) {
+        for supplement in rows(supplements)? {
+            shift.supplements.push(MitHfSupplement {
+                id: id(&supplement["id"])?,
+                name: text(&supplement["navn"])?.into(),
+                selected: supplement["valgt"].as_bool().ok_or(INVALID)?,
+            });
+        }
+    }
+    for record in rows(&extras["paa"])? {
         let name = record["navn"].as_str().unwrap_or("");
         if !matches!(name, "SPS timer" | "Vagtmøde") {
             continue;
@@ -614,6 +626,13 @@ impl<'a> LiveDestinations<'a> {
             "mithf.set_sps" | "mithf.set_meeting" => {
                 self.set_category(item, existing, step == "mithf.set_meeting")
                     .await
+            }
+            "mithf.set_acute_supplement" => {
+                let request = acute_supplement_request(existing)?;
+                self.browser
+                    .submit(request.service, request.action, request.body)
+                    .await?;
+                Ok(Some(existing.id.clone()))
             }
             "mithf.report_sick" => self.report_sick(item, existing).await,
             _ => Err(LiveError("Handlingen er ikke en understøttet overførsel.")),
@@ -819,6 +838,33 @@ fn assign_request(
             "eid": existing.id, "vid": helper,
             "dato": existing.starts_at.date_naive().to_string(), "start": clock(existing.starts_at),
         }),
+    })
+}
+
+fn acute_supplement_request(existing: &MitHfShift) -> Result<Request, LiveError> {
+    if existing.sick || existing.helper_name.is_none() {
+        return Err(LiveError(
+            "Vikaren skal være booket i MitHF, før akuttillæg kan sættes.",
+        ));
+    }
+    let acute = existing.acute_supplement().ok_or(LiveError(
+        "MitHF tilbød ikke et entydigt akuttillæg for vagten.",
+    ))?;
+    // gemkomp replaces the full selection. Add the acute supplement alongside
+    // anything already selected on this shift.
+    let selected = existing
+        .supplements
+        .iter()
+        .filter(|supplement| supplement.selected || supplement.id == acute.id)
+        .map(|supplement| supplement.id.as_str())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(",");
+    Ok(Request {
+        service: Service::Mithf,
+        action: "gemkomp",
+        body: json!({"eid": existing.id, "valgte": selected}),
     })
 }
 
@@ -1130,6 +1176,29 @@ mod tests {
     }
 
     #[test]
+    fn acute_supplement_keeps_other_selected_supplements() {
+        let config = config("ord-1", json!({}));
+        let row = json!({
+            "startFaktisk": "2026-09-14", "start": "08:00", "slutdato": "2026-09-14", "slut": "16:00",
+            "daekket": 1, "syge": false, "navn": "Anna Hansen",
+        });
+        let extra = json!({"ekstra": {"11": {"paa": [], "tillaeg": [
+            {"id": "7", "navn": "Akut tillæg", "valgt": false},
+            {"id": "9", "navn": "Delt tjeneste", "valgt": true},
+            {"id": "12", "navn": "Andet tillæg", "valgt": false},
+        ]}}});
+        let mut shift = mithf_shift(&config, "11", &row, &extra).unwrap();
+        assert!(!shift.acute_supplement().unwrap().selected);
+
+        let request = acute_supplement_request(&shift).unwrap();
+        assert_eq!(request.action, "gemkomp");
+        assert_eq!(request.body, json!({"eid": "11", "valgte": "7,9"}));
+
+        shift.supplements.remove(0);
+        assert!(acute_supplement_request(&shift).is_err());
+    }
+
+    #[test]
     fn write_requests_match_recorded_cases() {
         // Frozen at the Python removal cutover: 12 supported operations.
         let cases: Vec<Case> =
@@ -1180,6 +1249,7 @@ mod tests {
                 meeting_intervals: vec![],
                 sps_record_ids: records.iter().map(|id| (*id).to_owned()).collect(),
                 meeting_record_ids: vec![],
+                supplements: vec![],
                 sick: false,
             }],
             duos_registrations: vec![],

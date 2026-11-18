@@ -627,6 +627,7 @@ fn read_shift(
                     comments: vec![],
                     recurrence_start: None,
                     source_version: None,
+                    teamup_event_changed_at: None,
                     standard_time: use_standard,
                     shared_with: Vec::new(),
                     confirmed: false,
